@@ -1,4 +1,4 @@
-//! chatterbox — client: one TCP connection per command.
+//! chattrs — client: one TCP connection per command.
 //!
 //! Every command opens a fresh connection, sends a `hello`, then the command
 //! frame, and reads the response. `watch` keeps its connection open and
@@ -95,7 +95,7 @@ pub async fn watch(
             Outbound::Message { id, session, agent, body, ts, reply_to } => {
                 on_message(&model::Message { id, session, agent, body, ts, reply_to });
             }
-            Outbound::Error { message } => eprintln!("chatterbox: {message}"),
+            Outbound::Error { message } => eprintln!("chattrs: {message}"),
             _ => {}
         }
     }

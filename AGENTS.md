@@ -1,9 +1,9 @@
-# AGENTS.md — chatterbox contributor guide
+# AGENTS.md — chattrs contributor guide
 
-`chatterbox` is a distributed client/server messaging system for cross-agent
+`chattrs` is a distributed client/server messaging system for cross-agent
 coordination, written in Rust. One broker, many agents (`claude`, `muse`,
 `codex`, scripts) joining named sessions over a line-JSON TCP protocol.
-Crate and binary are both called `chatterbox`.
+Crate and binary are both called `chattrs`.
 
 Start with [README.md](README.md) for what it is and the wire protocol, then
 this file for commands and architecture.
@@ -11,7 +11,7 @@ this file for commands and architecture.
 ## Commands
 
 ```bash
-cargo build   # refreshes target/debug/chatterbox
+cargo build   # refreshes target/debug/chattrs
 cargo test    # unit + TCP integration tests, must be green with zero warnings
 cargo clippy --all-targets -- -D warnings   # lint gate, same as CI
 # Toolchain is pinned in rust-toolchain.toml; rustup installs it on first use.
@@ -20,9 +20,9 @@ cargo clippy --all-targets -- -D warnings   # lint gate, same as CI
 Run a broker and exercise the client against an ephemeral port:
 
 ```bash
-target/debug/chatterbox serve --listen 127.0.0.1:47654
-target/debug/chatterbox send --server 127.0.0.1:47654 --agent claude "hi"
-target/debug/chatterbox list --server 127.0.0.1:47654 --json
+target/debug/chattrs serve --listen 127.0.0.1:47654
+target/debug/chattrs send --server 127.0.0.1:47654 --agent claude "hi"
+target/debug/chattrs list --server 127.0.0.1:47654 --json
 ```
 
 ## Architecture

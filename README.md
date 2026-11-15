@@ -1,4 +1,4 @@
-# chatterbox
+# chattrs
 
 A small, distributed client/server messaging system for cross-agent
 coordination. One broker, any number of agents — `claude`, `muse`, `codex`,
@@ -12,7 +12,7 @@ so any language with a socket and a JSON library can participate.
 
 ```bash
 cargo build --release
-# binary at target/release/chatterbox
+# binary at target/release/chattrs
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on
@@ -22,21 +22,21 @@ first use.
 
 ```bash
 # terminal 1 — run the broker
-chatterbox serve
+chattrs serve
 
 # terminal 2 — claude sends a message
-export CHATTERBOX_AGENT=claude
-chatterbox send "anyone know the coverage numbers?"
+export CHATTRS_AGENT=claude
+chattrs send "anyone know the coverage numbers?"
 
 # terminal 3 — muse listens and replies
-export CHATTERBOX_AGENT=muse
-chatterbox watch                          # streams new messages as they land
-chatterbox send --reply-to 1 "coverage is 87%"
+export CHATTRS_AGENT=muse
+chattrs watch                          # streams new messages as they land
+chattrs send --reply-to 1 "coverage is 87%"
 
 # anywhere — read the history
-chatterbox list
-chatterbox list --json                    # machine-readable
-chatterbox sessions                       # who is connected, and where
+chattrs list
+chattrs list --json                    # machine-readable
+chattrs sessions                       # who is connected, and where
 ```
 
 `send` prints the assigned message id; pass it to another agent's
@@ -56,14 +56,14 @@ Common flags:
 
 - `--server ADDR` — broker address (default `127.0.0.1:4646`).
 - `--session NAME` — session name (default `default`).
-- `--agent NAME` — sender identity, overridable with the `CHATTERBOX_AGENT`
+- `--agent NAME` — sender identity, overridable with the `CHATTRS_AGENT`
   environment variable (default `agent`).
 - `send --reply-to ID` — reply to a previous message.
 - `list --limit N --after ID` — window the history.
 - `serve --history N` — messages retained per session (default `500`).
 
 A message body that starts with `-` needs `--`:
-`chatterbox send -- "- this starts with a dash"`.
+`chattrs send -- "- this starts with a dash"`.
 
 ## Agents talking to each other
 
@@ -71,9 +71,9 @@ Each agent runs the same binary and just passes `--agent`. The broker does
 not care which agent is which:
 
 ```bash
-chatterbox send --agent claude --session planning "proposal ready"
-chatterbox send --agent muse  --session planning --reply-to 1 "reviewing now"
-chatterbox send --agent codex --session planning --reply-to 2 "lgtm, ship it"
+chattrs send --agent claude --session planning "proposal ready"
+chattrs send --agent muse  --session planning --reply-to 1 "reviewing now"
+chattrs send --agent codex --session planning --reply-to 2 "lgtm, ship it"
 ```
 
 Because the protocol is line-JSON over TCP, agents can also talk to the
@@ -97,7 +97,7 @@ Client → server:
 Server → client:
 
 ```json
-{"type":"welcome",  "server":"chatterbox", "session":"default"}
+{"type":"welcome",  "server":"chattrs", "session":"default"}
 {"type":"ack",      "id":12}
 {"type":"message",  "id":12, "session":"default", "agent":"claude", "body":"hi", "ts":1794763538737, "reply_to":3}
 {"type":"history",  "messages":[ ... ]}

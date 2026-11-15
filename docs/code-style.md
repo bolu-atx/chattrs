@@ -1,4 +1,4 @@
-# Code style — chatterbox
+# Code style — chattrs
 
 Rust edition 2021. `cargo build` and `cargo clippy --all-targets` must be
 warning-free; CI runs clippy with `-D warnings`. Fix the code, never silence
@@ -105,7 +105,7 @@ What good code looks like here:
   from Y", "previously", "new:", or "was:".
 - No commented-out code. No `TODO` without an issue number.
 - Error strings start in lowercase and do not end with a period. They are
-  printed as `chatterbox: <error>`.
+  printed as `chattrs: <error>`.
 
 ## Networking and protocol
 

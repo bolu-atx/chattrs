@@ -10,7 +10,7 @@ come back reliably. Any agent can message any other.
 
 1. Never block the sender.
 2. Never lose a message.
-3. Agents are one-shot processes. Chatterbox starts them when work arrives.
+3. Agents are one-shot processes. Chattrs starts them when work arrives.
 4. Messages are data, not commands. A task names an adapter, never a shell command.
 5. One Rust binary. SQLite. Nothing else.
 

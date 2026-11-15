@@ -31,7 +31,7 @@ Address = `agent@host`.
 ## Interface
 
 - **API-1** CLI with `--json` for every command. *(N1, N3)*
-- **API-2** `chatterbox mcp`: `send`, `inbox`, `ask`, `reply`, `task`. *(N1, N6)*
+- **API-2** `chattrs mcp`: `send`, `inbox`, `ask`, `reply`, `task`. *(N1, N6)*
 - **API-3** `ask` blocks only the caller, until answer or timeout. *(N6)*
 
 ## Security
@@ -43,7 +43,7 @@ Address = `agent@host`.
 
 ## Ops
 
-- **OPS-1** `chatterbox fleet` shows hosts, runners, tasks by state. *(N3)*
-- **OPS-2** `chatterbox log` shows full history. *(N9)*
+- **OPS-1** `chattrs fleet` shows hosts, runners, tasks by state. *(N3)*
+- **OPS-2** `chattrs log` shows full history. *(N9)*
 
 Limits: ≤10 hosts, macOS + Linux.

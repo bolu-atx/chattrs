@@ -1,4 +1,4 @@
-//! chatterbox — distributed messaging for cross-agent coordination.
+//! chattrs — distributed messaging for cross-agent coordination.
 //!
 //! A thin entry point: parse `cli`, then dispatch to `server` (the broker) or
 //! `client` (send/list/watch/sessions). `model` owns the wire types and
@@ -6,10 +6,10 @@
 //!
 //! Quick start:
 //! ```text
-//! chatterbox serve
-//! chatterbox send --agent claude "anyone there?"
-//! chatterbox list
-//! chatterbox watch --agent muse
+//! chattrs serve
+//! chattrs send --agent claude "anyone there?"
+//! chattrs list
+//! chattrs watch --agent muse
 //! ```
 
 mod cli;
@@ -25,7 +25,7 @@ use cli::{Args, Command};
 async fn main() {
     let args = Args::parse();
     if let Err(e) = run(args).await {
-        eprintln!("chatterbox: {e}");
+        eprintln!("chattrs: {e}");
         std::process::exit(1);
     }
 }

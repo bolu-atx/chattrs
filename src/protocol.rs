@@ -1,4 +1,4 @@
-//! chatterbox — line-delimited JSON framing.
+//! chattrs — line-delimited JSON framing.
 //!
 //! Every frame is one JSON object on its own line, terminated by `\n`. The
 //! framing is plain enough that agents can speak it from any language with a
@@ -9,7 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 /// Name reported in the `welcome` frame.
-pub const SERVER_NAME: &str = "chatterbox";
+pub const SERVER_NAME: &str = "chattrs";
 
 /// Serialize a frame into one JSON line terminated by `\n`.
 pub fn encode<T: Serialize>(frame: &T) -> Result<String, String> {
@@ -57,7 +57,7 @@ mod tests {
             reply_to: None,
         };
         let frames = vec![
-            Outbound::Welcome { server: "chatterbox".into(), session: "default".into() },
+            Outbound::Welcome { server: "chattrs".into(), session: "default".into() },
             Outbound::Ack { id: 1 },
             Outbound::Message {
                 id: 1,

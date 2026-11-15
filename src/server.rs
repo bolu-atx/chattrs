@@ -1,4 +1,4 @@
-//! chatterbox — the broker: sessions, history, presence, and broadcast.
+//! chattrs — the broker: sessions, history, presence, and broadcast.
 //!
 //! One `Broker` owns every session behind a mutex. Each connection runs its
 //! own task: a reader loop parses inbound frames while a writer task flushes
@@ -255,7 +255,7 @@ fn now_ms() -> u64 {
 /// Bind and serve until the process exits.
 pub async fn serve(listen: &str, history_cap: usize) -> Result<(), String> {
     let listener = TcpListener::bind(listen).await.map_err(|e| format!("bind {listen}: {e}"))?;
-    println!("chatterbox: serving on {listen}");
+    println!("chattrs: serving on {listen}");
     let broker = Arc::new(Broker::new(history_cap));
     run_listener(listener, broker).await
 }

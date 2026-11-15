@@ -1,4 +1,4 @@
-//! chatterbox — data model for messages, sessions, and wire frames.
+//! chattrs — data model for messages, sessions, and wire frames.
 //!
 //! This module is pure: types and their serde shapes only. Framing lives in
 //! `protocol`, the broker in `server`, and the client in `client`.

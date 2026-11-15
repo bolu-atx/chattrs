@@ -8,7 +8,7 @@ pub const DEFAULT_SESSION: &str = "default";
 
 /// Distributed messaging for cross-agent coordination.
 #[derive(Parser, Debug)]
-#[command(name = "chatterbox", version)]
+#[command(name = "chattrs", version)]
 pub struct Args {
     #[command(subcommand)]
     pub command: Command,
@@ -51,7 +51,7 @@ pub struct EndpointArgs {
     pub session: String,
 
     /// Sender identity (claude, muse, codex, …).
-    #[arg(long, default_value = "agent", env = "CHATTERBOX_AGENT")]
+    #[arg(long, default_value = "agent", env = "CHATTRS_AGENT")]
     pub agent: String,
 }
 

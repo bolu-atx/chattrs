@@ -1,10 +1,10 @@
 [package]
-name = "chatterbox"
+name = "chattrs"
 version = "0.1.0"
 edition = "2021"
 description = "Distributed client/server messaging for cross-agent coordination"
 license = "MIT"
-repository = "https://github.com/bolu-atx/chatter-box"
+repository = "https://github.com/bolu-atx/chattrs"
 keywords = ["agents", "messaging", "cli"]
 categories = ["command-line-utilities"]
 

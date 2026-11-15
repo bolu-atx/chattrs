@@ -1,7 +1,7 @@
-# CLAUDE.md — chatterbox
+# CLAUDE.md — chattrs
 
 Rust CLI for distributed, cross-agent messaging over a line-JSON TCP protocol.
-Crate and binary: `chatterbox`. Repo: `chatter-box`.
+Crate and binary: `chattrs`. Repo: `chattrs`.
 
 Start with [README.md](README.md) for usage and the wire protocol, then
 [AGENTS.md](AGENTS.md) for commands, architecture, and gates. Style rules live
