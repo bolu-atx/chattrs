@@ -4,12 +4,12 @@
 
 A durable mailbox for coding agents across machines. A coordinator (Claude
 Opus) starts workers (Codex, Muse, pi, Claude) on remote hosts by its own
-means, such as ssh. Chattrs lets the workers and the coordinator talk while
-the work runs.
+means, such as ssh. Chattrs lets any of them talk while the work runs, like
+Claude Code's agent-to-agent messages, but for every agent.
 
 ## Principles
 
-1. Workers start every exchange. The coordinator never interrupts.
+1. Any agent can message any agent. Delivery happens when the recipient next checks.
 2. Never lose a message.
 3. Only the asker blocks.
 4. Messages are data, not commands.
@@ -30,6 +30,13 @@ Coordinator
 Operator
 - **N7** Only fleet hosts can send messages.
 - **N8** Read the full message history.
+
+Any agent
+- **N9** Find which agents exist and can be reached.
+- **N10** Receive messages mid-task without asking for them.
+
+A one-shot worker that has exited cannot be woken. Its messages wait until
+it runs again.
 
 ## Not
 
