@@ -37,6 +37,18 @@ One subject label: `feature`, `bugfix`, `docs`, `chore`.
 
 ## Pull requests
 
-- Every PR closes an issue: `Closes #N`.
+Every PR links its issue. GitHub does the bookkeeping. Do not close
+issues or move cards by hand.
+
+- **Partial PR:** first line `Part of #N`. Links the PR, keeps the issue open.
+- **Last PR of a story:** first line `Closes #N`. Merge closes the issue.
+- **Same milestone as the issue** on every PR, so milestone progress counts it.
+- **Add to the board** (`gh pr create -p "chattrs dev"`). Merged PRs and
+  closed issues move to Done automatically.
+- **Milestone closes** when its last issue closes and the exit test in its
+  description passes. The PR that closes the last issue quotes the exit
+  test result. Then close the milestone.
+- **Blocked issue:** do not open a PR until its blockers are closed.
+
 - Branch: `feat/…`, `fix/…`, `docs/…`, `refactor/…`, `chore/…`.
 - Done = mergeable: checks green, no conflicts.
