@@ -7,43 +7,24 @@ Address = `agent@host`.
 
 ## Messaging
 
-- **MSG-1** Messages persist in SQLite before ack. *(N2)* — survives broker restart.
-- **MSG-2** Messages go to an address inbox. *(N1, N6)* — only the target receives it.
-- **MSG-3** Recipient acks; unacked messages are redelivered. *(N2, N5)* — disconnect before ack, get it again.
-- **MSG-4** `correlation_id` pairs a question with its answer. *(N6)*
-- **MSG-5** `watch` streams one JSON message per line. *(N4)* — works under Claude Code's Monitor tool.
+- **MSG-1** Messages persist in SQLite before ack. *(N6)* — survive broker restart.
+- **MSG-2** Messages go to an address inbox. *(N1, N3)* — only the target receives them.
+- **MSG-3** Recipient acks; unacked messages are redelivered. *(N6)* — disconnect before ack, get it again.
+- **MSG-4** A reply carries the id of the message it answers. *(N5)*
 
-## Tasks
+## CLI
 
-- **TSK-1** Task = target, adapter, prompt, repo + ref, time limit. *(N1)*
-- **TSK-2** States: `queued → running → done | failed | cancelled | timed_out`. *(N3, N9)*
-- **TSK-3** Result = state, final text, branch, exit code. *(N2)*
-- **TSK-4** Time limit and cancel kill the process. *(N8)*
-
-## Runner
-
-- **RUN-1** A per-host runner starts the adapter for each task. *(N5)* — task sent before runner starts still runs.
-- **RUN-2** Adapters live in local config. Unknown adapter → fail, run nothing. *(N7)*
-- **RUN-3** Adapters for `claude`, `codex`, `muse`, `pi`. *(N5)*
-- **RUN-4** One git worktree per task. *(N8)*
-- **RUN-5** Concurrency cap per host. *(N8)*
-
-## Interface
-
-- **API-1** CLI with `--json` for every command. *(N1, N3)*
-- **API-2** `chattrs mcp`: `send`, `inbox`, `ask`, `reply`, `task`. *(N1, N6)*
-- **API-3** `ask` blocks only the caller, until answer or timeout. *(N6)*
+- **CLI-1** `send` posts a message and returns at once. *(N3)*
+- **CLI-2** `ask` posts a message and blocks until the reply or a timeout. Exit code shows which. *(N1, N2)*
+- **CLI-3** `reply <id>` answers a message. *(N5)*
+- **CLI-4** `watch` streams one JSON message per line and nothing else. *(N4)* — works under Claude Code's Monitor tool.
+- **CLI-5** `log` shows full history, filtered by address. *(N8)*
+- **CLI-6** `--json` on every command. Server, token, and own address come from `CHATTRS_SERVER`, `CHATTRS_TOKEN`, `CHATTRS_ADDRESS`.
+- **CLI-7** Ship a skill that teaches agents `send`, `ask`, `reply`. *(N1, N2, N3)*
 
 ## Security
 
 - **SEC-1** Loopback by default. Other binds require a token. *(N7)*
-- **SEC-2** Token per host, limited to its addresses. *(N7)*
-- **SEC-3** Message bodies reach agents marked as untrusted input. *(N7)*
-- **SEC-4** Multi-host runs over a private network (Tailscale/WireGuard). No TLS. *(N7)*
+- **SEC-2** Multi-host runs over a private network (Tailscale/WireGuard). No TLS. *(N7)*
 
-## Ops
-
-- **OPS-1** `chattrs fleet` shows hosts, runners, tasks by state. *(N3)*
-- **OPS-2** `chattrs log` shows full history. *(N9)*
-
-Limits: ≤10 hosts, macOS + Linux.
+Limits: ≤10 hosts, macOS + Linux. The broker runs on an always-on host.
