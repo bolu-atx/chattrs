@@ -64,9 +64,9 @@ module layout, naming, comments, state, and the networking conventions.
 
 ## Planning
 
-We plan in milestones and issues — see [docs/planning.md](docs/planning.md).
-Milestone = epic, issue = coarse story. PRs open with `Closes #N`.
-Open is not done: a PR is done only when mergeable (checks green, no conflicts).
+Goals: [mission](docs/mission.md) → [requirements](docs/requirements.md) → [phases](docs/planning.md).
+Build only the current phase. Cite requirement IDs in every PR (`Meets: MSG-1`).
+A PR is done when mergeable (checks green, no conflicts).
 
 ## Commits and releases
 
