@@ -1,35 +1,54 @@
-# Phases
+# Planning
 
-[mission](mission.md) → [requirements](requirements.md) → **phases**
+[mission](mission.md) → [requirements](requirements.md) → **plan** (GitHub)
 
-Rules:
-1. Build only the current phase.
-2. Every PR cites IDs: `Meets: MSG-1`.
-3. Phase is done when its exit test passes.
-4. Requirement wrong or missing? Open an issue first.
+The plan lives on GitHub: milestones, issues, and the
+[`chattrs dev` board](https://github.com/users/bolu-atx/projects/2).
 
-**Current: Phase 1.**
+## Shape
 
-## 0 — Scaffold (shipped)
+- **Milestone = phase.** Named for the outcome. Description states the exit test.
+  Work only the earliest open milestone.
+- **Issue = story.** One shippable behavior. Title states the outcome.
+- **Relationships** record real order only: `blocked-by` / `blocking`.
+  Sub-issues only for genuine decomposition.
+- Every issue and PR cites requirement IDs: `Meets: MSG-1`.
+  No requirement fits? Propose one in an issue first.
 
-TCP broker, sessions, ring buffer, CLI. Phase 1 replaces sessions and the ring buffer. Delete, don't adapt.
+## Issue body
 
-## 1 — Durable inbox
+```md
+## What & why
+One paragraph: what changes for the user, and why.
 
-MSG-1..5, SEC-1, API-1.
-**Exit:** message to an offline address survives a broker restart and arrives once.
+## How
+Meets: <IDs>. Steps in order. Name blockers.
 
-## 2 — Tasks and runner
+## Verification performed
+Commands run and results. Do not claim what was not run.
 
-TSK-1..4, RUN-1..5, SEC-2, SEC-3.
-**Exit:** task sent from host A to `codex@b` while B is down runs when B comes up; result lands on A.
+## Agents supplemental
+Prompt and verifier used.
+```
 
-## 3 — MCP and questions
+## Labels
 
-API-2, API-3.
-**Exit:** worker calls `ask` mid-task, coordinator wakes and replies, worker continues.
+One subject label: `feature`, `bugfix`, `docs`, `chore`.
 
-## 4 — Fleet ops
+## Pull requests
 
-OPS-1, OPS-2, SEC-4.
-**Exit:** operator rebuilds any task's history from `log`.
+Every PR links its issue. GitHub does the bookkeeping. Do not close
+issues or move cards by hand.
+
+- **Partial PR:** first line `Part of #N`. Links the PR, keeps the issue open.
+- **Last PR of a story:** first line `Closes #N`. Merge closes the issue.
+- **Same milestone as the issue** on every PR, so milestone progress counts it.
+- **Add to the board** (`gh pr create -p "chattrs dev"`). Merged PRs and
+  closed issues move to Done automatically.
+- **Milestone closes** when its last issue closes and the exit test in its
+  description passes. The PR that closes the last issue quotes the exit
+  test result. Then close the milestone.
+- **Blocked issue:** do not open a PR until its blockers are closed.
+
+- Branch: `feat/…`, `fix/…`, `docs/…`, `refactor/…`, `chore/…`.
+- Done = mergeable: checks green, no conflicts.
