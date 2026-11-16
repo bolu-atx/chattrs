@@ -13,8 +13,10 @@ this file for commands and architecture.
 
 ```bash
 cargo build   # refreshes target/debug/chattrs
-cargo test    # unit + TCP integration tests, must be green with zero warnings
-cargo clippy --all-targets -- -D warnings   # lint gate, same as CI
+make fmt      # format the source with rustfmt
+make check    # lint gate: rustfmt check, clippy with -D warnings, complexity ≤ 40
+make test     # unit + TCP integration tests, must be green with zero warnings
+make ci       # check + test, the same commands CI runs
 # Toolchain is pinned in rust-toolchain.toml; rustup installs it on first use.
 ```
 
@@ -55,8 +57,8 @@ module layout, naming, comments, state, and the networking conventions.
 
 ## Verification
 
-- End of work, before every push: `cargo clippy --all-targets -- -D warnings`
-  and `cargo test`, both clean. CI runs the same two commands.
+- End of work, before every push: `make ci`, clean. CI runs the same
+  commands.
 - `cargo test` after every behavior change. Integration tests in
   `src/server.rs` bind an ephemeral `127.0.0.1:0` and drive the real client
   over TCP — no mocks.

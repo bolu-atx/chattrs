@@ -186,6 +186,9 @@ impl Broker {
         }
     }
 
+    // Over the complexity limit (126/40). Issue #34 step 7 splits this
+    // function and deletes this allow. Do not add another one.
+    #[allow(clippy::cognitive_complexity)]
     async fn handle(self: Arc<Self>, stream: TcpStream) {
         let (read_half, mut write_half) = stream.into_split();
         let mut reader = BufReader::new(read_half);

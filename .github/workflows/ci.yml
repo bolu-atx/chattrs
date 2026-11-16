@@ -16,10 +16,10 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install pinned toolchain
         run: rustup show
-      - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Lint
+        run: make check
       - name: Test
-        run: cargo test
+        run: make test
   smoke-windows:
     runs-on: windows-latest
     timeout-minutes: 20

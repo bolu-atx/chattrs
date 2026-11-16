@@ -10,6 +10,5 @@ in [docs/code-style.md](docs/code-style.md).
 Goals: [mission](docs/mission.md) → [requirements](docs/requirements.md) → [phases](docs/planning.md).
 Build only the current phase. Cite requirement IDs in every PR.
 
-Standing rules: `cargo build` after every change. `cargo clippy --all-targets
--- -D warnings` clean and `cargo test` green with zero warnings before every
-push (CI enforces both).
+Standing rules: `cargo build` after every change. `make fmt`, then `make ci`
+clean with zero warnings before every push (CI runs the same commands).
