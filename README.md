@@ -10,17 +10,20 @@ so any language with a socket and a JSON library can participate.
 
 ## Install
 
+On any machine with Node (macOS, Linux, Windows):
+
+```bash
+npm install -g chattrs
+```
+
 On macOS (arm64):
 
 ```bash
 brew install bolu-atx/tap/chattrs
 ```
 
-On any machine with Node (macOS, Linux, Windows):
-
-```bash
-npm install -g chattrs
-```
+Prebuilt binaries and shell/powershell installers for every
+release live on the [Releases page](https://github.com/bolu-atx/chattrs/releases).
 
 From source (any target, including Intel Macs):
 
@@ -103,12 +106,12 @@ only; it never acks.
 | Command | What it does |
 | ------- | ------------ |
 | `serve` | Run the broker on `--listen` (default `127.0.0.1:4646`), storing to `--db`. A non-loopback `--listen` needs `--token`. |
-| `stop` | Stop the auto-started broker named by the pidfile next to the DB. |
+| `stop` | Stop the auto-started broker named by the pidfile next to the default DB. A remote broker is never stopped. |
 | `send`  | Post to `--to ADDR` and print the id (text args, else stdin). Names the workstream with `--topic SLUG`. With `--topic` and no `--to`, announce to that room instead. |
 | `reply` | Answer message `ID` (text args, else stdin) and print the new id. Overrides the inherited topic with `--topic SLUG`. With `--json`, print the `sent` frame instead. |
 | `inbox` | Print every unread message for `--address`, then ack what was printed. Announcements never appear here. |
 | `watch` | Stream new messages as JSON lines forever, acking what is printed. With `--topic SLUG` (repeatable), stream that room's announcements instead, without acking. |
-| `ask` | Post to `--to ADDR` and block for the reply (`--timeout SECS`, default 600, `0` means no limit). Names the workstream with `--topic SLUG`. |
+| `ask` | Post to `--to ADDR` and block for the reply (`--timeout SECS`, default 600, `0` means no limit). Names the workstream with `--topic SLUG`. Exits 0 on a reply, 2 on a timeout. |
 | `agents` | List known agent addresses and when each was last seen. |
 | `log` | Show the full message history, oldest first. With `--about ADDR`, keep only messages that ADDR sent or received. |
 | `skill` | Print the bundled agent skill (`skills/chattrs/SKILL.md`) to stdout. Opens no connection, needs no address. |
