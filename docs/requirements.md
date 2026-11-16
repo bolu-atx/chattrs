@@ -12,6 +12,7 @@ Address = `agent@host`.
 - **MSG-3** Recipient acks; unacked messages are redelivered. *(N6)* — disconnect before ack, get it again.
 - **MSG-4** A reply carries the id of the message it answers. *(N5)*
 - **MSG-5** Every client command except `watch` prints unread messages before its own output, then acks them. *(N10)*
+- **MSG-6** A message may carry a topic slug. A reply inherits the topic of the message it answers unless it sets its own. No topic is the general chat.
 
 ## CLI
 

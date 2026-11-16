@@ -15,6 +15,8 @@ Stuck, or at a checkpoint (blocks for the reply):
 
 `chattrs ask --to ADDR TEXT`
 
+Name the workstream with `--topic SLUG` on `send`/`ask` when there is one.
+
 Set the shell tool timeout above the `ask` timeout (`--timeout SECS`,
 default 600, `0` waits with no limit).
 

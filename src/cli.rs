@@ -101,6 +101,10 @@ pub struct SendArgs {
     #[arg(long)]
     pub to: String,
 
+    /// Topic slug naming the workstream this message belongs to.
+    #[arg(long)]
+    pub topic: Option<String>,
+
     /// Message text. With no text, the body is read from stdin.
     #[arg(value_name = "MESSAGE")]
     pub message: Vec<String>,
@@ -136,6 +140,11 @@ pub struct ReplyArgs {
     /// Id of the message to answer.
     pub id: u64,
 
+    /// Topic slug naming the workstream this reply belongs to. Without
+    /// it, the reply inherits the topic of the message it answers.
+    #[arg(long)]
+    pub topic: Option<String>,
+
     /// Message text. With no text, the body is read from stdin.
     #[arg(value_name = "MESSAGE")]
     pub message: Vec<String>,
@@ -162,6 +171,10 @@ pub struct AskArgs {
     /// Recipient address, as `user@host`.
     #[arg(long)]
     pub to: String,
+
+    /// Topic slug naming the workstream this question belongs to.
+    #[arg(long)]
+    pub topic: Option<String>,
 
     /// Wait this many seconds for the reply. Zero waits with no limit.
     #[arg(long, default_value_t = 600)]
@@ -230,6 +243,7 @@ mod tests {
                 token: None,
             },
             to: "b@h".into(),
+            topic: None,
             message: message.into_iter().map(|m| m.to_string()).collect(),
             json: false,
         }

@@ -33,13 +33,19 @@ mod tests {
         let frames = vec![
             Inbound::Hello { v: 1, address: "codex@box1".into(), token: None },
             Inbound::Hello { v: 1, address: "codex@box1".into(), token: Some("s3cret".into()) },
-            Inbound::Send { to: Some("opus@mac".into()), body: "hi".into(), reply_to: None },
+            Inbound::Send {
+                to: Some("opus@mac".into()),
+                body: "hi".into(),
+                reply_to: None,
+                topic: None,
+            },
             Inbound::Send {
                 to: Some("opus@mac".into()),
                 body: "hi".into(),
                 reply_to: Some(3),
+                topic: None,
             },
-            Inbound::Send { to: None, body: "hi".into(), reply_to: Some(3) },
+            Inbound::Send { to: None, body: "hi".into(), reply_to: Some(3), topic: None },
             Inbound::Inbox,
             Inbound::Ack { ids: vec![12, 13] },
             Inbound::Watch,
@@ -68,6 +74,7 @@ mod tests {
             body: "hi".into(),
             ts: 1763200000000,
             reply_to: None,
+            topic: None,
             acked_at: None,
         };
         let message = crate::model::Message {
@@ -77,6 +84,7 @@ mod tests {
             body: "hi".into(),
             ts: 1763200000000,
             reply_to: None,
+            topic: None,
         };
         let frames = vec![
             Outbound::Welcome { server: "chattrs".into(), v: 1, address: "codex@box1".into() },
@@ -108,6 +116,7 @@ mod tests {
                 to: Some("b@h".into()),
                 body: "hi".into(),
                 reply_to: None,
+                topic: None,
             })
             .unwrap(),
             serde_json::to_value(Inbound::Watch).unwrap(),
