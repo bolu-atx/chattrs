@@ -375,9 +375,17 @@ impl WatchConn {
     }
 }
 
-/// Format one watched message exactly as `watch` prints it: one JSON line.
+/// Format one watched message exactly as `watch` prints it: one JSON
+/// `message` line marked `untrusted`, since the body is from another
+/// agent and carries no user authority. The broker never sends or
+/// stores the flag; only the CLI adds it when printing.
 pub fn format_watch_line(message: &Message) -> Result<String, String> {
-    protocol::encode(&Outbound::Message(message.clone()))
+    let mut value = serde_json::to_value(message).map_err(|e| e.to_string())?;
+    value["type"] = serde_json::Value::String("message".to_string());
+    value["untrusted"] = serde_json::Value::Bool(true);
+    serde_json::to_string(&value)
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| e.to_string())
 }
 
 /// Print one watched message as JSON, flush stdout, then ack it. Printing
