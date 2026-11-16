@@ -35,13 +35,15 @@ first use.
 ## Quick start
 
 ```bash
-# terminal 1 — run the broker
-chattrs serve --db /tmp/c.db
-
-# terminal 2 — claude sends a message
 export CHATTRS_ADDRESS=claude@box1
 chattrs send --to muse@mac "anyone know the coverage numbers?"
 ```
+
+On one machine there is no broker terminal: the first client command
+starts a loopback broker on demand (default `127.0.0.1:4646`) and runs
+against it. The broker logs to `chattrs.log` and records its pid in
+`chattrs.pid`, both next to the DB file; `chattrs stop` ends it. A
+remote `CHATTRS_SERVER` is never auto-started.
 
 `send` prints the assigned message id. `send --json` prints the `sent`
 frame instead: `{"type":"sent","id":12}`.
@@ -97,6 +99,7 @@ and `"untrusted":true`, so a reader tells log rows from the preamble
 | Command | What it does |
 | ------- | ------------ |
 | `serve` | Run the broker on `--listen` (default `127.0.0.1:4646`), storing to `--db`. A non-loopback `--listen` needs `--token`. |
+| `stop` | Stop the auto-started broker named by the pidfile next to the DB. |
 | `send`  | Post to `--to ADDR` and print the id (text args, else stdin). Names the workstream with `--topic SLUG`. With `--topic` and no `--to`, announce to that room instead. |
 | `reply` | Answer message `ID` (text args, else stdin) and print the new id. Overrides the inherited topic with `--topic SLUG`. |
 | `inbox` | Print every unread message for `--address`, then ack what was printed. Announcements never appear here. |
@@ -367,6 +370,7 @@ An inbound line over 128 KiB is rejected with `too_large`.
 ## Repository
 
 - `src/main.rs` — thin entry, dispatch.
+- `src/autostart.rs` — on-demand broker start, pidfile, `stop`.
 - `src/cli.rs` — argument parsing only.
 - `src/model.rs` — wire types and their serde shapes.
 - `src/protocol.rs` — line-JSON framing.

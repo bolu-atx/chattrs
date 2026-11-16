@@ -5,6 +5,9 @@
 //! `message` frames, printing each as JSON; `ask` sends its question on one
 //! connection, then holds a `wait` open until the reply arrives.
 
+use std::io::ErrorKind;
+
+use crate::autostart;
 use crate::model::{self, Agent, Inbound, LoggedMessage, Message, Outbound};
 use crate::protocol;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -16,10 +19,33 @@ struct Conn {
     writer: OwnedWriteHalf,
 }
 
-async fn connect(server: &str) -> Result<Conn, String> {
-    let stream = TcpStream::connect(server).await.map_err(|e| format!("connect {server}: {e}"))?;
-    let (read_half, write_half) = stream.into_split();
-    Ok(Conn { reader: BufReader::new(read_half), writer: write_half })
+/// How long one TCP connect may take before it counts as failed.
+/// Dropped packets to an unreachable address would otherwise hang a
+/// one-shot command for the full OS TCP timeout.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A failed connect: the message plus whether the port refused the
+/// connection, which is the only failure that starts a broker.
+struct ConnectError {
+    message: String,
+    refused: bool,
+}
+
+async fn connect(server: &str) -> Result<Conn, ConnectError> {
+    match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(server)).await {
+        Ok(Ok(stream)) => {
+            let (read_half, write_half) = stream.into_split();
+            Ok(Conn { reader: BufReader::new(read_half), writer: write_half })
+        }
+        Ok(Err(e)) => Err(ConnectError {
+            refused: e.kind() == ErrorKind::ConnectionRefused,
+            message: format!("connect {server}: {e}"),
+        }),
+        Err(_) => Err(ConnectError {
+            refused: false,
+            message: format!("connect {server}: timed out after {}s", CONNECT_TIMEOUT.as_secs()),
+        }),
+    }
 }
 
 async fn send_frame(conn: &mut Conn, frame: &Inbound) -> Result<(), String> {
@@ -38,8 +64,23 @@ async fn recv_frame(conn: &mut Conn) -> Result<Outbound, String> {
 }
 
 /// Say hello and return the open connection once the broker welcomes us.
+/// When the first connect fails with connection refused on a loopback
+/// server, start a broker on demand and retry once on a fresh
+/// connection. Any other failure returns the original connect error.
 async fn hello(server: &str, address: &str, token: Option<&str>) -> Result<Conn, String> {
-    let mut conn = connect(server).await?;
+    match connect(server).await {
+        Ok(conn) => greet(conn, address, token).await,
+        Err(error) if error.refused && autostart::is_loopback_server(server) => {
+            autostart::ensure_started(server, token).await?;
+            let conn = connect(server).await.map_err(|error| error.message)?;
+            greet(conn, address, token).await
+        }
+        Err(error) => Err(error.message),
+    }
+}
+
+/// Run the `hello` handshake on an open connection.
+async fn greet(mut conn: Conn, address: &str, token: Option<&str>) -> Result<Conn, String> {
     send_frame(
         &mut conn,
         &Inbound::Hello {

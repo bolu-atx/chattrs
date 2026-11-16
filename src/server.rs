@@ -9,6 +9,7 @@
 //! `sent`, and each send also reaches the live `watch` connections and the
 //! matching `wait` connections of its recipient.
 
+use crate::autostart;
 use crate::model::{self, Inbound, Message, Outbound};
 use crate::protocol;
 use crate::store::Store;
@@ -701,14 +702,23 @@ pub fn check_listen(listen: &str, token: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Bind and serve until the process exits.
+/// Bind and serve until the process exits. A broker started on demand
+/// records its pid next to the DB and removes it when it exits.
 pub async fn serve(listen: &str, db: &Path, token: Option<String>) -> Result<(), String> {
     check_listen(listen, token.as_deref())?;
     let listener = TcpListener::bind(listen).await.map_err(|e| format!("bind {listen}: {e}"))?;
     let store = Store::open(db.to_path_buf()).await?;
     println!("chattrs: serving on {listen}");
+    let owned = autostart::is_autostart_child();
+    if owned {
+        autostart::write_pidfile(db)?;
+    }
     let broker = Arc::new(Broker::new(store, token));
-    run_listener(listener, broker).await
+    let result = run_listener(listener, broker).await;
+    if owned {
+        autostart::remove_pidfile(db);
+    }
+    result
 }
 
 async fn run_listener(listener: TcpListener, broker: Arc<Broker>) -> Result<(), String> {
@@ -1248,11 +1258,11 @@ mod tests {
         let mut asker = start_ask(
             &bin,
             &addr,
-            ("w@h", "c@h"),
+            "w@h",
             "15",
             (&out, &err),
-            "go?",
-            Some("release-26"),
+            client::Outgoing { topic: Some("release-26".into()), ..outgoing("c@h", "go?") },
+            &db,
         );
 
         let question = wait_for_question(&addr, "c@h").await;
@@ -1514,7 +1524,7 @@ mod tests {
             assert!(messages.is_empty(), "{who} has no announcement: {messages:?}");
         }
 
-        let out = run_chattrs(&bin, "send", &addr, "ops@h", &["--to", "w@h", "hi"]);
+        let out = run_chattrs(&bin, "send", &addr, "ops@h", &["--to", "w@h", "hi"], &db);
         assert!(out.status.success(), "send exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 1, "no preamble before the new id: {lines:?}");
@@ -1638,7 +1648,7 @@ mod tests {
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let out = dir.path().join("topic-watch.out");
-        let _watcher = start_topic_watch(&bin, &addr, "ops@h", &["release-26"], &out);
+        let _watcher = start_topic_watch(&bin, &addr, "ops@h", &["release-26"], &out, &db);
 
         let id = client::send(&addr, "w@h", None, announce("release-26", "build 421 is red"), false)
             .await
@@ -1673,17 +1683,17 @@ mod tests {
         let mut asker = start_ask(
             &bin,
             &addr,
-            ("w@h", "c@h"),
+            "w@h",
             "15",
             (&out, &err),
-            "go?",
-            Some("release-26"),
+            client::Outgoing { topic: Some("release-26".into()), ..outgoing("c@h", "go?") },
+            &db,
         );
 
         let question = wait_for_question(&addr, "c@h").await;
         assert_eq!(question.topic.as_deref(), Some("release-26"));
         let id_arg = question.id.to_string();
-        let reply_out = run_chattrs(&bin, "reply", &addr, "c@h", &[&id_arg, "yes"]);
+        let reply_out = run_chattrs(&bin, "reply", &addr, "c@h", &[&id_arg, "yes"], &db);
         assert!(reply_out.status.success(), "reply exits zero: {reply_out:?}");
 
         let status = wait_for_exit(&mut asker.child, 15).await;
@@ -2083,8 +2093,9 @@ mod tests {
         addr: &str,
         who: &str,
         out: &std::path::Path,
+        db: &std::path::Path,
     ) -> ProcChild {
-        start_topic_watch(bin, addr, who, &[], out)
+        start_topic_watch(bin, addr, who, &[], out, db)
     }
 
     fn start_topic_watch(
@@ -2093,6 +2104,7 @@ mod tests {
         who: &str,
         topics: &[&str],
         out: &std::path::Path,
+        db: &std::path::Path,
     ) -> ProcChild {
         let file = std::fs::File::create(out).expect("watch output file");
         let mut command = std::process::Command::new(bin);
@@ -2106,6 +2118,7 @@ mod tests {
             command.arg("--topic").arg(topic);
         }
         let child = command
+            .env("CHATTRS_DB", db)
             .stdout(file)
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -2178,7 +2191,7 @@ mod tests {
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let out = dir.path().join("watch.out");
-        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+        let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
         let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
@@ -2197,7 +2210,7 @@ mod tests {
         let mut server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let out = dir.path().join("watch.out");
-        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+        let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
@@ -2226,7 +2239,7 @@ mod tests {
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let out = dir.path().join("watch.out");
-        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+        let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "plain"), false)
             .await
@@ -2263,11 +2276,11 @@ mod tests {
     fn start_ask(
         bin: &std::path::Path,
         addr: &str,
-        asker: (&str, &str),
+        from: &str,
         timeout_secs: &str,
         files: (&std::path::Path, &std::path::Path),
-        body: &str,
-        topic: Option<&str>,
+        question: client::Outgoing,
+        db: &std::path::Path,
     ) -> ProcChild {
         let out_file = std::fs::File::create(files.0).expect("ask output file");
         let err_file = std::fs::File::create(files.1).expect("ask error file");
@@ -2277,16 +2290,17 @@ mod tests {
             .arg("--server")
             .arg(addr)
             .arg("--address")
-            .arg(asker.0)
+            .arg(from)
             .arg("--to")
-            .arg(asker.1)
+            .arg(question.to.expect("ask needs a recipient"))
             .arg("--timeout")
             .arg(timeout_secs);
-        if let Some(topic) = topic {
+        if let Some(topic) = question.topic {
             command.arg("--topic").arg(topic);
         }
         let child = command
-            .arg(body)
+            .arg(question.body)
+            .env("CHATTRS_DB", db)
             .stdout(out_file)
             .stderr(err_file)
             .spawn()
@@ -2337,7 +2351,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let question = wait_for_question(&addr, "c@h").await;
         assert_eq!(question.from, "w@h");
@@ -2366,7 +2380,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "1", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let status = wait_for_exit(&mut asker.child, 10).await;
         assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
@@ -2389,7 +2403,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let question = wait_for_question(&addr, "c@h").await;
         client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
@@ -2411,7 +2425,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "1", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let status = wait_for_exit(&mut asker.child, 10).await;
         assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
@@ -2437,7 +2451,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let question = wait_for_question(&addr, "c@h").await;
         let noise = client::send(&addr, "x@h", None, outgoing("w@h", "noise"), false)
@@ -2472,7 +2486,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "30", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "30", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let question = wait_for_question(&addr, "c@h").await;
         server.stop();
@@ -2502,6 +2516,7 @@ mod tests {
         addr: &str,
         who: &str,
         extra: &[&str],
+        db: &std::path::Path,
     ) -> std::process::Output {
         std::process::Command::new(bin)
             .arg(subcommand)
@@ -2510,6 +2525,7 @@ mod tests {
             .arg("--address")
             .arg(who)
             .args(extra)
+            .env("CHATTRS_DB", db)
             .output()
             .expect("run chattrs")
     }
@@ -2532,7 +2548,7 @@ mod tests {
         wait_for_server(&addr).await;
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
 
-        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
+        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"], &db);
         assert!(out.status.success(), "send exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
@@ -2555,7 +2571,7 @@ mod tests {
             client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         let id_arg = original.to_string();
 
-        let out = run_chattrs(&bin, "reply", &addr, "b@h", &[&id_arg, "yo"]);
+        let out = run_chattrs(&bin, "reply", &addr, "b@h", &[&id_arg, "yo"], &db);
         assert!(out.status.success(), "reply exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
@@ -2580,7 +2596,7 @@ mod tests {
         wait_for_server(&addr).await;
         client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
 
-        let out = run_chattrs(&bin, "agents", &addr, "b@h", &[]);
+        let out = run_chattrs(&bin, "agents", &addr, "b@h", &[], &db);
         assert!(out.status.success(), "agents exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert!(lines.len() >= 5, "wrapped preamble plus agent lines: {lines:?}");
@@ -2607,7 +2623,7 @@ mod tests {
         client::send(&addr, "x@h", None, outgoing("w@h", "noise"), false).await.unwrap();
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
-        let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+        let mut asker = start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let question = wait_for_question(&addr, "c@h").await;
         client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
@@ -2635,14 +2651,14 @@ mod tests {
         wait_for_server(&addr).await;
         client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
 
-        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
+        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"], &db);
         assert!(out.status.success(), "send exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
         let preamble = lines[..4].join("\n");
         assert!(preamble.contains("one"), "preamble is the unread message: {preamble}");
 
-        let again = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "three"]);
+        let again = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "three"], &db);
         assert!(again.status.success(), "send exits zero: {again:?}");
         let lines = stdout_lines(&again);
         assert_eq!(lines.len(), 1, "a second command prints only an id: {lines:?}");
@@ -2659,7 +2675,7 @@ mod tests {
         wait_for_server(&addr).await;
         client::send(&addr, "a@h", None, outgoing("b@h", "old"), false).await.unwrap();
         let out = dir.path().join("watch.out");
-        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+        let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
         let lines = wait_for_lines(&out, 1).await;
         let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
@@ -2687,7 +2703,7 @@ mod tests {
         wait_for_server(&addr).await;
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
 
-        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "--json", "two"]);
+        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "--json", "two"], &db);
         assert!(out.status.success(), "send exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 2, "preamble plus the sent line: {lines:?}");
@@ -2713,7 +2729,7 @@ mod tests {
         wait_for_server(&addr).await;
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
 
-        let out = run_chattrs(&bin, "inbox", &addr, "b@h", &["--json"]);
+        let out = run_chattrs(&bin, "inbox", &addr, "b@h", &["--json"], &db);
         assert!(out.status.success(), "inbox exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 1, "one message line: {lines:?}");
@@ -2732,7 +2748,7 @@ mod tests {
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let out = dir.path().join("watch.out");
-        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+        let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
         let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
@@ -2784,5 +2800,340 @@ mod tests {
             format!("chattrs {}", env!("CARGO_PKG_VERSION")),
             "the binary names its crate version"
         );
+    }
+
+    fn pid_file(db: &std::path::Path) -> std::path::PathBuf {
+        db.with_file_name("chattrs.pid")
+    }
+
+    fn log_file(db: &std::path::Path) -> std::path::PathBuf {
+        db.with_file_name("chattrs.log")
+    }
+
+    fn read_test_pid(db: &std::path::Path) -> Option<u32> {
+        std::fs::read_to_string(pid_file(db)).ok()?.trim().parse().ok()
+    }
+
+    /// Run a client command with `CHATTRS_DB` pointing at `db`, so an
+    /// auto-start uses this test's database.
+    fn run_client(
+        bin: &std::path::Path,
+        db: &std::path::Path,
+        args: &[&str],
+    ) -> std::process::Output {
+        std::process::Command::new(bin)
+            .args(args)
+            .env("CHATTRS_DB", db)
+            .output()
+            .expect("run chattrs")
+    }
+
+    fn run_stop(bin: &std::path::Path, db: &std::path::Path) -> std::process::Output {
+        std::process::Command::new(bin)
+            .arg("stop")
+            .env("CHATTRS_DB", db)
+            .output()
+            .expect("run chattrs stop")
+    }
+
+    /// Wait until `addr` accepts a raw connection, without touching the
+    /// client (which would start a broker itself).
+    async fn wait_for_port(addr: &str) {
+        let start = tokio::time::Instant::now();
+        loop {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                return;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(15),
+                "broker never answered at {addr}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// True when nothing listens at `addr` anymore.
+    async fn port_is_closed(addr: &str) -> bool {
+        tokio::net::TcpStream::connect(addr).await.is_err()
+    }
+
+    async fn wait_for_pid(db: &std::path::Path) -> u32 {
+        let start = tokio::time::Instant::now();
+        loop {
+            if let Some(pid) = read_test_pid(db) {
+                return pid;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "pidfile never appeared"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Stops the auto-started broker for `db` on drop, killing the pid
+    /// when `stop` cannot. Every auto-start test owns one so a failure
+    /// never leaks a broker.
+    struct AutostartGuard {
+        bin: std::path::PathBuf,
+        db: std::path::PathBuf,
+    }
+
+    impl AutostartGuard {
+        fn new(bin: &std::path::Path, db: &std::path::Path) -> AutostartGuard {
+            AutostartGuard { bin: bin.to_path_buf(), db: db.to_path_buf() }
+        }
+    }
+
+    impl Drop for AutostartGuard {
+        fn drop(&mut self) {
+            let _ = run_stop(&self.bin, &self.db);
+            if let Some(pid) = read_test_pid(&self.db) {
+                force_kill(pid);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn force_kill(pid: u32) {
+        let _ =
+            std::process::Command::new("kill").arg("-9").arg(pid.to_string()).status();
+    }
+
+    #[cfg(windows)]
+    fn force_kill(pid: u32) {
+        let _ = std::process::Command::new("taskkill")
+            .args(["/F", "/PID", &pid.to_string()])
+            .status();
+    }
+
+    #[tokio::test]
+    async fn send_starts_broker_on_demand() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _guard = AutostartGuard::new(&bin, &db);
+
+        let out = run_client(
+            &bin,
+            &db,
+            &["send", "--server", addr.as_str(), "--address", "a@h", "--to", "b@h", "hi"],
+        );
+        assert!(out.status.success(), "send starts a broker and exits zero: {out:?}");
+        let lines = stdout_lines(&out);
+        assert_eq!(lines, vec!["1"], "first send prints id 1 and nothing else: {lines:?}");
+        let stderr = String::from_utf8(out.stderr.clone()).expect("stderr is utf8");
+        assert!(stderr.contains("started a broker"), "the notice goes to stderr: {stderr}");
+
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "a@h");
+        assert_eq!(messages[0].body, "hi");
+    }
+
+    #[tokio::test]
+    async fn watch_starts_broker_on_demand() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _guard = AutostartGuard::new(&bin, &db);
+
+        let out_path = dir.path().join("watch.out");
+        let file = std::fs::File::create(&out_path).expect("watch output file");
+        let child = std::process::Command::new(&bin)
+            .arg("watch")
+            .arg("--server")
+            .arg(&addr)
+            .arg("--address")
+            .arg("b@h")
+            .env("CHATTRS_DB", &db)
+            .stdout(file)
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn watch");
+        let _watcher = ProcChild { child };
+
+        wait_for_port(&addr).await;
+        let id =
+            client::send(&addr, "a@h", None, outgoing("b@h", "hello"), false).await.unwrap();
+        let lines = wait_for_lines(&out_path, 1).await;
+        assert_eq!(lines.len(), 1, "watch prints the message sent after it started");
+        let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
+        assert_eq!(value["id"].as_u64(), Some(id));
+        assert_eq!(value["body"].as_str(), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn second_command_reuses_the_running_broker() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _guard = AutostartGuard::new(&bin, &db);
+
+        let first = run_client(
+            &bin,
+            &db,
+            &["send", "--server", addr.as_str(), "--address", "a@h", "--to", "b@h", "one"],
+        );
+        assert!(first.status.success(), "first send exits zero: {first:?}");
+        let first_id: u64 = stdout_lines(&first)[0].parse().expect("first id");
+        let pid = wait_for_pid(&db).await;
+        assert!(pid > 0, "the broker records one pid");
+
+        let second = run_client(
+            &bin,
+            &db,
+            &["send", "--server", addr.as_str(), "--address", "a@h", "--to", "b@h", "two"],
+        );
+        assert!(second.status.success(), "second send exits zero: {second:?}");
+        let second_id: u64 = stdout_lines(&second)[0].parse().expect("second id");
+        assert!(second_id > first_id, "ids increase on the same broker");
+        assert_eq!(read_test_pid(&db), Some(pid), "both commands share one broker");
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_commands_start_one_broker() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _guard = AutostartGuard::new(&bin, &db);
+
+        let mut tasks = Vec::new();
+        for i in 0..8 {
+            let (bin, db, addr) = (bin.clone(), db.clone(), addr.clone());
+            tasks.push(tokio::task::spawn_blocking(move || {
+                let body = format!("msg {i}");
+                run_client(
+                    &bin,
+                    &db,
+                    &[
+                        "send",
+                        "--server",
+                        addr.as_str(),
+                        "--address",
+                        "a@h",
+                        "--to",
+                        "b@h",
+                        body.as_str(),
+                    ],
+                )
+            }));
+        }
+        let mut ids = Vec::new();
+        for task in tasks {
+            let out = task.await.expect("send task");
+            assert!(out.status.success(), "every parallel send succeeds: {out:?}");
+            ids.push(stdout_lines(&out)[0].parse::<u64>().expect("id line"));
+        }
+        ids.sort_unstable();
+        let expected: Vec<u64> = (1..=8).collect();
+        assert_eq!(ids, expected, "no message is lost or duplicated: {ids:?}");
+        let pid = wait_for_pid(&db).await;
+        assert!(pid > 0, "exactly one broker pid exists afterwards");
+        let text = std::fs::read_to_string(pid_file(&db)).expect("pidfile");
+        assert_eq!(text.lines().count(), 1, "the pidfile names one broker: {text:?}");
+    }
+
+    #[tokio::test]
+    async fn remote_connect_failure_starts_nothing() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let bin = ensure_bin();
+        let _guard = AutostartGuard::new(&bin, &db);
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
+        let port = probe.local_addr().expect("probe addr").port();
+        drop(probe);
+        let remote = format!("192.0.2.1:{port}");
+
+        let mut child = std::process::Command::new(&bin)
+            .arg("send")
+            .arg("--server")
+            .arg(&remote)
+            .arg("--address")
+            .arg("a@h")
+            .arg("--to")
+            .arg("b@h")
+            .arg("hi")
+            .env("CHATTRS_DB", &db)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn send");
+        let start = tokio::time::Instant::now();
+        loop {
+            if child.try_wait().expect("poll send").is_some() {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(20),
+                "remote send hangs"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let out = child.wait_with_output().expect("send output");
+        assert_eq!(out.status.code(), Some(1), "remote failure exits 1: {out:?}");
+        let stderr = String::from_utf8(out.stderr).expect("stderr is utf8");
+        assert!(stderr.contains("chattrs:"), "the error names chattrs: {stderr}");
+        assert!(!pid_file(&db).exists(), "no pidfile for a remote failure");
+        assert!(!log_file(&db).exists(), "no log file for a remote failure");
+    }
+
+    #[tokio::test]
+    async fn autostart_broker_is_stopped_by_stop() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _guard = AutostartGuard::new(&bin, &db);
+
+        let out = run_client(
+            &bin,
+            &db,
+            &["send", "--server", addr.as_str(), "--address", "a@h", "--to", "b@h", "hi"],
+        );
+        assert!(out.status.success(), "send starts a broker: {out:?}");
+        let pid = wait_for_pid(&db).await;
+        assert!(pid > 0, "the broker records its pid");
+
+        let stopped = run_stop(&bin, &db);
+        assert!(stopped.status.success(), "stop exits zero: {stopped:?}");
+        assert!(stdout_lines(&stopped).is_empty(), "stop prints nothing: {stopped:?}");
+        assert!(!pid_file(&db).exists(), "stop removes the pidfile");
+        assert!(port_is_closed(&addr).await, "the port no longer answers");
+
+        let again = run_stop(&bin, &db);
+        assert_eq!(again.status.code(), Some(1), "a second stop exits 1: {again:?}");
+        let stderr = String::from_utf8(again.stderr).expect("stderr is utf8");
+        assert!(
+            stderr.contains("no auto-started broker running"),
+            "the error names the missing broker: {stderr}"
+        );
+    }
+
+    #[tokio::test]
+    async fn already_running_broker_is_untouched() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+
+        let out = run_client(
+            &bin,
+            &db,
+            &["send", "--server", addr.as_str(), "--address", "a@h", "--to", "b@h", "hi"],
+        );
+        assert!(out.status.success(), "send exits zero against the running broker: {out:?}");
+        assert!(!pid_file(&db).exists(), "a manual broker leaves no pidfile");
+        assert!(!log_file(&db).exists(), "no auto-start means no log file");
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].body, "hi");
     }
 }
