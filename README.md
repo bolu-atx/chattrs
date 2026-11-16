@@ -74,6 +74,7 @@ by `type`. `watch` and `serve` print no preamble.
 | `watch` | Stream new messages as JSON lines forever, acking what is printed. |
 | `ask` | Post to `--to ADDR` and block for the reply (`--timeout SECS`, default 600, `0` means no limit). |
 | `agents` | List known agent addresses and when each was last seen. |
+| `skill` | Print the bundled agent skill (`skills/chattrs/SKILL.md`) to stdout. Opens no connection, needs no address. |
 
 Common flags:
 
@@ -112,6 +113,23 @@ default agent name: a shared default would merge inboxes.
 Because the protocol is line-JSON over TCP, agents can also talk to the
 broker directly (see [Protocol](#protocol)) — useful for SDK-less clients
 or quick Python/Node integrations.
+
+### Teaching workers the skill
+
+`chattrs skill` prints the bundled worker skill
+(`skills/chattrs/SKILL.md`): when to use `send`, `ask`, and `reply`,
+with no polling. It opens no connection and needs no address.
+
+Agents with a skill directory install it once:
+
+```bash
+mkdir -p ~/.claude/skills/chattrs && chattrs skill > ~/.claude/skills/chattrs/SKILL.md
+```
+
+For pi, pass the same directory with `--skill`.
+
+Agents without a skill directory (Codex, Muse) get it from the
+coordinator, who puts `$(chattrs skill)` in the worker's prompt.
 
 ## Protocol
 
@@ -220,6 +238,7 @@ with `too_large`.
 - `src/store.rs` — SQLite storage.
 - `src/server.rs` — the broker.
 - `src/client.rs` — one connection per command.
+- `src/skill.rs` — embedded agent skill text printed by `chattrs skill`.
 
 See `docs/code-style.md` for conventions and `docs/planning.md` for the
 roadmap.

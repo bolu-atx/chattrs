@@ -1,8 +1,8 @@
 //! chattrs — distributed messaging for cross-agent coordination.
 //!
 //! A thin entry point: parse `cli`, then dispatch to `server` (the broker) or
-//! `client` (`send`, `reply`, `inbox`, `watch`, `ask`). `model` owns the
-//! wire types, `protocol` the line-JSON framing, and `store` the SQLite
+//! `client` (`send`, `reply`, `inbox`, `watch`, `ask`, `skill`). `model` owns
+//! the wire types, `protocol` the line-JSON framing, and `store` the SQLite
 //! storage.
 //!
 //! Quick start:
@@ -16,6 +16,7 @@ mod client;
 mod model;
 mod protocol;
 mod server;
+mod skill;
 mod store;
 
 use clap::Parser;
@@ -136,6 +137,10 @@ async fn run(args: Args) -> Result<(), String> {
             std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
             let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
             client::ack(&c.client.server, &address, c.client.token.as_deref(), &ids).await?;
+            Ok(())
+        }
+        Command::Skill => {
+            print!("{}", skill::text());
             Ok(())
         }
         Command::Agents(c) => {
