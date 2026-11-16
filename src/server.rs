@@ -1447,11 +1447,12 @@ mod tests {
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
         let lines = read_out_lines(&out);
-        assert_eq!(lines.len(), 1, "ask prints one line: {lines:?}");
+        assert_eq!(lines.len(), 4, "ask prints one wrapped reply: {lines:?}");
         assert!(lines[0].contains("c@h"), "reply names the replier: {}", lines[0]);
-        assert!(lines[0].contains("yes"), "reply carries the body: {}", lines[0]);
-        let wanted = format!("(re {})", question.id);
+        assert!(lines[2].contains("yes"), "reply carries the body: {}", lines[2]);
+        let wanted = format!("reply-to=\"{}\"", question.id);
         assert!(lines[0].contains(&wanted), "reply cites the question: {}", lines[0]);
+        assert_eq!(lines[3], "</agent-message>", "wrapper closes last: {lines:?}");
     }
 
     #[tokio::test]
@@ -1550,8 +1551,8 @@ mod tests {
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
         let lines = read_out_lines(&out);
-        assert_eq!(lines.len(), 1, "ask prints only the reply: {lines:?}");
-        assert!(lines[0].contains("yes"), "ask prints the reply: {}", lines[0]);
+        assert_eq!(lines.len(), 4, "ask prints only the reply: {lines:?}");
+        assert!(lines.join("\n").contains("yes"), "ask prints the reply: {lines:?}");
         let pending = client::fetch_inbox(&addr, "w@h", None).await.unwrap();
         assert_eq!(pending.len(), 1, "noise stays unread: {pending:?}");
         assert_eq!(pending[0].id, noise);
@@ -1581,8 +1582,8 @@ mod tests {
         let status = wait_for_exit(&mut asker.child, 30).await;
         assert_eq!(status.code(), Some(0), "ask exits zero after a restart");
         let lines = read_out_lines(&out);
-        assert_eq!(lines.len(), 1, "ask prints one line: {lines:?}");
-        assert!(lines[0].contains("yes"), "ask prints the reply: {}", lines[0]);
+        assert_eq!(lines.len(), 4, "ask prints one wrapped reply: {lines:?}");
+        assert!(lines.join("\n").contains("yes"), "ask prints the reply: {lines:?}");
         let count: i64 = rusqlite::Connection::open(&db)
             .unwrap()
             .query_row("SELECT COUNT(*) FROM messages WHERE body = 'go?'", [], |row| {
@@ -1632,10 +1633,11 @@ mod tests {
         let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
         assert!(out.status.success(), "send exits zero: {out:?}");
         let lines = stdout_lines(&out);
-        assert_eq!(lines.len(), 2, "preamble plus the new id: {lines:?}");
-        assert!(lines[0].contains("one"), "first line is the unread message: {}", lines[0]);
-        assert!(lines[0].contains("a@h"), "preamble names the sender: {}", lines[0]);
-        let second: u64 = lines[1].parse().expect("second line is the new id");
+        assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
+        let preamble = lines[..4].join("\n");
+        assert!(preamble.contains("one"), "preamble is the unread message: {preamble}");
+        assert!(preamble.contains("a@h"), "preamble names the sender: {preamble}");
+        let second: u64 = lines[4].parse().expect("last line is the new id");
         assert!(second > first, "the id comes after the preamble: {lines:?}");
     }
 
@@ -1654,9 +1656,10 @@ mod tests {
         let out = run_chattrs(&bin, "reply", &addr, "b@h", &[&id_arg, "yo"]);
         assert!(out.status.success(), "reply exits zero: {out:?}");
         let lines = stdout_lines(&out);
-        assert_eq!(lines.len(), 2, "preamble plus the new id: {lines:?}");
-        assert!(lines[0].contains("hi"), "first line is the unread message: {}", lines[0]);
-        let second: u64 = lines[1].parse().expect("second line is the new id");
+        assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
+        let preamble = lines[..4].join("\n");
+        assert!(preamble.contains("hi"), "preamble is the unread message: {preamble}");
+        let second: u64 = lines[4].parse().expect("last line is the new id");
         assert!(second > original, "the reply id comes after the preamble: {lines:?}");
 
         let messages = client::fetch_inbox(&addr, "a@h", None).await.unwrap();
@@ -1678,14 +1681,15 @@ mod tests {
         let out = run_chattrs(&bin, "agents", &addr, "b@h", &[]);
         assert!(out.status.success(), "agents exits zero: {out:?}");
         let lines = stdout_lines(&out);
-        assert!(lines.len() >= 2, "preamble plus agent lines: {lines:?}");
-        assert!(lines[0].contains("hi"), "first line is the unread message: {}", lines[0]);
+        assert!(lines.len() >= 5, "wrapped preamble plus agent lines: {lines:?}");
+        let preamble = lines[..4].join("\n");
+        assert!(preamble.contains("hi"), "preamble is the unread message: {preamble}");
         assert!(
-            lines[1..].iter().any(|line| line.contains("a@h")),
+            lines[4..].iter().any(|line| line.contains("a@h")),
             "agents still lists a@h: {lines:?}"
         );
         assert!(
-            lines[1..].iter().any(|line| line.contains("b@h")),
+            lines[4..].iter().any(|line| line.contains("b@h")),
             "agents still lists b@h: {lines:?}"
         );
     }
@@ -1709,12 +1713,14 @@ mod tests {
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
         let lines = read_out_lines(&out);
-        assert_eq!(lines.len(), 2, "preamble plus the reply: {lines:?}");
-        assert!(lines[0].contains("noise"), "preamble prints what waited: {}", lines[0]);
-        assert!(!lines[0].contains("yes"), "preamble never contains the reply: {}", lines[0]);
-        assert!(lines[1].contains("yes"), "ask prints the reply: {}", lines[1]);
-        let wanted = format!("(re {})", question.id);
-        assert!(lines[1].contains(&wanted), "reply cites the question: {}", lines[1]);
+        assert_eq!(lines.len(), 8, "wrapped preamble plus the wrapped reply: {lines:?}");
+        let preamble = lines[..4].join("\n");
+        let reply = lines[4..].join("\n");
+        assert!(preamble.contains("noise"), "preamble prints what waited: {preamble}");
+        assert!(!preamble.contains("yes"), "preamble never contains the reply: {preamble}");
+        assert!(reply.contains("yes"), "ask prints the reply: {reply}");
+        let wanted = format!("reply-to=\"{}\"", question.id);
+        assert!(reply.contains(&wanted), "reply cites the question: {reply}");
     }
 
     #[tokio::test]
@@ -1730,8 +1736,9 @@ mod tests {
         let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
         assert!(out.status.success(), "send exits zero: {out:?}");
         let lines = stdout_lines(&out);
-        assert_eq!(lines.len(), 2, "preamble plus the new id: {lines:?}");
-        assert!(lines[0].contains("one"), "first line is the unread message: {}", lines[0]);
+        assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
+        let preamble = lines[..4].join("\n");
+        assert!(preamble.contains("one"), "preamble is the unread message: {preamble}");
 
         let again = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "three"]);
         assert!(again.status.success(), "send exits zero: {again:?}");
@@ -1785,11 +1792,52 @@ mod tests {
         let preamble: serde_json::Value =
             serde_json::from_str(&lines[0]).expect("preamble is JSON");
         assert_eq!(preamble["type"].as_str(), Some("message"), "preamble line: {}", lines[0]);
+        assert_eq!(preamble["untrusted"], serde_json::Value::Bool(true));
         assert_eq!(preamble["body"].as_str(), Some("one"));
         assert_eq!(preamble["id"].as_u64(), Some(first));
         let sent: serde_json::Value = serde_json::from_str(&lines[1]).expect("sent is JSON");
         assert_eq!(sent["type"].as_str(), Some("sent"), "own line: {}", lines[1]);
         let id = sent["id"].as_u64().expect("sent carries an id");
         assert!(id > first, "the new id follows the preamble");
+    }
+
+    #[tokio::test]
+    async fn json_message_lines_carry_untrusted_true() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let first = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+
+        let out = run_chattrs(&bin, "inbox", &addr, "b@h", &["--json"]);
+        assert!(out.status.success(), "inbox exits zero: {out:?}");
+        let lines = stdout_lines(&out);
+        assert_eq!(lines.len(), 1, "one message line: {lines:?}");
+        let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
+        assert_eq!(value["type"].as_str(), Some("message"), "line: {}", lines[0]);
+        assert_eq!(value["id"].as_u64(), Some(first));
+        assert_eq!(value["untrusted"], serde_json::Value::Bool(true));
+    }
+
+    #[tokio::test]
+    async fn watch_lines_carry_untrusted_true() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let out = dir.path().join("watch.out");
+        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        let lines = wait_for_lines(&out, 1).await;
+        assert_eq!(lines.len(), 1, "watch prints one line per message: {lines:?}");
+        let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
+        assert_eq!(value["type"].as_str(), Some("message"), "line: {}", lines[0]);
+        assert_eq!(value["id"].as_u64(), Some(id));
+        assert_eq!(value["untrusted"], serde_json::Value::Bool(true));
     }
 }

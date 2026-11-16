@@ -126,6 +126,7 @@ async fn run(args: Args) -> Result<(), String> {
                 if c.json {
                     let mut value = serde_json::to_value(message).map_err(|e| e.to_string())?;
                     value["type"] = serde_json::Value::String("message".to_string());
+                    value["untrusted"] = serde_json::Value::Bool(true);
                     println!("{value}");
                 } else {
                     println!("{}", model::render_message(message));
