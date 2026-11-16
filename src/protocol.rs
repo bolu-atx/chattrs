@@ -45,6 +45,12 @@ mod tests {
             Inbound::Watch,
             Inbound::Wait { reply_to: 12 },
             Inbound::Agents,
+            Inbound::Log { address: None, after: 0, limit: 500 },
+            Inbound::Log {
+                address: Some("codex@box1".into()),
+                after: 12,
+                limit: 500,
+            },
         ];
         for frame in frames {
             let line = encode(&frame).unwrap();
@@ -55,6 +61,15 @@ mod tests {
 
     #[test]
     fn outbound_frames_round_trip() {
+        let logged = crate::model::LoggedMessage {
+            id: 12,
+            from: "codex@box1".into(),
+            to: "opus@mac".into(),
+            body: "hi".into(),
+            ts: 1763200000000,
+            reply_to: None,
+            acked_at: None,
+        };
         let message = crate::model::Message {
             id: 12,
             from: "codex@box1".into(),
@@ -69,6 +84,7 @@ mod tests {
             Outbound::Inbox { messages: vec![message.clone()] },
             Outbound::Message(message),
             Outbound::Agents { agents: vec![] },
+            Outbound::Log { messages: vec![logged] },
             Outbound::Acked { ids: vec![12, 13] },
             Outbound::Error { code: "empty_body".into(), message: "body is empty".into() },
         ];
@@ -108,6 +124,8 @@ mod tests {
             serde_json::to_value(Outbound::Inbox { messages: vec![] }).unwrap(),
             serde_json::to_value(Outbound::Agents { agents: vec![] }).unwrap(),
             serde_json::to_value(Inbound::Agents).unwrap(),
+            serde_json::to_value(Inbound::Log { address: None, after: 0, limit: 500 }).unwrap(),
+            serde_json::to_value(Outbound::Log { messages: vec![] }).unwrap(),
             serde_json::to_value(Outbound::Acked { ids: vec![1] }).unwrap(),
             serde_json::to_value(Outbound::error("bad_frame", "nope")).unwrap(),
         ];

@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use crate::model::{Agent, Message};
+use crate::model::{Agent, LoggedMessage, Message};
 
 /// SQLite store for messages, safe to share across broker tasks.
 #[derive(Debug, Clone)]
@@ -85,6 +85,21 @@ impl Store {
     pub async fn touch_agent(&self, address: String) -> Result<(), String> {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || touch_agent_blocking(&conn, &address))
+            .await
+            .map_err(|e| format!("db task failed: {e}"))?
+    }
+
+    /// List message history with id above `after`, in id order, at most
+    /// `limit` rows. With `address`, only messages it sent or received.
+    /// Reading history never acks.
+    pub async fn log(
+        &self,
+        address: Option<String>,
+        after: u64,
+        limit: u64,
+    ) -> Result<Vec<LoggedMessage>, String> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || log_blocking(&conn, address.as_deref(), after, limit))
             .await
             .map_err(|e| format!("db task failed: {e}"))?
     }
@@ -268,6 +283,50 @@ fn ack_blocking(
         }
     }
     Ok(changed)
+}
+
+fn log_blocking(
+    conn: &Arc<Mutex<Connection>>,
+    address: Option<&str>,
+    after: u64,
+    limit: u64,
+) -> Result<Vec<LoggedMessage>, String> {
+    let conn = lock(conn)?;
+    let read = |row: &rusqlite::Row<'_>| {
+        Ok(LoggedMessage {
+            id: row.get::<_, i64>(0)? as u64,
+            from: row.get(1)?,
+            to: row.get(2)?,
+            body: row.get(3)?,
+            ts: row.get::<_, i64>(4)? as u64,
+            reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
+            acked_at: row.get::<_, Option<i64>>(6)?.map(|ts| ts as u64),
+        })
+    };
+    if let Some(address) = address {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, sender, recipient, body, ts, reply_to, acked_at FROM messages
+                 WHERE id > ?1 AND (sender = ?2 OR recipient = ?2)
+                 ORDER BY id LIMIT ?3",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![after as i64, address, limit as i64], read)
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    } else {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, sender, recipient, body, ts, reply_to, acked_at FROM messages
+                 WHERE id > ?1 ORDER BY id LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(rusqlite::params![after as i64, limit as i64], read)
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    }
 }
 
 fn touch_agent_blocking(

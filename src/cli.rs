@@ -30,6 +30,8 @@ pub enum Command {
     Ask(AskArgs),
     /// List known agent addresses and when each was last seen.
     Agents(AgentsArgs),
+    /// Show the full message history, oldest first.
+    Log(LogArgs),
     /// Print the bundled agent skill to stdout.
     Skill,
 }
@@ -197,6 +199,16 @@ pub struct AgentsArgs {
     pub client: ClientArgs,
 
     /// Print one JSON object per agent instead of a text line.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct LogArgs {
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Print one JSON object per message instead of a text line.
     #[arg(long)]
     pub json: bool,
 }
