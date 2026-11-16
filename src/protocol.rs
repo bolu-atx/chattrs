@@ -13,9 +13,7 @@ pub const SERVER_NAME: &str = "chattrs";
 
 /// Serialize a frame into one JSON line terminated by `\n`.
 pub fn encode<T: Serialize>(frame: &T) -> Result<String, String> {
-    serde_json::to_string(frame)
-        .map(|json| format!("{json}\n"))
-        .map_err(|e| e.to_string())
+    serde_json::to_string(frame).map(|json| format!("{json}\n")).map_err(|e| e.to_string())
 }
 
 /// Parse one frame from a line, ignoring its trailing newline.
@@ -53,11 +51,7 @@ mod tests {
             Inbound::Wait { reply_to: 12 },
             Inbound::Agents,
             Inbound::Log { address: None, after: 0, limit: 500 },
-            Inbound::Log {
-                address: Some("codex@box1".into()),
-                after: 12,
-                limit: 500,
-            },
+            Inbound::Log { address: Some("codex@box1".into()), after: 12, limit: 500 },
         ];
         for frame in frames {
             let line = encode(&frame).unwrap();
@@ -116,12 +110,8 @@ mod tests {
     #[test]
     fn every_line_carries_a_type_tag() {
         let frames = vec![
-            serde_json::to_value(Inbound::Hello {
-                v: 1,
-                address: "a@h".into(),
-                token: None,
-            })
-            .unwrap(),
+            serde_json::to_value(Inbound::Hello { v: 1, address: "a@h".into(), token: None })
+                .unwrap(),
             serde_json::to_value(Inbound::Send {
                 to: Some("b@h".into()),
                 body: "hi".into(),

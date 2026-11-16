@@ -120,9 +120,7 @@ async fn run(args: Args) -> Result<(), String> {
                     if json {
                         println!("{{\"type\":\"timeout\",\"id\":{id}}}");
                         use std::io::Write;
-                        std::io::stdout()
-                            .flush()
-                            .map_err(|e| format!("flush stdout: {e}"))?;
+                        std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
                     }
                     eprintln!("timeout: no reply to {id}");
                     std::process::exit(2);
@@ -181,13 +179,9 @@ async fn run(args: Args) -> Result<(), String> {
         }
         Command::Agents(c) => {
             let address = c.client.resolve_address()?;
-            let agents = client::fetch_agents(
-                &c.client.server,
-                &address,
-                c.client.token.as_deref(),
-                c.json,
-            )
-            .await?;
+            let agents =
+                client::fetch_agents(&c.client.server, &address, c.client.token.as_deref(), c.json)
+                    .await?;
             for agent in &agents {
                 if c.json {
                     let mut value = serde_json::to_value(agent).map_err(|e| e.to_string())?;

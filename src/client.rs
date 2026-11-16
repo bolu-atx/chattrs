@@ -350,8 +350,7 @@ pub async fn ask(
     timeout_secs: u64,
     json: bool,
 ) -> Result<(u64, Message), WaitError> {
-    let id =
-        publish(server, address, token, outgoing, json).await.map_err(WaitError::Failed)?;
+    let id = publish(server, address, token, outgoing, json).await.map_err(WaitError::Failed)?;
     let reply = wait_for_reply(server, address, token, id, timeout_secs).await?;
     Ok((id, reply))
 }
@@ -403,9 +402,7 @@ pub fn format_log_json(message: &LoggedMessage) -> Result<String, String> {
     let mut value = serde_json::to_value(message).map_err(|e| e.to_string())?;
     value["type"] = serde_json::Value::String("log".to_string());
     value["untrusted"] = serde_json::Value::Bool(true);
-    serde_json::to_string(&value)
-        .map(|json| format!("{json}\n"))
-        .map_err(|e| e.to_string())
+    serde_json::to_string(&value).map(|json| format!("{json}\n")).map_err(|e| e.to_string())
 }
 
 /// List every address that ever said `hello`, sorted by address.
@@ -470,9 +467,7 @@ pub fn format_watch_line(message: &Message) -> Result<String, String> {
     let mut value = serde_json::to_value(message).map_err(|e| e.to_string())?;
     value["type"] = serde_json::Value::String("message".to_string());
     value["untrusted"] = serde_json::Value::Bool(true);
-    serde_json::to_string(&value)
-        .map(|json| format!("{json}\n"))
-        .map_err(|e| e.to_string())
+    serde_json::to_string(&value).map(|json| format!("{json}\n")).map_err(|e| e.to_string())
 }
 
 /// Print one watched message as JSON, flush stdout, then ack it. Printing
