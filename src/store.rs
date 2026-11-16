@@ -41,6 +41,14 @@ impl Store {
         .map_err(|e| format!("db task failed: {e}"))?
     }
 
+    /// Fetch one message by id, or `None` when no such id exists.
+    pub async fn get(&self, id: u64) -> Result<Option<Message>, String> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || get_blocking(&conn, id))
+            .await
+            .map_err(|e| format!("db task failed: {e}"))?
+    }
+
     /// List every unread message for `recipient`, in id order.
     pub async fn inbox(&self, recipient: String) -> Result<Vec<Message>, String> {
         let conn = Arc::clone(&self.conn);
@@ -118,6 +126,35 @@ fn insert_blocking(
     )
     .map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid() as u64)
+}
+
+fn get_blocking(
+    conn: &Arc<Mutex<Connection>>,
+    id: u64,
+) -> Result<Option<Message>, String> {
+    let conn = lock(conn)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, sender, recipient, body, ts, reply_to FROM messages
+             WHERE id = ?1",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query_map([id as i64], |row| {
+            Ok(Message {
+                id: row.get::<_, i64>(0)? as u64,
+                from: row.get(1)?,
+                to: row.get(2)?,
+                body: row.get(3)?,
+                ts: row.get::<_, i64>(4)? as u64,
+                reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    match rows.next() {
+        None => Ok(None),
+        Some(row) => row.map(Some).map_err(|e| e.to_string()),
+    }
 }
 
 fn inbox_blocking(

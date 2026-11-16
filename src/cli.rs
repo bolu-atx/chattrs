@@ -20,8 +20,12 @@ pub enum Command {
     Serve(ServeArgs),
     /// Post a message to an address and print its id.
     Send(SendArgs),
+    /// Answer the message with an id and print the new id.
+    Reply(ReplyArgs),
     /// Read the own inbox and ack what was printed.
     Inbox(InboxArgs),
+    /// Stream new messages as JSON lines, acking what is printed.
+    Watch(WatchArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -80,6 +84,38 @@ impl SendArgs {
         let _ = std::io::stdin().read_to_string(&mut body);
         body.trim_end().to_string()
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ReplyArgs {
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Id of the message to answer.
+    pub id: u64,
+
+    /// Message text. With no text, the body is read from stdin.
+    #[arg(value_name = "MESSAGE")]
+    pub message: Vec<String>,
+}
+
+impl ReplyArgs {
+    /// The body to publish: joined args, or stdin when no args are given.
+    pub fn body(&self) -> String {
+        if !self.message.is_empty() {
+            return self.message.join(" ");
+        }
+        use std::io::Read;
+        let mut body = String::new();
+        let _ = std::io::stdin().read_to_string(&mut body);
+        body.trim_end().to_string()
+    }
+}
+
+#[derive(clap::Args, Debug)]
+pub struct WatchArgs {
+    #[command(flatten)]
+    pub client: ClientArgs,
 }
 
 #[derive(clap::Args, Debug)]
