@@ -1,4 +1,4 @@
-//! chattrs — the broker: hello, send, reply, inbox, ack, and watch.
+//! chattrs — the broker: hello, send, reply, inbox, ack, watch, and agents.
 //!
 //! One `Broker` owns a `Store` and the `watch` registry. Each connection runs
 //! its own task with a reader loop: the first frame must be `hello`, then the
@@ -152,6 +152,10 @@ impl Broker {
                             .await;
                             break;
                         }
+                        if let Err(e) = self.store.touch_agent(address.clone()).await {
+                            write_error(&mut write_half, Outbound::error("internal", e)).await;
+                            break;
+                        }
                         peer = Some(address.clone());
                         write_frame(
                             &mut write_half,
@@ -166,7 +170,8 @@ impl Broker {
                     Inbound::Send { .. }
                     | Inbound::Inbox
                     | Inbound::Ack { .. }
-                    | Inbound::Watch => {
+                    | Inbound::Watch
+                    | Inbound::Agents => {
                         write_error(
                             &mut write_half,
                             Outbound::error("hello_required", "hello must be the first frame"),
@@ -194,6 +199,10 @@ impl Broker {
                                 Outbound::error("bad_address", "address is invalid"),
                             )
                             .await;
+                            continue;
+                        }
+                        if let Err(e) = self.store.touch_agent(address.clone()).await {
+                            write_error(&mut write_half, Outbound::error("internal", e)).await;
                             continue;
                         }
                         peer = Some(address.clone());
@@ -348,6 +357,15 @@ impl Broker {
                             }
                         }
                     }
+                    Inbound::Agents => match self.store.agents().await {
+                        Ok(agents) => {
+                            write_frame(&mut write_half, &Outbound::Agents { agents }).await;
+                        }
+                        Err(e) => {
+                            write_error(&mut write_half, Outbound::error("internal", e)).await;
+                            continue;
+                        }
+                    },
                     Inbound::Watch => {
                         let (sender, mut live) = mpsc::unbounded_channel();
                         if let Ok(mut watchers) = self.watchers.lock() {
@@ -398,6 +416,9 @@ impl Broker {
                     }
                 },
             }
+        }
+        if let Some(address) = peer {
+            let _ = self.store.touch_agent(address).await;
         }
         let _ = write_half.shutdown().await;
     }
@@ -860,6 +881,84 @@ mod tests {
         assert_eq!(acked, vec![id]);
         let again = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
         assert!(again.is_empty(), "message arrives once: {again:?}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn agents_lists_addresses_that_said_hello() {
+        let (addr, _dir, handle) = spawn().await;
+        client::send(&addr, "b@h", None, "a@h", "hi", None).await.unwrap();
+        client::fetch_inbox(&addr, "a@h", None).await.unwrap();
+
+        let agents = client::fetch_agents(&addr, "a@h", None).await.unwrap();
+        let names: Vec<&str> =
+            agents.iter().map(|agent| agent.address.as_str()).collect();
+        assert_eq!(names, vec!["a@h", "b@h"]);
+        assert!(agents.iter().all(|agent| agent.last_seen > 0), "{agents:?}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn agents_omits_addresses_that_only_received() {
+        let (addr, _dir, handle) = spawn().await;
+        client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+
+        let agents = client::fetch_agents(&addr, "a@h", None).await.unwrap();
+        let names: Vec<&str> =
+            agents.iter().map(|agent| agent.address.as_str()).collect();
+        assert_eq!(names, vec!["a@h"]);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn last_seen_updates_on_disconnect() {
+        let (addr, _dir, handle) = spawn().await;
+        let mut raw = raw_connect(&addr).await;
+        raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\"}\n").await;
+        let first = seen(&addr, "a@h").await;
+        assert!(first > 0, "hello records a last_seen");
+
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        drop(raw);
+
+        let start = tokio::time::Instant::now();
+        loop {
+            let last_seen = seen(&addr, "a@h").await;
+            if last_seen > first {
+                break;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "disconnect never updated last_seen"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        handle.abort();
+    }
+
+    async fn seen(server: &str, address: &str) -> u64 {
+        client::fetch_agents(server, "observer@h", None)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|agent| agent.address == address)
+            .unwrap()
+            .last_seen
+    }
+
+    #[tokio::test]
+    async fn agents_survive_broker_restart() {
+        let (addr, dir, handle) = spawn().await;
+        let db = dir.path().join("chattrs.db");
+        client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        handle.abort();
+
+        let (addr, handle) = spawn_at(&db).await;
+        let agents = client::fetch_agents(&addr, "a@h", None).await.unwrap();
+        assert!(
+            agents.iter().any(|agent| agent.address == "a@h"),
+            "agents survive: {agents:?}"
+        );
         handle.abort();
     }
 

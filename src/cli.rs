@@ -26,6 +26,8 @@ pub enum Command {
     Inbox(InboxArgs),
     /// Stream new messages as JSON lines, acking what is printed.
     Watch(WatchArgs),
+    /// List known agent addresses and when each was last seen.
+    Agents(AgentsArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -51,13 +53,37 @@ pub struct ClientArgs {
     #[arg(long, default_value = DEFAULT_SERVER, env = "CHATTRS_SERVER")]
     pub server: String,
 
-    /// Own address, as `user@host`.
+    /// Own address, as `user@host`. Without it, the address defaults to
+    /// `<agent>@<hostname>` from `--agent`.
     #[arg(long, env = "CHATTRS_ADDRESS")]
-    pub address: String,
+    pub address: Option<String>,
+
+    /// Agent name for the default address, as in `<agent>@<hostname>`.
+    #[arg(long, env = "CHATTRS_AGENT")]
+    pub agent: Option<String>,
 
     /// Token for the broker (checked once multi-host binds need it).
     #[arg(long, env = "CHATTRS_TOKEN")]
     pub token: Option<String>,
+}
+
+impl ClientArgs {
+    /// Resolve the own address: `--address` wins, else `<agent>@<hostname>`.
+    pub fn resolve_address(&self) -> Result<String, String> {
+        if let Some(address) = self.address.as_deref() {
+            return Ok(address.to_string());
+        }
+        let Some(agent) = self.agent.as_deref() else {
+            return Err("set CHATTRS_ADDRESS or CHATTRS_AGENT".to_string());
+        };
+        Ok(format!("{agent}@{hostname}", hostname = short_hostname()))
+    }
+}
+
+/// This machine's hostname up to the first `.`, lowercased.
+pub fn short_hostname() -> String {
+    let name = gethostname::gethostname().to_string_lossy().into_owned();
+    name.split('.').next().unwrap_or("").to_lowercase()
 }
 
 #[derive(clap::Args, Debug)]
@@ -133,15 +159,30 @@ pub struct InboxArgs {
     pub json: bool,
 }
 
+#[derive(clap::Args, Debug)]
+pub struct AgentsArgs {
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Print one JSON object per agent instead of a text line.
+    #[arg(long)]
+    pub json: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn client_args() -> ClientArgs {
+        ClientArgs { server: "x".into(), address: None, agent: None, token: None }
+    }
 
     fn send_args(message: Vec<&str>) -> SendArgs {
         SendArgs {
             client: ClientArgs {
                 server: "x".into(),
-                address: "a@h".into(),
+                address: Some("a@h".into()),
+                agent: None,
                 token: None,
             },
             to: "b@h".into(),
@@ -159,5 +200,26 @@ mod tests {
     fn body_returns_empty_when_no_args_and_empty_stdin() {
         // A non-interactive test process has an empty stdin.
         assert_eq!(send_args(vec![]).body(), "");
+    }
+
+    #[test]
+    fn address_defaults_to_agent_at_short_hostname() {
+        let mut args = client_args();
+        args.agent = Some("codex".into());
+        assert_eq!(args.resolve_address().unwrap(), format!("codex@{}", short_hostname()));
+    }
+
+    #[test]
+    fn explicit_address_overrides_agent() {
+        let mut args = client_args();
+        args.address = Some("custom@other".into());
+        args.agent = Some("codex".into());
+        assert_eq!(args.resolve_address().unwrap(), "custom@other");
+    }
+
+    #[test]
+    fn missing_address_and_agent_is_an_error() {
+        let err = client_args().resolve_address().unwrap_err();
+        assert!(err.contains("CHATTRS_ADDRESS or CHATTRS_AGENT"), "got: {err}");
     }
 }

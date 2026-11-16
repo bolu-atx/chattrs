@@ -51,13 +51,16 @@ to stdout, so it works under a watcher like Claude Code's Monitor tool.
 | `reply` | Answer message `ID` (text args, else stdin) and print the new id. |
 | `inbox` | Print every unread message for `--address`, then ack what was printed. |
 | `watch` | Stream new messages as JSON lines forever, acking what is printed. |
+| `agents` | List known agent addresses and when each was last seen. |
 
 Common flags:
 
 - `--server ADDR` — broker address (default `127.0.0.1:4646`,
   `CHATTRS_SERVER`).
-- `--address ADDR` — own address, required until a default lands
-  (`CHATTRS_ADDRESS`).
+- `--address ADDR` — own address (`CHATTRS_ADDRESS`). Without it, the
+  address defaults to `<agent>@<hostname>` from `--agent`.
+- `--agent AGENT` — agent name for the default address (`CHATTRS_AGENT`).
+  Needs one of address or agent: with neither, the command exits 1.
 - `--token TOKEN` — fleet token (`CHATTRS_TOKEN`). `serve` needs it for a
   non-loopback bind; every other command sends it in `hello`.
 - `--json` — print JSON lines; every line carries a `type`.
@@ -77,6 +80,12 @@ CHATTRS_ADDRESS=claude@box1 chattrs send --to muse@mac "proposal ready"
 CHATTRS_ADDRESS=muse@mac chattrs send --to codex@box2 "reviewing now"
 ```
 
+Without `--address`, an agent gets `<agent>@<hostname>` from `--agent`
+(`CHATTRS_AGENT`), with the hostname cut at the first dot and lowercased.
+Two agents with the same name on one host share an inbox, so give each
+worker a unique `CHATTRS_ADDRESS` (for example `codex-2@box1`). There is no
+default agent name: a shared default would merge inboxes.
+
 Because the protocol is line-JSON over TCP, agents can also talk to the
 broker directly (see [Protocol](#protocol)) — useful for SDK-less clients
 or quick Python/Node integrations.
@@ -93,6 +102,7 @@ Client → broker:
 {"type":"inbox"}
 {"type":"ack",   "ids":[12, 13]}
 {"type":"watch"}
+{"type":"agents"}
 ```
 
 Broker → client:
@@ -106,6 +116,7 @@ Broker → client:
 {"type":"message", "id":13,"from":"opus@mac","to":"codex@box1",
  "body":"hi","ts":1763200000001,"reply_to":12}
 {"type":"acked",   "ids":[12, 13]}
+{"type":"agents",  "agents":[{"address":"codex@box1","last_seen":1763200000000}]}
 {"type":"error",   "code":"empty_body", "message":"body is empty"}
 ```
 
@@ -128,7 +139,10 @@ that the id exists.
 id order. `ack` marks the listed ids read when they belong to that address
 and are unread, and `acked` lists the ids that changed; other ids are
 ignored. Except for `watch`, the broker never pushes messages: the client
-asks. The `inbox` command prints each message, flushes stdout, then acks,
+asks. Every accepted `hello` records the address with the broker clock, and
+the broker records it again when that connection closes. `agents` returns
+all recorded addresses sorted by address; an address that only received
+messages and never connected is not listed. The `inbox` command prints each message, flushes stdout, then acks,
 so a crash between print and ack redelivers the message on the next run —
 delivery is at least once, and the id tells duplicates apart.
 
