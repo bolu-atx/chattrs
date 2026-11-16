@@ -7,6 +7,60 @@ Opus) starts workers (Codex, Muse, pi, Claude) on remote hosts by its own
 means, such as ssh. Chattrs lets any of them talk while the work runs, like
 Claude Code's agent-to-agent messages, but for every agent.
 
+## Vision
+
+One fleet, many vendors. Claude Opus coordinates from a Mac. Codex writes
+code on `box1`. Muse reviews on `box2`. A DeepSeek agent runs the long test
+suite on `box3`. One broker runs on an always-on host. Every agent has the
+same small CLI and an address.
+
+```
+opus@mac ──┐                     ┌── codex@box1
+           ├── broker (SQLite) ──┼── muse@box2
+operator ──┘                     └── deepseek@box3
+```
+
+A normal hour:
+
+1. Opus starts each worker over ssh with `CHATTRS_ADDRESS` set, then goes
+   idle. `chattrs watch` under Monitor is its only wake source.
+2. Codex finishes a change: `chattrs send --to muse@box2 "branch feat/x is
+   ready for review"`. Worker to worker. Opus is not in the path.
+3. Muse finds a design problem that needs a decision:
+   `chattrs ask --to opus@mac "keep the old API or break it?"`. Only Muse
+   blocks. Opus wakes, runs `chattrs reply 41 "break it"`, and Muse continues.
+4. The DeepSeek agent runs tests for forty minutes. Its next chattrs command
+   prints the messages that arrived in that time. It did not poll.
+5. The Mac sleeps, or the broker restarts. No message is lost. Each one
+   arrives when its recipient next checks.
+6. The next day, the operator runs `chattrs log` and reads who said what.
+
+The same commands work at every distance. Only the server address changes:
+
+- **One machine:** loopback, no token.
+- **One LAN or one tailnet:** the broker binds a private address, with a token.
+- **Behind NAT, no tailnet:** `ssh -R` forwards the broker port to the worker.
+
+## Why not something else
+
+| Alternative | Where it stops |
+| ----------- | -------------- |
+| Claude Code `SendMessage` | Claude agents only, in one session tree. No Codex, Muse, or DeepSeek. |
+| ssh and read the worker's output | One direction. The coordinator must poll. A worker cannot ask a question. |
+| tmux or herdr `send-keys` | The target must be live and at a prompt. No queue, no history. The text arrives as if the user typed it. |
+| Shared files or git commits | No wake signal. Needs a shared disk or a push for each message. |
+| MCP message server | Each agent needs MCP support and config. Tool schemas cost context in every session. |
+| NATS or Redis | A second service to run. No agent CLI, no blocking `ask`, no trust wrapper. |
+| Slack or GitHub comments | Leaves the private network. Rate limits. Human channels fill with agent noise. |
+
+Chattrs needs only what every coding agent already has: a shell. It adds
+three things the list above lacks together: a queue that survives restarts,
+a blocking `ask` for the one agent that needs an answer, and a wrapper that
+marks each message as agent input.
+
+It does less than each alternative in one way: it starts nothing, runs
+nothing, and moves no code.
+
 ## Principles
 
 1. Any agent can message any agent. Delivery happens when the recipient next checks.
