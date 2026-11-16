@@ -57,6 +57,20 @@ impl Store {
             .map_err(|e| format!("db task failed: {e}"))?
     }
 
+    /// Fetch the lowest-id message for `recipient` with this `reply_to`,
+    /// whether it is acked or not. Used by `wait`, which also matches
+    /// messages that `inbox` no longer lists.
+    pub async fn find_reply(
+        &self,
+        recipient: String,
+        reply_to: u64,
+    ) -> Result<Option<Message>, String> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || find_reply_blocking(&conn, &recipient, reply_to))
+            .await
+            .map_err(|e| format!("db task failed: {e}"))?
+    }
+
     /// Mark the listed ids as read when they belong to `recipient` and are
     /// unread, and return the ids that changed. Other ids are ignored.
     pub async fn ack(&self, recipient: String, ids: Vec<u64>) -> Result<Vec<u64>, String> {
@@ -202,6 +216,36 @@ fn inbox_blocking(
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+fn find_reply_blocking(
+    conn: &Arc<Mutex<Connection>>,
+    recipient: &str,
+    reply_to: u64,
+) -> Result<Option<Message>, String> {
+    let conn = lock(conn)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, sender, recipient, body, ts, reply_to FROM messages
+             WHERE recipient = ?1 AND reply_to = ?2 ORDER BY id LIMIT 1",
+        )
+        .map_err(|e| e.to_string())?;
+    let mut rows = stmt
+        .query_map(rusqlite::params![recipient, reply_to as i64], |row| {
+            Ok(Message {
+                id: row.get::<_, i64>(0)? as u64,
+                from: row.get(1)?,
+                to: row.get(2)?,
+                body: row.get(3)?,
+                ts: row.get::<_, i64>(4)? as u64,
+                reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    match rows.next() {
+        None => Ok(None),
+        Some(row) => row.map(Some).map_err(|e| e.to_string()),
+    }
 }
 
 fn ack_blocking(

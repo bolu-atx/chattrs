@@ -119,6 +119,10 @@ pub enum Inbound {
     Agents,
     /// Stream every unread message, then each new one, as `message` frames.
     Watch,
+    /// Wait for the lowest-id message to the `hello` address with this
+    /// `reply_to`, acked or not. The broker answers at once when one
+    /// exists, else when one arrives. One `wait` gets one message.
+    Wait { reply_to: u64 },
     /// Mark messages as read. Only unread messages owned by the `hello`
     /// address change; other ids are ignored, not an error.
     Ack { ids: Vec<u64> },

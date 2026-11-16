@@ -1,8 +1,9 @@
 //! chattrs — client: one TCP connection per command.
 //!
 //! Every command opens a fresh connection, sends a `hello`, then the command
-//! frame, and reads the response. `watch` is the one exception: it holds the
-//! connection open and streams `message` frames, printing each as JSON.
+//! frame, and reads the response. `watch` holds one open and streams
+//! `message` frames, printing each as JSON; `ask` sends its question on one
+//! connection, then holds a `wait` open until the reply arrives.
 
 use crate::model::{self, Agent, Inbound, Message, Outbound};
 use crate::protocol;
@@ -112,6 +113,179 @@ pub async fn fetch_inbox(
     }
 }
 
+/// Seconds between reconnects, doubling from 1 s to 30 s. Shared by
+/// `watch` and the `ask` wait, so both back off the same way.
+pub fn next_backoff_secs(current: u64) -> u64 {
+    (current * 2).min(30)
+}
+
+/// A failure of `wait_for_reply` or `ask`. A timeout carries the id that
+/// never got a reply, so the caller can report it and exit 2.
+#[derive(Debug, PartialEq, Eq)]
+pub enum WaitError {
+    Timeout { id: u64 },
+    Failed(String),
+}
+
+impl From<String> for WaitError {
+    fn from(error: String) -> WaitError {
+        WaitError::Failed(error)
+    }
+}
+
+/// True when the error is a broker `error` frame rather than a dropped
+/// connection. Server errors fail the wait; anything else reconnects.
+fn is_server_error(error: &str) -> bool {
+    const CODES: [&str; 10] = [
+        "bad_frame",
+        "hello_required",
+        "bad_version",
+        "bad_address",
+        "bad_token",
+        "empty_body",
+        "too_large",
+        "unknown_message",
+        "not_recipient",
+        "internal",
+    ];
+    match error.split_once(':') {
+        Some((code, _)) => CODES.contains(&code),
+        None => false,
+    }
+}
+
+/// An open `wait`: one reply id, then one `message` frame.
+pub struct WaitConn {
+    conn: Conn,
+}
+
+impl WaitConn {
+    /// Say hello and park a `wait` for `reply_to` on this connection.
+    pub async fn connect(
+        server: &str,
+        address: &str,
+        token: Option<&str>,
+        reply_to: u64,
+    ) -> Result<WaitConn, String> {
+        let mut conn = hello(server, address, token).await?;
+        send_frame(&mut conn, &Inbound::Wait { reply_to }).await?;
+        Ok(WaitConn { conn })
+    }
+
+    /// Block until the broker delivers the reply.
+    pub async fn next_message(&mut self) -> Result<Message, String> {
+        loop {
+            match recv_frame(&mut self.conn).await? {
+                Outbound::Message(message) => return Ok(message),
+                Outbound::Error { code, message } => {
+                    return Err(format!("{code}: {message}"));
+                }
+                _ => continue,
+            }
+        }
+    }
+}
+
+/// Wait for the reply to `reply_to`, reconnecting with backoff when the
+/// connection drops and resending only the `wait`. The question is sent
+/// once by the caller and never here. `timeout_secs` of zero waits with
+/// no limit; otherwise the whole wait, reconnects included, is bounded.
+pub async fn wait_for_reply(
+    server: &str,
+    address: &str,
+    token: Option<&str>,
+    reply_to: u64,
+    timeout_secs: u64,
+) -> Result<Message, WaitError> {
+    let deadline = if timeout_secs == 0 {
+        None
+    } else {
+        Some(tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs))
+    };
+    let mut backoff_secs: u64 = 1;
+    loop {
+        match WaitConn::connect(server, address, token, reply_to).await {
+            Ok(mut stream) => {
+                backoff_secs = 1;
+                let wait = stream.next_message();
+                match deadline {
+                    Some(end) => match tokio::time::timeout_at(end, wait).await {
+                        Ok(Ok(message)) => return Ok(message),
+                        Ok(Err(error)) => {
+                            if is_server_error(&error) {
+                                return Err(WaitError::Failed(error));
+                            }
+                            if tokio::time::Instant::now() >= end {
+                                return Err(WaitError::Timeout { id: reply_to });
+                            }
+                            eprintln!(
+                                "chattrs: ask disconnected: {error}, \
+                                 retrying in {backoff_secs}s"
+                            );
+                        }
+                        Err(_) => return Err(WaitError::Timeout { id: reply_to }),
+                    },
+                    None => match wait.await {
+                        Ok(message) => return Ok(message),
+                        Err(error) => {
+                            if is_server_error(&error) {
+                                return Err(WaitError::Failed(error));
+                            }
+                            eprintln!(
+                                "chattrs: ask disconnected: {error}, \
+                                 retrying in {backoff_secs}s"
+                            );
+                        }
+                    },
+                }
+            }
+            Err(error) => {
+                if is_server_error(&error) {
+                    return Err(WaitError::Failed(error));
+                }
+                if let Some(end) = deadline {
+                    if tokio::time::Instant::now() >= end {
+                        return Err(WaitError::Timeout { id: reply_to });
+                    }
+                }
+                eprintln!("chattrs: ask cannot connect: {error}, retrying in {backoff_secs}s");
+            }
+        }
+        match deadline {
+            Some(end) => {
+                let now = tokio::time::Instant::now();
+                if now >= end {
+                    return Err(WaitError::Timeout { id: reply_to });
+                }
+                let pause = std::time::Duration::from_secs(backoff_secs).min(end - now);
+                tokio::time::sleep(pause).await;
+                if tokio::time::Instant::now() >= end {
+                    return Err(WaitError::Timeout { id: reply_to });
+                }
+            }
+            None => {
+                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            }
+        }
+        backoff_secs = next_backoff_secs(backoff_secs);
+    }
+}
+
+/// Post a question and wait for its reply. The question is sent once;
+/// reconnects resend only the `wait`. Returns the question id and reply.
+pub async fn ask(
+    server: &str,
+    address: &str,
+    token: Option<&str>,
+    to: &str,
+    body: &str,
+    timeout_secs: u64,
+) -> Result<(u64, Message), WaitError> {
+    let id = send(server, address, token, to, body, None).await.map_err(WaitError::Failed)?;
+    let reply = wait_for_reply(server, address, token, id, timeout_secs).await?;
+    Ok((id, reply))
+}
+
 /// List every address that ever said `hello`, sorted by address.
 pub async fn fetch_agents(
     server: &str,
@@ -213,7 +387,7 @@ pub async fn watch(server: &str, address: &str, token: Option<&str>) -> Result<(
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-        backoff_secs = (backoff_secs * 2).min(30);
+        backoff_secs = next_backoff_secs(backoff_secs);
     }
 }
 

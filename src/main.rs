@@ -1,8 +1,9 @@
 //! chattrs — distributed messaging for cross-agent coordination.
 //!
 //! A thin entry point: parse `cli`, then dispatch to `server` (the broker) or
-//! `client` (`send`, `reply`, `inbox`, `watch`). `model` owns the wire types,
-//! `protocol` the line-JSON framing, and `store` the SQLite storage.
+//! `client` (`send`, `reply`, `inbox`, `watch`, `ask`). `model` owns the
+//! wire types, `protocol` the line-JSON framing, and `store` the SQLite
+//! storage.
 //!
 //! Quick start:
 //! ```text
@@ -71,6 +72,46 @@ async fn run(args: Args) -> Result<(), String> {
         Command::Watch(c) => {
             let address = c.client.resolve_address()?;
             client::watch(&c.client.server, &address, c.client.token.as_deref()).await
+        }
+        Command::Ask(c) => {
+            let address = c.client.resolve_address()?;
+            let timeout = c.timeout;
+            let json = c.json;
+            match client::ask(
+                &c.client.server,
+                &address,
+                c.client.token.as_deref(),
+                &c.to,
+                &c.body(),
+                timeout,
+            )
+            .await
+            {
+                Ok((_, reply)) => {
+                    if json {
+                        print!("{}", client::format_watch_line(&reply)?);
+                    } else {
+                        println!("{}", model::render_message(&reply));
+                    }
+                    use std::io::Write;
+                    std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
+                    client::ack(&c.client.server, &address, c.client.token.as_deref(), &[reply.id])
+                        .await?;
+                    Ok(())
+                }
+                Err(client::WaitError::Timeout { id }) => {
+                    if json {
+                        println!("{{\"type\":\"timeout\",\"id\":{id}}}");
+                        use std::io::Write;
+                        std::io::stdout()
+                            .flush()
+                            .map_err(|e| format!("flush stdout: {e}"))?;
+                    }
+                    eprintln!("timeout: no reply to {id}");
+                    std::process::exit(2);
+                }
+                Err(client::WaitError::Failed(error)) => Err(error),
+            }
         }
         Command::Inbox(c) => {
             let address = c.client.resolve_address()?;

@@ -26,6 +26,8 @@ pub enum Command {
     Inbox(InboxArgs),
     /// Stream new messages as JSON lines, acking what is printed.
     Watch(WatchArgs),
+    /// Post a question and block until its reply arrives.
+    Ask(AskArgs),
     /// List known agent addresses and when each was last seen.
     Agents(AgentsArgs),
 }
@@ -104,16 +106,21 @@ pub struct SendArgs {
     pub json: bool,
 }
 
+/// The body to publish: joined args, or stdin when no args are given.
+fn join_body(parts: &[String]) -> String {
+    if !parts.is_empty() {
+        return parts.join(" ");
+    }
+    use std::io::Read;
+    let mut body = String::new();
+    let _ = std::io::stdin().read_to_string(&mut body);
+    body.trim_end().to_string()
+}
+
 impl SendArgs {
     /// The body to publish: joined args, or stdin when no args are given.
     pub fn body(&self) -> String {
-        if !self.message.is_empty() {
-            return self.message.join(" ");
-        }
-        use std::io::Read;
-        let mut body = String::new();
-        let _ = std::io::stdin().read_to_string(&mut body);
-        body.trim_end().to_string()
+        join_body(&self.message)
     }
 }
 
@@ -133,13 +140,7 @@ pub struct ReplyArgs {
 impl ReplyArgs {
     /// The body to publish: joined args, or stdin when no args are given.
     pub fn body(&self) -> String {
-        if !self.message.is_empty() {
-            return self.message.join(" ");
-        }
-        use std::io::Read;
-        let mut body = String::new();
-        let _ = std::io::stdin().read_to_string(&mut body);
-        body.trim_end().to_string()
+        join_body(&self.message)
     }
 }
 
@@ -147,6 +148,35 @@ impl ReplyArgs {
 pub struct WatchArgs {
     #[command(flatten)]
     pub client: ClientArgs,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AskArgs {
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Recipient address, as `user@host`.
+    #[arg(long)]
+    pub to: String,
+
+    /// Wait this many seconds for the reply. Zero waits with no limit.
+    #[arg(long, default_value_t = 600)]
+    pub timeout: u64,
+
+    /// Print the reply as one JSON `message` line instead of a text line.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Question text. With no text, the body is read from stdin.
+    #[arg(value_name = "MESSAGE")]
+    pub message: Vec<String>,
+}
+
+impl AskArgs {
+    /// The question to post: joined args, or stdin when no args are given.
+    pub fn body(&self) -> String {
+        join_body(&self.message)
+    }
 }
 
 #[derive(clap::Args, Debug)]
