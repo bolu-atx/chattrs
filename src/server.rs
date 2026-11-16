@@ -1428,10 +1428,10 @@ mod tests {
         .unwrap();
         let history = client::fetch_log(&endpoint(&addr, "reader@h"), None).await.unwrap();
         assert_eq!(history.len(), 2);
-        assert_eq!(history[0].id, first);
-        assert_eq!(history[0].topic, None);
-        assert_eq!(history[1].id, second);
-        assert_eq!(history[1].topic.as_deref(), Some("release-26"));
+        assert_eq!(history[0].message.id, first);
+        assert_eq!(history[0].message.topic, None);
+        assert_eq!(history[1].message.id, second);
+        assert_eq!(history[1].message.topic.as_deref(), Some("release-26"));
         let plain = crate::output::render_log_line(&history[0]);
         assert!(!plain.contains("(topic"), "general chat shows no topic: {plain}");
         let lined = crate::output::render_log_line(&history[1]);
@@ -1481,9 +1481,9 @@ mod tests {
 
         let history = client::fetch_log(&endpoint(&addr, "reader@h"), None).await.unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].id, id);
-        assert_eq!(history[0].to, None);
-        assert_eq!(history[0].topic.as_deref(), Some("release-26"));
+        assert_eq!(history[0].message.id, id);
+        assert_eq!(history[0].message.to, None);
+        assert_eq!(history[0].message.topic.as_deref(), Some("release-26"));
         let value = serde_json::to_value(&history[0]).unwrap();
         assert!(value["to"].is_null(), "the wire message has to null");
         handle.abort();
@@ -1637,9 +1637,9 @@ mod tests {
 
         let history = client::fetch_log(&endpoint(&addr, "reader@h"), None).await.unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].id, id);
-        assert_eq!(history[0].to, None);
-        assert_eq!(history[0].topic.as_deref(), Some("release-26"));
+        assert_eq!(history[0].message.id, id);
+        assert_eq!(history[0].message.to, None);
+        assert_eq!(history[0].message.topic.as_deref(), Some("release-26"));
         let line = crate::output::render_log_line(&history[0]);
         assert!(line.contains("→ topic:release-26:"), "log names the room: {line}");
         assert!(!line.contains("(topic "), "the room is not repeated as a suffix: {line}");
@@ -1816,16 +1816,16 @@ mod tests {
             client::publish(&endpoint(&addr, "c@h"), outgoing("a@h", "three")).await.unwrap();
 
         let history = client::fetch_log(&endpoint(&addr, "reader@h"), None).await.unwrap();
-        let ids: Vec<u64> = history.iter().map(|message| message.id).collect();
+        let ids: Vec<u64> = history.iter().map(|message| message.message.id).collect();
         assert_eq!(ids, vec![first, second, third]);
-        assert_eq!(history[0].from, "a@h");
-        assert_eq!(history[0].to.as_deref(), Some("b@h"));
-        assert_eq!(history[0].body, "one");
-        assert_eq!(history[0].reply_to, None);
-        assert_eq!(history[1].from, "b@h");
-        assert_eq!(history[1].to.as_deref(), Some("a@h"));
-        assert_eq!(history[1].reply_to, Some(first));
-        assert_eq!(history[2].from, "c@h");
+        assert_eq!(history[0].message.from, "a@h");
+        assert_eq!(history[0].message.to.as_deref(), Some("b@h"));
+        assert_eq!(history[0].message.body, "one");
+        assert_eq!(history[0].message.reply_to, None);
+        assert_eq!(history[1].message.from, "b@h");
+        assert_eq!(history[1].message.to.as_deref(), Some("a@h"));
+        assert_eq!(history[1].message.reply_to, Some(first));
+        assert_eq!(history[2].message.from, "c@h");
         handle.abort();
     }
 
@@ -1842,7 +1842,7 @@ mod tests {
                 .await
                 .unwrap()
                 .into_iter()
-                .map(|message| message.id)
+                .map(|message| message.message.id)
                 .collect()
         }
         assert_eq!(filtered(&addr, "a@h").await, vec![ab, ba, ac]);
@@ -1864,9 +1864,9 @@ mod tests {
 
         let history = client::fetch_log(&endpoint(&addr, "a@h"), None).await.unwrap();
         assert_eq!(history.len(), 2);
-        assert_eq!(history[0].id, first);
+        assert_eq!(history[0].message.id, first);
         assert!(history[0].acked_at.is_some_and(|ts| ts > 0), "acked message carries acked_at");
-        assert_eq!(history[1].id, second);
+        assert_eq!(history[1].message.id, second);
         assert_eq!(history[1].acked_at, None, "unread message has null acked_at");
         handle.abort();
     }
@@ -1878,7 +1878,7 @@ mod tests {
 
         let history = client::fetch_log(&endpoint(&addr, "a@h"), None).await.unwrap();
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].id, id);
+        assert_eq!(history[0].message.id, id);
 
         let messages = client::fetch_inbox(&endpoint(&addr, "b@h")).await.unwrap();
         assert_eq!(messages.len(), 1, "log leaves the message unread: {messages:?}");
@@ -1909,7 +1909,7 @@ mod tests {
         drop(raw);
 
         let history = client::fetch_log(&endpoint(&addr, "a@h"), None).await.unwrap();
-        let ids: Vec<u64> = history.iter().map(|message| message.id).collect();
+        let ids: Vec<u64> = history.iter().map(|message| message.message.id).collect();
         assert_eq!(ids, expected, "all 1200 messages return once, in order");
         handle.abort();
     }
@@ -1924,11 +1924,11 @@ mod tests {
 
         let (addr, handle) = spawn_at(&db).await;
         let history = client::fetch_log(&endpoint(&addr, "a@h"), None).await.unwrap();
-        let ids: Vec<u64> = history.iter().map(|message| message.id).collect();
+        let ids: Vec<u64> = history.iter().map(|message| message.message.id).collect();
         assert_eq!(ids, vec![first, second]);
-        assert_eq!(history[0].body, "one");
-        assert_eq!(history[1].body, "two");
-        assert_eq!(history[1].reply_to, Some(first));
+        assert_eq!(history[0].message.body, "one");
+        assert_eq!(history[1].message.body, "two");
+        assert_eq!(history[1].message.reply_to, Some(first));
         handle.abort();
     }
 

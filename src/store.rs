@@ -17,18 +17,38 @@ pub struct Store {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// Latest schema version, tracked with `PRAGMA user_version`. Version 1 is
+/// the tables without the `topic` column; version 2 adds it.
+const SCHEMA_VERSION: i64 = 2;
+
+/// The columns of one stored message. Every query that returns messages
+/// selects this list and maps it with `message_from_row`.
+const MESSAGE_COLUMNS: &str = "id, sender, recipient, body, ts, reply_to, topic";
+
 impl Store {
     /// Open (creating parent directories) or create the database at `path`.
     pub async fn open(path: PathBuf) -> Result<Store, String> {
-        tokio::task::spawn_blocking(move || open_blocking(&path))
+        tokio::task::spawn_blocking(move || open_store(&path))
             .await
             .map_err(|e| format!("db task failed: {e}"))?
     }
 
-    /// Insert a message and return it, with its id and timestamp filled
-    /// in. The id grows with send order. A `None` topic is the general
-    /// chat. A `None` recipient is a topic announcement: it is stored with
-    /// no owning inbox and survives a restart like any message.
+    /// Run `f` against the connection on a blocking thread.
+    async fn with<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || {
+            let mut locked = conn.lock().map_err(|_| "db lock poisoned".to_string())?;
+            f(&mut locked)
+        })
+        .await
+        .map_err(|e| format!("db task failed: {e}"))?
+    }
+
+    /// Insert a message and return it with its id and timestamp filled in.
+    /// A `None` topic is the general chat; a `None` recipient announces.
     pub async fn insert(
         &self,
         sender: String,
@@ -37,93 +57,166 @@ impl Store {
         reply_to: Option<u64>,
         topic: Option<String>,
     ) -> Result<Message, String> {
-        let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || {
-            insert_blocking(&conn, &sender, recipient.as_deref(), &body, reply_to, topic.as_deref())
+        self.with(move |conn| {
+            let ts = now_ms();
+            conn.execute(
+                "INSERT INTO messages (sender, recipient, body, ts, reply_to, topic)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    sender,
+                    recipient.as_deref().unwrap_or(""),
+                    body,
+                    ts as i64,
+                    reply_to.map(|id| id as i64),
+                    topic
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(Message {
+                id: conn.last_insert_rowid() as u64,
+                from: sender,
+                to: recipient,
+                body,
+                ts,
+                reply_to,
+                topic,
+            })
         })
         .await
-        .map_err(|e| format!("db task failed: {e}"))?
     }
 
     /// Fetch one message by id, or `None` when no such id exists.
     pub async fn get(&self, id: u64) -> Result<Option<Message>, String> {
-        let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || get_blocking(&conn, id))
-            .await
-            .map_err(|e| format!("db task failed: {e}"))?
+        self.with(move |conn| {
+            select_first(
+                conn,
+                &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?1"),
+                [id as i64],
+                message_from_row,
+            )
+        })
+        .await
     }
 
     /// List every unread message for `recipient`, in id order.
     pub async fn inbox(&self, recipient: String) -> Result<Vec<Message>, String> {
-        let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || inbox_blocking(&conn, &recipient))
-            .await
-            .map_err(|e| format!("db task failed: {e}"))?
+        self.with(move |conn| {
+            select_all(
+                conn,
+                &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE recipient = ?1 AND acked_at IS NULL ORDER BY id"),
+                [recipient],
+                message_from_row,
+            )
+        })
+        .await
     }
 
     /// Fetch the lowest-id message for `recipient` with this `reply_to`,
-    /// whether it is acked or not. Used by `wait`, which also matches
-    /// messages that `inbox` no longer lists.
+    /// whether it is acked or not. `wait` also matches acked messages.
     pub async fn find_reply(
         &self,
         recipient: String,
         reply_to: u64,
     ) -> Result<Option<Message>, String> {
-        let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || find_reply_blocking(&conn, &recipient, reply_to))
-            .await
-            .map_err(|e| format!("db task failed: {e}"))?
+        self.with(move |conn| {
+            select_first(
+                conn,
+                &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE recipient = ?1 AND reply_to = ?2 ORDER BY id LIMIT 1"),
+                rusqlite::params![recipient, reply_to as i64],
+                message_from_row,
+            )
+        })
+        .await
     }
 
     /// Mark the listed ids as read when they belong to `recipient` and are
-    /// unread, and return the ids that changed. Other ids are ignored.
+    /// unread; return the changed ids in input order. One transaction.
     pub async fn ack(&self, recipient: String, ids: Vec<u64>) -> Result<Vec<u64>, String> {
-        let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || ack_blocking(&conn, &recipient, &ids))
-            .await
-            .map_err(|e| format!("db task failed: {e}"))?
+        self.with(move |conn| {
+            let now = now_ms() as i64;
+            let tx = conn.transaction().map_err(|e| e.to_string())?;
+            let mut changed = Vec::new();
+            for id in ids {
+                let n = tx
+                    .execute(
+                        "UPDATE messages SET acked_at = ?1 WHERE id = ?2 AND recipient = ?3 AND acked_at IS NULL",
+                        rusqlite::params![now, id as i64, recipient],
+                    )
+                    .map_err(|e| e.to_string())?;
+                if n == 1 {
+                    changed.push(id);
+                }
+            }
+            tx.commit().map_err(|e| e.to_string())?;
+            Ok(changed)
+        })
+        .await
     }
 
-    /// Record that `address` connected now on the broker clock, creating
-    /// its row when this is its first `hello`.
+    /// Record that `address` connected now, creating its row on first `hello`.
     pub async fn touch_agent(&self, address: String) -> Result<(), String> {
-        let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || touch_agent_blocking(&conn, &address))
-            .await
-            .map_err(|e| format!("db task failed: {e}"))?
+        self.with(move |conn| {
+            conn.execute(
+                "INSERT INTO agents (address, last_seen) VALUES (?1, ?2) ON CONFLICT(address) DO UPDATE SET last_seen = excluded.last_seen",
+                rusqlite::params![address, now_ms() as i64],
+            )
+            .map_err(|e| e.to_string())?;
+            Ok(())
+        })
+        .await
     }
 
     /// List message history with id above `after`, in id order, at most
     /// `limit` rows. With `address`, only messages it sent or received.
-    /// Reading history never acks.
     pub async fn log(
         &self,
         address: Option<String>,
         after: u64,
         limit: u64,
     ) -> Result<Vec<LoggedMessage>, String> {
-        let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || log_blocking(&conn, address.as_deref(), after, limit))
-            .await
-            .map_err(|e| format!("db task failed: {e}"))?
+        self.with(move |conn| {
+            select_all(
+                conn,
+                &format!("SELECT {MESSAGE_COLUMNS}, acked_at FROM messages WHERE id > ?1 AND (?2 IS NULL OR sender = ?2 OR recipient = ?2) ORDER BY id LIMIT ?3"),
+                rusqlite::params![after as i64, address, limit as i64],
+                |row| {
+                    Ok(LoggedMessage {
+                        message: message_from_row(row)?,
+                        acked_at: row.get::<_, Option<i64>>(7)?.map(|ts| ts as u64),
+                    })
+                },
+            )
+        })
+        .await
     }
 
     /// Replay the most recent announcements per topic, merged in id
-    /// order, at most `MAX_TOPIC_BACKLOG` rows per topic. Direct
-    /// messages that merely carry a topic are never announcements.
+    /// order. Direct messages that carry a topic never replay.
     pub async fn topic_backlog(&self, topics: Vec<String>) -> Result<Vec<Message>, String> {
-        let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || topic_backlog_blocking(&conn, &topics))
-            .await
-            .map_err(|e| format!("db task failed: {e}"))?
+        self.with(move |conn| {
+            let mut backlog = Vec::new();
+            for topic in &topics {
+                backlog.extend(select_all(
+                    conn,
+                    &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE topic = ?1 AND recipient = '' ORDER BY id DESC LIMIT ?2"),
+                    rusqlite::params![topic, MAX_TOPIC_BACKLOG as i64],
+                    message_from_row,
+                )?);
+            }
+            backlog.sort_by_key(|message| message.id);
+            Ok(backlog)
+        })
+        .await
     }
 
     /// List every address that ever said `hello`, sorted by address.
     pub async fn agents(&self) -> Result<Vec<Agent>, String> {
-        let conn = Arc::clone(&self.conn);
-        tokio::task::spawn_blocking(move || agents_blocking(&conn))
-            .await
-            .map_err(|e| format!("db task failed: {e}"))?
+        self.with(move |conn| {
+            select_all(conn, "SELECT address, last_seen FROM agents ORDER BY address", [], |row| {
+                Ok(Agent { address: row.get(0)?, last_seen: row.get::<_, i64>(1)? as u64 })
+            })
+        })
+        .await
     }
 
     /// Default database path: `%APPDATA%/chattrs/chattrs.db` on Windows,
@@ -146,7 +239,7 @@ impl Store {
     }
 }
 
-fn open_blocking(path: &Path) -> Result<Store, String> {
+fn open_store(path: &Path) -> Result<Store, String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)
@@ -154,46 +247,58 @@ fn open_blocking(path: &Path) -> Result<Store, String> {
         }
     }
     let conn = Connection::open(path).map_err(|e| format!("open db {}: {e}", path.display()))?;
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA synchronous=FULL;
-         CREATE TABLE IF NOT EXISTS messages (
-           id        INTEGER PRIMARY KEY AUTOINCREMENT,
-           sender    TEXT NOT NULL,
-           recipient TEXT NOT NULL,
-           body      TEXT NOT NULL,
-           ts        INTEGER NOT NULL,
-           reply_to  INTEGER,
-           topic     TEXT,
-           acked_at  INTEGER
-         );
-         CREATE INDEX IF NOT EXISTS messages_unread
-           ON messages(recipient, id) WHERE acked_at IS NULL;
-         CREATE TABLE IF NOT EXISTS agents (
-           address   TEXT PRIMARY KEY,
-           last_seen INTEGER NOT NULL
-         );",
-    )
-    .map_err(|e| e.to_string())?;
-    if !has_topic_column(&conn)? {
-        conn.execute("ALTER TABLE messages ADD COLUMN topic TEXT", [])
-            .map_err(|e| e.to_string())?;
-    }
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+        .map_err(|e| e.to_string())?;
+    migrate(&conn)?;
     Ok(Store { conn: Arc::new(Mutex::new(conn)) })
 }
 
-/// True when the `messages` table already has a `topic` column.
-/// Databases created before the topic story have no column; the broker
-/// adds it on open so old rows read back with a null topic.
-fn has_topic_column(conn: &Connection) -> Result<bool, String> {
-    let mut stmt = conn.prepare("PRAGMA table_info(messages)").map_err(|e| e.to_string())?;
-    let names = stmt.query_map([], |row| row.get::<_, String>(1)).map_err(|e| e.to_string())?;
-    for name in names {
-        if name.map_err(|e| e.to_string())? == "topic" {
-            return Ok(true);
-        }
+/// Bring the database to the latest schema: read `user_version`, apply
+/// the missing steps in order, then stamp the version. Version 0 with no
+/// `messages` table is new; version 0 with the table predates versioning.
+fn migrate(conn: &Connection) -> Result<(), String> {
+    let version: i64 =
+        conn.query_row("PRAGMA user_version", [], |row| row.get(0)).map_err(|e| e.to_string())?;
+    if version > SCHEMA_VERSION {
+        return Err(format!("unsupported schema version {version}"));
     }
-    Ok(false)
+    if version == 0 {
+        create_v1(conn)?;
+        let mut stmt = conn.prepare("PRAGMA table_info(messages)").map_err(|e| e.to_string())?;
+        let names = stmt.query_map([], |row| row.get::<_, String>(1)).map_err(|e| e.to_string())?;
+        let mut missing = true;
+        for name in names {
+            if name.map_err(|e| e.to_string())? == "topic" {
+                missing = false;
+            }
+        }
+        if missing {
+            add_topic(conn)?;
+        }
+    } else if version == 1 {
+        add_topic(conn)?;
+    }
+    conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Create the version-1 tables: messages and agents without the `topic`
+/// column, plus the unread index. `IF NOT EXISTS` also repairs a database
+/// from before versioning that lacks the agents table or the index.
+fn create_v1(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, body TEXT NOT NULL, ts INTEGER NOT NULL, reply_to INTEGER, acked_at INTEGER);
+         CREATE INDEX IF NOT EXISTS messages_unread ON messages(recipient, id) WHERE acked_at IS NULL;
+         CREATE TABLE IF NOT EXISTS agents (address TEXT PRIMARY KEY, last_seen INTEGER NOT NULL);",
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// The version-2 step: add the `topic` column.
+fn add_topic(conn: &Connection) -> Result<(), String> {
+    conn.execute("ALTER TABLE messages ADD COLUMN topic TEXT", []).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 /// Read an env var, treating a missing or blank value as absent.
@@ -205,264 +310,46 @@ fn nonempty_env(name: &str) -> Option<PathBuf> {
     Some(PathBuf::from(value))
 }
 
-fn lock(conn: &Arc<Mutex<Connection>>) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
-    conn.lock().map_err(|_| "db lock poisoned".to_string())
+/// Collect every row of a read query into a vector.
+fn select_all<T>(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+    map: fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> Result<Vec<T>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params, map).map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
-/// Announcements have no owning inbox, so they are stored with an empty
-/// recipient. No valid address is empty, so they never match an inbox.
-/// Readers map the empty recipient back to `None`.
-fn insert_blocking(
-    conn: &Arc<Mutex<Connection>>,
-    sender: &str,
-    recipient: Option<&str>,
-    body: &str,
-    reply_to: Option<u64>,
-    topic: Option<&str>,
-) -> Result<Message, String> {
-    let conn = lock(conn)?;
-    let ts = now_ms();
-    conn.execute(
-        "INSERT INTO messages (sender, recipient, body, ts, reply_to, topic)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        rusqlite::params![
-            sender,
-            recipient.unwrap_or(""),
-            body,
-            ts as i64,
-            reply_to.map(|id| id as i64),
-            topic
-        ],
-    )
-    .map_err(|e| e.to_string())?;
+/// Fetch the first row of a read query, or `None` when there is none.
+fn select_first<T>(
+    conn: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+    map: fn(&rusqlite::Row<'_>) -> rusqlite::Result<T>,
+) -> Result<Option<T>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let mut rows = stmt.query_map(params, map).map_err(|e| e.to_string())?;
+    match rows.next() {
+        None => Ok(None),
+        Some(row) => row.map(Some).map_err(|e| e.to_string()),
+    }
+}
+
+/// Map one message row to a `Message`. Announcements are stored with an
+/// empty recipient, which never matches an inbox; map it back to `None`.
+fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
+    let recipient: String = row.get(2)?;
     Ok(Message {
-        id: conn.last_insert_rowid() as u64,
-        from: sender.to_string(),
-        to: recipient.map(|recipient| recipient.to_string()),
-        body: body.to_string(),
-        ts,
-        reply_to,
-        topic: topic.map(|topic| topic.to_string()),
+        id: row.get::<_, i64>(0)? as u64,
+        from: row.get(1)?,
+        to: if recipient.is_empty() { None } else { Some(recipient) },
+        body: row.get(3)?,
+        ts: row.get::<_, i64>(4)? as u64,
+        reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
+        topic: row.get(6)?,
     })
-}
-
-/// Map a stored recipient back to the wire: the empty string means the
-/// row is an announcement with no owning inbox.
-fn read_recipient(raw: String) -> Option<String> {
-    if raw.is_empty() {
-        None
-    } else {
-        Some(raw)
-    }
-}
-
-fn get_blocking(conn: &Arc<Mutex<Connection>>, id: u64) -> Result<Option<Message>, String> {
-    let conn = lock(conn)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, sender, recipient, body, ts, reply_to, topic FROM messages
-             WHERE id = ?1",
-        )
-        .map_err(|e| e.to_string())?;
-    let mut rows = stmt
-        .query_map([id as i64], |row| {
-            Ok(Message {
-                id: row.get::<_, i64>(0)? as u64,
-                from: row.get(1)?,
-                to: read_recipient(row.get(2)?),
-                body: row.get(3)?,
-                ts: row.get::<_, i64>(4)? as u64,
-                reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
-                topic: row.get(6)?,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    match rows.next() {
-        None => Ok(None),
-        Some(row) => row.map(Some).map_err(|e| e.to_string()),
-    }
-}
-
-fn inbox_blocking(conn: &Arc<Mutex<Connection>>, recipient: &str) -> Result<Vec<Message>, String> {
-    let conn = lock(conn)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, sender, recipient, body, ts, reply_to, topic FROM messages
-             WHERE recipient = ?1 AND acked_at IS NULL ORDER BY id",
-        )
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([recipient], |row| {
-            Ok(Message {
-                id: row.get::<_, i64>(0)? as u64,
-                from: row.get(1)?,
-                to: read_recipient(row.get(2)?),
-                body: row.get(3)?,
-                ts: row.get::<_, i64>(4)? as u64,
-                reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
-                topic: row.get(6)?,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
-}
-
-fn find_reply_blocking(
-    conn: &Arc<Mutex<Connection>>,
-    recipient: &str,
-    reply_to: u64,
-) -> Result<Option<Message>, String> {
-    let conn = lock(conn)?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, sender, recipient, body, ts, reply_to, topic FROM messages
-             WHERE recipient = ?1 AND reply_to = ?2 ORDER BY id LIMIT 1",
-        )
-        .map_err(|e| e.to_string())?;
-    let mut rows = stmt
-        .query_map(rusqlite::params![recipient, reply_to as i64], |row| {
-            Ok(Message {
-                id: row.get::<_, i64>(0)? as u64,
-                from: row.get(1)?,
-                to: read_recipient(row.get(2)?),
-                body: row.get(3)?,
-                ts: row.get::<_, i64>(4)? as u64,
-                reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
-                topic: row.get(6)?,
-            })
-        })
-        .map_err(|e| e.to_string())?;
-    match rows.next() {
-        None => Ok(None),
-        Some(row) => row.map(Some).map_err(|e| e.to_string()),
-    }
-}
-
-fn ack_blocking(
-    conn: &Arc<Mutex<Connection>>,
-    recipient: &str,
-    ids: &[u64],
-) -> Result<Vec<u64>, String> {
-    let conn = lock(conn)?;
-    let mut changed = Vec::new();
-    for id in ids {
-        let n = conn
-            .execute(
-                "UPDATE messages SET acked_at = ?1
-                 WHERE id = ?2 AND recipient = ?3 AND acked_at IS NULL",
-                rusqlite::params![now_ms() as i64, *id as i64, recipient],
-            )
-            .map_err(|e| e.to_string())?;
-        if n == 1 {
-            changed.push(*id);
-        }
-    }
-    Ok(changed)
-}
-
-fn log_blocking(
-    conn: &Arc<Mutex<Connection>>,
-    address: Option<&str>,
-    after: u64,
-    limit: u64,
-) -> Result<Vec<LoggedMessage>, String> {
-    let conn = lock(conn)?;
-    let read = |row: &rusqlite::Row<'_>| {
-        Ok(LoggedMessage {
-            id: row.get::<_, i64>(0)? as u64,
-            from: row.get(1)?,
-            to: read_recipient(row.get(2)?),
-            body: row.get(3)?,
-            ts: row.get::<_, i64>(4)? as u64,
-            reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
-            topic: row.get(6)?,
-            acked_at: row.get::<_, Option<i64>>(7)?.map(|ts| ts as u64),
-        })
-    };
-    if let Some(address) = address {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, sender, recipient, body, ts, reply_to, topic, acked_at
-                 FROM messages
-                 WHERE id > ?1 AND (sender = ?2 OR recipient = ?2)
-                 ORDER BY id LIMIT ?3",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(rusqlite::params![after as i64, address, limit as i64], read)
-            .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
-    } else {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, sender, recipient, body, ts, reply_to, topic, acked_at
-                 FROM messages
-                 WHERE id > ?1 ORDER BY id LIMIT ?2",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(rusqlite::params![after as i64, limit as i64], read)
-            .map_err(|e| e.to_string())?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
-    }
-}
-
-fn topic_backlog_blocking(
-    conn: &Arc<Mutex<Connection>>,
-    topics: &[String],
-) -> Result<Vec<Message>, String> {
-    let conn = lock(conn)?;
-    let mut backlog = Vec::new();
-    for topic in topics {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, sender, recipient, body, ts, reply_to, topic FROM messages
-                 WHERE topic = ?1 AND recipient = '' ORDER BY id DESC LIMIT ?2",
-            )
-            .map_err(|e| e.to_string())?;
-        let rows = stmt
-            .query_map(rusqlite::params![topic, MAX_TOPIC_BACKLOG as i64], |row| {
-                Ok(Message {
-                    id: row.get::<_, i64>(0)? as u64,
-                    from: row.get(1)?,
-                    to: read_recipient(row.get(2)?),
-                    body: row.get(3)?,
-                    ts: row.get::<_, i64>(4)? as u64,
-                    reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
-                    topic: row.get(6)?,
-                })
-            })
-            .map_err(|e| e.to_string())?;
-        for row in rows {
-            backlog.push(row.map_err(|e| e.to_string())?);
-        }
-    }
-    backlog.sort_by_key(|message| message.id);
-    Ok(backlog)
-}
-
-fn touch_agent_blocking(conn: &Arc<Mutex<Connection>>, address: &str) -> Result<(), String> {
-    let conn = lock(conn)?;
-    conn.execute(
-        "INSERT INTO agents (address, last_seen) VALUES (?1, ?2)
-         ON CONFLICT(address) DO UPDATE SET last_seen = excluded.last_seen",
-        rusqlite::params![address, now_ms() as i64],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn agents_blocking(conn: &Arc<Mutex<Connection>>) -> Result<Vec<Agent>, String> {
-    let conn = lock(conn)?;
-    let mut stmt = conn
-        .prepare("SELECT address, last_seen FROM agents ORDER BY address")
-        .map_err(|e| e.to_string())?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok(Agent { address: row.get(0)?, last_seen: row.get::<_, i64>(1)? as u64 })
-        })
-        .map_err(|e| e.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 fn now_ms() -> u64 {
@@ -618,5 +505,91 @@ mod tests {
         for message in &backlog {
             assert_eq!(message.to, None, "backlog rows belong to no inbox");
         }
+    }
+
+    #[tokio::test]
+    async fn old_schema_database_opens_and_migrates() {
+        for stamp in [0, 1] {
+            let dir = tempfile::TempDir::new().unwrap();
+            let db = dir.path().join("chattrs.db");
+            {
+                let conn = rusqlite::Connection::open(&db).unwrap();
+                conn.execute_batch(
+                    "CREATE TABLE messages (
+                       id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                       sender    TEXT NOT NULL,
+                       recipient TEXT NOT NULL,
+                       body      TEXT NOT NULL,
+                       ts        INTEGER NOT NULL,
+                       reply_to  INTEGER,
+                       acked_at  INTEGER
+                     );
+                     CREATE TABLE agents (
+                       address   TEXT PRIMARY KEY,
+                       last_seen INTEGER NOT NULL
+                     );",
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO messages (sender, recipient, body, ts, reply_to, acked_at)
+                     VALUES ('a@h', 'b@h', 'old', 1763200000000, NULL, NULL)",
+                    [],
+                )
+                .unwrap();
+                conn.execute(&format!("PRAGMA user_version = {stamp}"), []).unwrap();
+            }
+            let store = Store::open(db.clone()).await.unwrap();
+            let old = store.get(1).await.unwrap().expect("old row survives");
+            assert_eq!(old.body, "old");
+            assert_eq!(old.topic, None, "old rows read back with no topic");
+            let id = store
+                .insert(
+                    "a@h".into(),
+                    Some("b@h".into()),
+                    "new".into(),
+                    None,
+                    Some("release-26".into()),
+                )
+                .await
+                .unwrap()
+                .id;
+            let fresh = store.get(id).await.unwrap().unwrap();
+            assert_eq!(fresh.topic.as_deref(), Some("release-26"));
+            let version: i64 = rusqlite::Connection::open(&db)
+                .unwrap()
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 2, "open stamps the latest version");
+        }
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE messages (
+                   id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                   sender    TEXT NOT NULL,
+                   recipient TEXT NOT NULL,
+                   body      TEXT NOT NULL,
+                   ts        INTEGER NOT NULL,
+                   reply_to  INTEGER,
+                   topic     TEXT,
+                   acked_at  INTEGER
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (sender, recipient, body, ts, reply_to, topic, acked_at)
+                 VALUES ('a@h', 'b@h', 'old', 1763200000000, NULL, 'release-26', NULL)",
+                [],
+            )
+            .unwrap();
+        }
+        let store = Store::open(db.clone()).await.unwrap();
+        let old = store.get(1).await.unwrap().expect("old row survives");
+        assert_eq!(old.topic.as_deref(), Some("release-26"), "a migrated row keeps its topic");
+        let inbox = store.inbox("b@h".into()).await.unwrap();
+        assert_eq!(inbox.len(), 1, "the row still belongs to its inbox");
     }
 }

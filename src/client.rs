@@ -188,7 +188,7 @@ impl Client {
             };
             let count = page.len();
             if let Some(last) = page.last() {
-                after = last.id;
+                after = last.message.id;
             }
             history.extend(page);
             if count < LOG_PAGE_SIZE as usize {

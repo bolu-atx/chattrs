@@ -98,16 +98,12 @@ pub struct Agent {
 }
 
 /// One message in `log` history: the message plus when it was read, if
-/// ever. `acked_at` is `None` for an unread message.
+/// ever. `acked_at` is `None` for an unread message. The wire shape stays
+/// flat: the message fields sit next to `acked_at`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LoggedMessage {
-    pub id: u64,
-    pub from: String,
-    pub to: Option<String>,
-    pub body: String,
-    pub ts: u64,
-    pub reply_to: Option<u64>,
-    pub topic: Option<String>,
+    #[serde(flatten)]
+    pub message: Message,
     pub acked_at: Option<u64>,
 }
 

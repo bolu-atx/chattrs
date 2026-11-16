@@ -63,13 +63,15 @@ mod tests {
     #[test]
     fn outbound_frames_round_trip() {
         let logged = crate::model::LoggedMessage {
-            id: 12,
-            from: "codex@box1".into(),
-            to: Some("opus@mac".into()),
-            body: "hi".into(),
-            ts: 1763200000000,
-            reply_to: None,
-            topic: None,
+            message: crate::model::Message {
+                id: 12,
+                from: "codex@box1".into(),
+                to: Some("opus@mac".into()),
+                body: "hi".into(),
+                ts: 1763200000000,
+                reply_to: None,
+                topic: None,
+            },
             acked_at: None,
         };
         let message = crate::model::Message {

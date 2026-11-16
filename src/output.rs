@@ -72,25 +72,20 @@ pub fn render_message(message: &Message) -> String {
 /// no recipient, so the room takes its place: `→ topic:<slug>`.
 pub fn render_log_line(message: &LoggedMessage) -> String {
     let unread = if message.acked_at.is_none() { "*" } else { "" };
-    let body = message.body.replace('\n', "\\n");
-    let recipient = match message.to.as_deref() {
+    let inner = &message.message;
+    let body = inner.body.replace('\n', "\\n");
+    let recipient = match inner.to.as_deref() {
         Some(to) => to.to_string(),
-        None => format!("topic:{}", message.topic.as_deref().unwrap_or("?")),
+        None => format!("topic:{}", inner.topic.as_deref().unwrap_or("?")),
     };
-    let mut line = format!(
-        "{} [{}{}] {} → {}",
-        format_ts(message.ts),
-        message.id,
-        unread,
-        message.from,
-        recipient
-    );
-    if message.to.is_some() {
-        if let Some(topic) = message.topic.as_deref() {
+    let mut line =
+        format!("{} [{}{}] {} → {}", format_ts(inner.ts), inner.id, unread, inner.from, recipient);
+    if inner.to.is_some() {
+        if let Some(topic) = inner.topic.as_deref() {
             line.push_str(&format!(" (topic {topic})"));
         }
     }
-    if let Some(parent) = message.reply_to {
+    if let Some(parent) = inner.reply_to {
         line.push_str(&format!(" (re {parent})"));
     }
     line.push_str(&format!(": {body}"));
@@ -245,13 +240,15 @@ mod tests {
     #[test]
     fn log_line_names_sender_recipient_and_reply() {
         let message = LoggedMessage {
-            id: 13,
-            from: "codex@box1".into(),
-            to: Some("opus@mac".into()),
-            body: "hello".into(),
-            ts: 1763200000000,
-            reply_to: Some(12),
-            topic: None,
+            message: Message {
+                id: 13,
+                from: "codex@box1".into(),
+                to: Some("opus@mac".into()),
+                body: "hello".into(),
+                ts: 1763200000000,
+                reply_to: Some(12),
+                topic: None,
+            },
             acked_at: Some(1763200000500),
         };
         assert_eq!(
@@ -263,13 +260,15 @@ mod tests {
     #[test]
     fn log_line_marks_unread_and_escapes_newlines() {
         let message = LoggedMessage {
-            id: 14,
-            from: "codex@box1".into(),
-            to: Some("opus@mac".into()),
-            body: "one\ntwo".into(),
-            ts: 1763200000000,
-            reply_to: None,
-            topic: None,
+            message: Message {
+                id: 14,
+                from: "codex@box1".into(),
+                to: Some("opus@mac".into()),
+                body: "one\ntwo".into(),
+                ts: 1763200000000,
+                reply_to: None,
+                topic: None,
+            },
             acked_at: None,
         };
         assert_eq!(
@@ -281,13 +280,15 @@ mod tests {
     #[test]
     fn log_line_renders_announcement_recipient_as_topic_room() {
         let message = LoggedMessage {
-            id: 13,
-            from: "codex@box1".into(),
-            to: None,
-            body: "build 421 is red".into(),
-            ts: 1763164800000,
-            reply_to: None,
-            topic: Some("release-26".into()),
+            message: Message {
+                id: 13,
+                from: "codex@box1".into(),
+                to: None,
+                body: "build 421 is red".into(),
+                ts: 1763164800000,
+                reply_to: None,
+                topic: Some("release-26".into()),
+            },
             acked_at: None,
         };
         assert_eq!(
@@ -299,13 +300,15 @@ mod tests {
     #[test]
     fn log_json_line_carries_type_log_and_untrusted() {
         let message = LoggedMessage {
-            id: 13,
-            from: "codex@box1".into(),
-            to: Some("opus@mac".into()),
-            body: "hi".into(),
-            ts: 1763200000000,
-            reply_to: Some(12),
-            topic: None,
+            message: Message {
+                id: 13,
+                from: "codex@box1".into(),
+                to: Some("opus@mac".into()),
+                body: "hi".into(),
+                ts: 1763200000000,
+                reply_to: Some(12),
+                topic: None,
+            },
             acked_at: None,
         };
         let line = log_json(&message);
