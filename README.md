@@ -37,13 +37,20 @@ frame instead: `{"type":"sent","id":12}`.
 second run prints nothing. `inbox --json` prints one message object per
 line with `"type":"message"` added.
 
+`reply ID` answers message ID and prints the new id (text args, else
+stdin). `watch` prints each new message as one JSON line and acks it,
+reconnecting with backoff when the broker drops. It prints nothing else
+to stdout, so it works under a watcher like Claude Code's Monitor tool.
+
 ## Commands
 
 | Command | What it does |
 | ------- | ------------ |
 | `serve` | Run the broker on `--listen` (default `127.0.0.1:4646`), storing to `--db`. |
 | `send`  | Post to `--to ADDR` and print the id (text args, else stdin). |
+| `reply` | Answer message `ID` (text args, else stdin) and print the new id. |
 | `inbox` | Print every unread message for `--address`, then ack what was printed. |
+| `watch` | Stream new messages as JSON lines forever, acking what is printed. |
 
 Common flags:
 
@@ -84,6 +91,7 @@ Client → broker:
 {"type":"send",  "to":"opus@mac", "body":"hi", "reply_to":null}
 {"type":"inbox"}
 {"type":"ack",   "ids":[12, 13]}
+{"type":"watch"}
 ```
 
 Broker → client:
@@ -94,6 +102,8 @@ Broker → client:
 {"type":"inbox",   "messages":[
   {"id":12,"from":"codex@box1","to":"opus@mac",
    "body":"hi","ts":1763200000000,"reply_to":null}]}
+{"type":"message", "id":13,"from":"opus@mac","to":"codex@box1",
+ "body":"hi","ts":1763200000001,"reply_to":12}
 {"type":"acked",   "ids":[12, 13]}
 {"type":"error",   "code":"empty_body", "message":"body is empty"}
 ```
@@ -103,17 +113,32 @@ gets `hello_required` and a closed connection. The broker sets the sender
 from the `hello` address; `send` carries no sender. A send to an unknown
 address succeeds — the inbox exists by name.
 
+A `send` with a `reply_to` and no `to` is a reply: the broker addresses it
+to the sender of that message, and rejects an unknown id with
+`unknown_message` or a message not sent to you with `not_recipient`. A
+`send` with both `to` and `reply_to` stays valid; the broker only checks
+that the id exists.
+
 `inbox` returns every message for the `hello` address with no ack yet, in
 id order. `ack` marks the listed ids read when they belong to that address
 and are unread, and `acked` lists the ids that changed; other ids are
-ignored. The broker never pushes messages: the client asks. The `inbox`
-command prints each message, flushes stdout, then acks, so a crash between
-print and ack redelivers the message on the next run — delivery is at least
-once, and the id tells duplicates apart.
+ignored. Except for `watch`, the broker never pushes messages: the client
+asks. The `inbox` command prints each message, flushes stdout, then acks,
+so a crash between print and ack redelivers the message on the next run —
+delivery is at least once, and the id tells duplicates apart.
+
+On `watch`, the broker first registers the watcher, then sends every
+unread message in id order, then each new message when it arrives. It
+tracks the highest id sent on the connection and skips ids at or below it,
+so the hand-over does not duplicate. Two watchers on one address both get
+every message. The `watch` command prints each message as one JSON line,
+flushes stdout, then acks it — always JSON, nothing else on stdout — and
+never exits by itself. When the connection drops it reconnects with
+backoff from 1 s to 30 s, logging to stderr only.
 
 Error codes: `bad_frame`, `hello_required`, `bad_version` (v ≠ 1),
-`bad_address`, `empty_body`, `too_large`. After `hello`, an error does not
-close the connection.
+`bad_address`, `empty_body`, `too_large`, `unknown_message`,
+`not_recipient`. After `hello`, an error does not close the connection.
 
 Limits: an address is `user@host` (`[A-Za-z0-9._-]` each side, 128 bytes
 max). A body is 1 byte to 64 KiB. An inbound line over 128 KiB is rejected

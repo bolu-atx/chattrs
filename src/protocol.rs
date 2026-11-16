@@ -33,10 +33,16 @@ mod tests {
         let frames = vec![
             Inbound::Hello { v: 1, address: "codex@box1".into(), token: None },
             Inbound::Hello { v: 1, address: "codex@box1".into(), token: Some("s3cret".into()) },
-            Inbound::Send { to: "opus@mac".into(), body: "hi".into(), reply_to: None },
-            Inbound::Send { to: "opus@mac".into(), body: "hi".into(), reply_to: Some(3) },
+            Inbound::Send { to: Some("opus@mac".into()), body: "hi".into(), reply_to: None },
+            Inbound::Send {
+                to: Some("opus@mac".into()),
+                body: "hi".into(),
+                reply_to: Some(3),
+            },
+            Inbound::Send { to: None, body: "hi".into(), reply_to: Some(3) },
             Inbound::Inbox,
             Inbound::Ack { ids: vec![12, 13] },
+            Inbound::Watch,
         ];
         for frame in frames {
             let line = encode(&frame).unwrap();
@@ -58,7 +64,8 @@ mod tests {
         let frames = vec![
             Outbound::Welcome { server: "chattrs".into(), v: 1, address: "codex@box1".into() },
             Outbound::Sent { id: 12 },
-            Outbound::Inbox { messages: vec![message] },
+            Outbound::Inbox { messages: vec![message.clone()] },
+            Outbound::Message(message),
             Outbound::Acked { ids: vec![12, 13] },
             Outbound::Error { code: "empty_body".into(), message: "body is empty".into() },
         ];
@@ -79,11 +86,12 @@ mod tests {
             })
             .unwrap(),
             serde_json::to_value(Inbound::Send {
-                to: "b@h".into(),
+                to: Some("b@h".into()),
                 body: "hi".into(),
                 reply_to: None,
             })
             .unwrap(),
+            serde_json::to_value(Inbound::Watch).unwrap(),
             serde_json::to_value(Outbound::Welcome {
                 server: "chattrs".into(),
                 v: 1,

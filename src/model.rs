@@ -70,14 +70,18 @@ pub enum Inbound {
         token: Option<String>,
     },
     /// Store a message for the `to` address. The broker fills in `from`.
+    /// With no `to`, the broker answers `reply_to` to its sender instead.
     Send {
-        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
         body: String,
         #[serde(default)]
         reply_to: Option<u64>,
     },
     /// Ask for every unread message addressed to the `hello` address.
     Inbox,
+    /// Stream every unread message, then each new one, as `message` frames.
+    Watch,
     /// Mark messages as read. Only unread messages owned by the `hello`
     /// address change; other ids are ignored, not an error.
     Ack { ids: Vec<u64> },
@@ -92,6 +96,8 @@ pub enum Outbound {
     Sent { id: u64 },
     /// Every unread message for the `hello` address, in id order.
     Inbox { messages: Vec<Message> },
+    /// One streamed message for a `watch` connection.
+    Message(Message),
     /// The ids from `ack` that actually changed to read.
     Acked { ids: Vec<u64> },
     Error { code: String, message: String },

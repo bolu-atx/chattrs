@@ -1,8 +1,8 @@
 //! chattrs — distributed messaging for cross-agent coordination.
 //!
 //! A thin entry point: parse `cli`, then dispatch to `server` (the broker) or
-//! `client` (`send`, `inbox`). `model` owns the wire types, `protocol` the
-//! line-JSON framing, and `store` the SQLite storage.
+//! `client` (`send`, `reply`, `inbox`, `watch`). `model` owns the wire types,
+//! `protocol` the line-JSON framing, and `store` the SQLite storage.
 //!
 //! Quick start:
 //! ```text
@@ -53,6 +53,21 @@ async fn run(args: Args) -> Result<(), String> {
                 println!("{id}");
             }
             Ok(())
+        }
+        Command::Reply(c) => {
+            let id = client::reply(
+                &c.client.server,
+                &c.client.address,
+                c.client.token.as_deref(),
+                c.id,
+                &c.body(),
+            )
+            .await?;
+            println!("{id}");
+            Ok(())
+        }
+        Command::Watch(c) => {
+            client::watch(&c.client.server, &c.client.address, c.client.token.as_deref()).await
         }
         Command::Inbox(c) => {
             let messages =
