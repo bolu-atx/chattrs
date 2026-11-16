@@ -35,6 +35,29 @@ pub fn is_valid_address(address: &str) -> bool {
         .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'@'))
 }
 
+/// One message on the wire. This is the single shape for a message
+/// everywhere: the `inbox` response, `--json` output, and later stories.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Message {
+    pub id: u64,
+    pub from: String,
+    pub to: String,
+    pub body: String,
+    pub ts: u64,
+    pub reply_to: Option<u64>,
+}
+
+/// Render one message as a single text line: `[12] codex@box1: body`,
+/// or `[12] codex@box1 (re 7): body` for a reply.
+pub fn render_message(message: &Message) -> String {
+    match message.reply_to {
+        Some(parent) => {
+            format!("[{}] {} (re {}): {}", message.id, message.from, parent, message.body)
+        }
+        None => format!("[{}] {}: {}", message.id, message.from, message.body),
+    }
+}
+
 /// Frames a client sends to the broker.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -53,6 +76,11 @@ pub enum Inbound {
         #[serde(default)]
         reply_to: Option<u64>,
     },
+    /// Ask for every unread message addressed to the `hello` address.
+    Inbox,
+    /// Mark messages as read. Only unread messages owned by the `hello`
+    /// address change; other ids are ignored, not an error.
+    Ack { ids: Vec<u64> },
 }
 
 /// Frames the broker sends to a client.
@@ -62,6 +90,10 @@ pub enum Outbound {
     Welcome { server: String, v: u32, address: String },
     /// Confirms a stored message with its id.
     Sent { id: u64 },
+    /// Every unread message for the `hello` address, in id order.
+    Inbox { messages: Vec<Message> },
+    /// The ids from `ack` that actually changed to read.
+    Acked { ids: Vec<u64> },
     Error { code: String, message: String },
 }
 
@@ -81,6 +113,21 @@ mod tests {
         for address in ["a@h", "codex@box1", "opus.mac@tail-scale_01", "A.9-x_y@Z.8-w_v"] {
             assert!(is_valid_address(address), "{address}");
         }
+    }
+
+    #[test]
+    fn render_message_prints_plain_and_reply_lines() {
+        let plain = Message {
+            id: 12,
+            from: "codex@box1".into(),
+            to: "opus@mac".into(),
+            body: "hi".into(),
+            ts: 1763200000000,
+            reply_to: None,
+        };
+        assert_eq!(render_message(&plain), "[12] codex@box1: hi");
+        let reply = Message { id: 13, reply_to: Some(7), ..plain.clone() };
+        assert_eq!(render_message(&reply), "[13] codex@box1 (re 7): hi");
     }
 
     #[test]
