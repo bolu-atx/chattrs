@@ -153,6 +153,10 @@ pub struct ReplyArgs {
     /// Message text. With no text, the body is read from stdin.
     #[arg(value_name = "MESSAGE")]
     pub message: Vec<String>,
+
+    /// Print the `sent` frame as JSON instead of the bare id.
+    #[arg(long)]
+    pub json: bool,
 }
 
 impl ReplyArgs {
@@ -231,6 +235,10 @@ pub struct AgentsArgs {
 pub struct LogArgs {
     #[command(flatten)]
     pub client: ClientArgs,
+
+    /// Keep only messages that this address sent or received.
+    #[arg(long)]
+    pub about: Option<String>,
 
     /// Print one JSON object per message instead of a text line.
     #[arg(long)]

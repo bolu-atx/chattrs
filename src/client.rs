@@ -1,10 +1,12 @@
 //! chattrs — client: one TCP connection per command.
 //!
 //! Every command opens a fresh connection, sends a `hello`, then the command
-//! frame, and reads the response. `watch` holds one open and streams
-//! `message` frames, printing each as JSON; `ask` sends its question on one
-//! connection, then holds a `wait` open until the reply arrives.
+//! frame, and reads the response. Functions here return data and print
+//! nothing; `output` owns what the CLI prints. `watch` is the one long-lived
+//! read: a `Watcher` reconnects on I/O failure and hands each message to
+//! its caller, which prints it and then acks it.
 
+use std::fmt;
 use std::io::ErrorKind;
 
 use crate::autostart;
@@ -14,7 +16,58 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
-struct Conn {
+/// One failure on the client path: a broker `error` frame, a connect,
+/// read, or write failure, an unexpected frame, or an `ask` timeout.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ClientError {
+    Server { code: String, message: String },
+    Io(String),
+    Protocol(String),
+    Timeout { id: u64 },
+}
+
+impl fmt::Display for ClientError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ClientError::Server { code, message } => write!(f, "{code}: {message}"),
+            ClientError::Io(message) => write!(f, "{message}"),
+            ClientError::Protocol(message) => write!(f, "{message}"),
+            ClientError::Timeout { id } => write!(f, "timeout: no reply to {id}"),
+        }
+    }
+}
+
+impl std::error::Error for ClientError {}
+
+impl From<ClientError> for String {
+    fn from(error: ClientError) -> String {
+        error.to_string()
+    }
+}
+
+/// Where to connect, who to say `hello` as, and the shared token.
+/// Built once from the connection flags and passed to every command.
+#[derive(Debug, Clone)]
+pub struct Endpoint {
+    pub server: String,
+    pub address: String,
+    pub token: Option<String>,
+}
+
+/// One message to publish: its recipient, body, reply id, and topic.
+/// A `None` topic is the general chat. `send` and `ask` post to an
+/// address; `reply` leaves `to` empty so the broker answers the sender
+/// of the message it answers.
+#[derive(Debug, Clone)]
+pub struct Outgoing {
+    pub to: Option<String>,
+    pub body: String,
+    pub reply_to: Option<u64>,
+    pub topic: Option<String>,
+}
+
+/// One open connection to the broker, after `hello`.
+pub struct Client {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
 }
@@ -31,12 +84,9 @@ struct ConnectError {
     refused: bool,
 }
 
-async fn connect(server: &str) -> Result<Conn, ConnectError> {
+async fn connect_stream(server: &str) -> Result<TcpStream, ConnectError> {
     match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(server)).await {
-        Ok(Ok(stream)) => {
-            let (read_half, write_half) = stream.into_split();
-            Ok(Conn { reader: BufReader::new(read_half), writer: write_half })
-        }
+        Ok(Ok(stream)) => Ok(stream),
         Ok(Err(e)) => Err(ConnectError {
             refused: e.kind() == ErrorKind::ConnectionRefused,
             message: format!("connect {server}: {e}"),
@@ -48,176 +98,218 @@ async fn connect(server: &str) -> Result<Conn, ConnectError> {
     }
 }
 
-async fn send_frame(conn: &mut Conn, frame: &Inbound) -> Result<(), String> {
-    let line = protocol::encode(frame)?;
-    conn.writer.write_all(line.as_bytes()).await.map_err(|e| e.to_string())?;
-    conn.writer.flush().await.map_err(|e| e.to_string())
-}
-
-async fn recv_frame(conn: &mut Conn) -> Result<Outbound, String> {
-    let mut line = String::new();
-    let n = conn.reader.read_line(&mut line).await.map_err(|e| e.to_string())?;
-    if n == 0 {
-        return Err("server closed the connection".to_string());
+impl Client {
+    /// Connect to `endpoint` and say `hello`. When the first connect
+    /// fails with connection refused on a loopback server, start a
+    /// broker on demand and retry once on a fresh connection. Any
+    /// other failure returns the original connect error.
+    pub async fn connect(endpoint: &Endpoint) -> Result<Client, ClientError> {
+        Client::open(endpoint, true).await
     }
-    protocol::decode(&line)
-}
 
-/// Say hello and return the open connection once the broker welcomes us.
-/// When the first connect fails with connection refused on a loopback
-/// server, start a broker on demand and retry once on a fresh
-/// connection. Any other failure returns the original connect error.
-async fn hello(server: &str, address: &str, token: Option<&str>) -> Result<Conn, String> {
-    match connect(server).await {
-        Ok(conn) => greet(conn, address, token).await,
-        Err(error) if error.refused && autostart::is_loopback_server(server) => {
-            autostart::ensure_started(server, token).await?;
-            let conn = connect(server).await.map_err(|error| error.message)?;
-            greet(conn, address, token).await
+    /// Connect again after a drop. A reconnect never starts a broker:
+    /// only a command's first connect does (CLI-11). A broker that died
+    /// under a waiting `ask` or `watch` is not replaced behind the
+    /// operator's back, possibly on another database.
+    pub async fn reconnect(endpoint: &Endpoint) -> Result<Client, ClientError> {
+        Client::open(endpoint, false).await
+    }
+
+    async fn open(endpoint: &Endpoint, may_start: bool) -> Result<Client, ClientError> {
+        let stream = match connect_stream(&endpoint.server).await {
+            Ok(stream) => stream,
+            Err(error)
+                if may_start
+                    && error.refused
+                    && autostart::is_loopback_server(&endpoint.server) =>
+            {
+                autostart::ensure_started(&endpoint.server, endpoint.token.as_deref())
+                    .await
+                    .map_err(ClientError::Io)?;
+                connect_stream(&endpoint.server)
+                    .await
+                    .map_err(|error| ClientError::Io(error.message))?
+            }
+            Err(error) => return Err(ClientError::Io(error.message)),
+        };
+        let (read_half, write_half) = stream.into_split();
+        let mut client = Client { reader: BufReader::new(read_half), writer: write_half };
+        let frame = client
+            .request(&Inbound::Hello {
+                v: model::PROTOCOL_VERSION,
+                address: endpoint.address.clone(),
+                token: endpoint.token.clone(),
+            })
+            .await?;
+        match frame {
+            Outbound::Welcome { .. } => Ok(client),
+            _ => Err(ClientError::Protocol(
+                "server sent an unexpected frame instead of welcome".to_string(),
+            )),
         }
-        Err(error) => Err(error.message),
+    }
+
+    /// Send one frame and read one answer. An `error` frame becomes
+    /// `ClientError::Server`.
+    pub async fn request(&mut self, frame: &Inbound) -> Result<Outbound, ClientError> {
+        self.send_frame(frame).await?;
+        self.recv_frame().await
+    }
+
+    async fn send_frame(&mut self, frame: &Inbound) -> Result<(), ClientError> {
+        let line = protocol::encode(frame).map_err(ClientError::Protocol)?;
+        self.writer.write_all(line.as_bytes()).await.map_err(|e| ClientError::Io(e.to_string()))?;
+        self.writer.flush().await.map_err(|e| ClientError::Io(e.to_string()))
+    }
+
+    async fn recv_frame(&mut self) -> Result<Outbound, ClientError> {
+        let mut line = String::new();
+        let n =
+            self.reader.read_line(&mut line).await.map_err(|e| ClientError::Io(e.to_string()))?;
+        if n == 0 {
+            return Err(ClientError::Io("server closed the connection".to_string()));
+        }
+        match protocol::decode(&line).map_err(ClientError::Protocol)? {
+            Outbound::Error { code, message } => Err(ClientError::Server { code, message }),
+            frame => Ok(frame),
+        }
+    }
+
+    /// Send a `wait` for `reply_to` on this connection and wait for the
+    /// reply message on it.
+    pub async fn wait_reply(&mut self, reply_to: u64) -> Result<Message, ClientError> {
+        self.send_frame(&Inbound::Wait { reply_to }).await?;
+        self.next_message().await
+    }
+
+    /// Send an `ack` without waiting for its answer. The next
+    /// `next_message` skips the `acked` frame.
+    pub async fn ack_sent(&mut self, id: u64) -> Result<(), ClientError> {
+        self.send_frame(&Inbound::Ack { ids: vec![id] }).await
+    }
+
+    /// Wait for the next streamed message, skipping other frames.
+    pub async fn next_message(&mut self) -> Result<Message, ClientError> {
+        loop {
+            match self.recv_frame().await? {
+                Outbound::Message(message) => return Ok(message),
+                _ => continue,
+            }
+        }
+    }
+
+    /// Fetch every unread message on this connection, in id order.
+    /// Fetched messages stay unread until the caller acks them.
+    pub async fn unread(&mut self) -> Result<Vec<Message>, ClientError> {
+        match self.request(&Inbound::Inbox).await? {
+            Outbound::Inbox { messages } => Ok(messages),
+            _ => Err(ClientError::Protocol(
+                "server sent an unexpected frame instead of inbox".to_string(),
+            )),
+        }
+    }
+
+    /// Mark messages as read on this connection and return the ids that
+    /// changed to read.
+    pub async fn ack(&mut self, ids: &[u64]) -> Result<Vec<u64>, ClientError> {
+        match self.request(&Inbound::Ack { ids: ids.to_vec() }).await? {
+            Outbound::Acked { ids } => Ok(ids),
+            _ => Err(ClientError::Protocol(
+                "server sent an unexpected frame instead of acked".to_string(),
+            )),
+        }
+    }
+
+    /// Publish one message on this connection and return its id.
+    pub async fn publish(&mut self, outgoing: Outgoing) -> Result<u64, ClientError> {
+        let frame = self
+            .request(&Inbound::Send {
+                to: outgoing.to,
+                body: outgoing.body,
+                reply_to: outgoing.reply_to,
+                topic: outgoing.topic,
+            })
+            .await?;
+        match frame {
+            Outbound::Sent { id } => Ok(id),
+            _ => Err(ClientError::Protocol(
+                "server sent an unexpected frame instead of sent".to_string(),
+            )),
+        }
+    }
+
+    /// Fetch the full message history on this connection, oldest first.
+    /// With `filter`, only messages it sent or received.
+    pub async fn log(&mut self, filter: Option<String>) -> Result<Vec<LoggedMessage>, ClientError> {
+        let mut history = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = match self
+                .request(&Inbound::Log { address: filter.clone(), after, limit: LOG_PAGE_SIZE })
+                .await?
+            {
+                Outbound::Log { messages } => messages,
+                _ => {
+                    return Err(ClientError::Protocol(
+                        "server sent an unexpected frame instead of log".to_string(),
+                    ))
+                }
+            };
+            let count = page.len();
+            if let Some(last) = page.last() {
+                after = last.message.id;
+            }
+            history.extend(page);
+            if count < LOG_PAGE_SIZE as usize {
+                return Ok(history);
+            }
+        }
+    }
+
+    /// List every address that ever said `hello`, sorted by address.
+    pub async fn agents(&mut self) -> Result<Vec<Agent>, ClientError> {
+        match self.request(&Inbound::Agents).await? {
+            Outbound::Agents { agents } => Ok(agents),
+            _ => Err(ClientError::Protocol(
+                "server sent an unexpected frame instead of agents".to_string(),
+            )),
+        }
     }
 }
 
-/// Run the `hello` handshake on an open connection.
-async fn greet(mut conn: Conn, address: &str, token: Option<&str>) -> Result<Conn, String> {
-    send_frame(
-        &mut conn,
-        &Inbound::Hello {
-            v: model::PROTOCOL_VERSION,
-            address: address.to_string(),
-            token: token.map(|token| token.to_string()),
-        },
-    )
-    .await?;
-    match recv_frame(&mut conn).await? {
-        Outbound::Welcome { .. } => Ok(conn),
-        Outbound::Error { code, message } => Err(format!("{code}: {message}")),
-        _ => Err("server sent an unexpected frame instead of welcome".to_string()),
-    }
-}
-
-/// One message to publish: its recipient, body, reply id, and topic.
-/// A `None` topic is the general chat. `send` and `ask` post to an
-/// address; `reply` leaves `to` empty so the broker answers the sender
-/// of the message it answers.
-#[derive(Debug, Clone)]
-pub struct Outgoing {
-    pub to: Option<String>,
-    pub body: String,
-    pub reply_to: Option<u64>,
-    pub topic: Option<String>,
-}
-
-/// Publish one message and return its id. Prints unread messages first,
-/// as text or as JSON `message` lines when `json` is set.
-pub async fn send(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
-    outgoing: Outgoing,
-    json: bool,
-) -> Result<u64, String> {
-    publish(server, address, token, outgoing, json).await
+/// Publish one message and return its id.
+#[cfg(test)]
+pub async fn publish(endpoint: &Endpoint, outgoing: Outgoing) -> Result<u64, ClientError> {
+    Client::connect(endpoint).await?.publish(outgoing).await
 }
 
 /// Answer message `reply_to` and return the new id. The broker addresses the
 /// reply to the sender of the original message. Without a `topic`, the
 /// reply inherits the topic of the message it answers.
+#[cfg(test)]
 pub async fn reply(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
+    endpoint: &Endpoint,
     reply_to: u64,
     body: &str,
     topic: Option<&str>,
-) -> Result<u64, String> {
+) -> Result<u64, ClientError> {
     publish(
-        server,
-        address,
-        token,
+        endpoint,
         Outgoing {
             to: None,
             body: body.to_string(),
             reply_to: Some(reply_to),
             topic: topic.map(|topic| topic.to_string()),
         },
-        false,
     )
     .await
 }
 
-/// Fetch unread messages on this connection, print them, flush stdout,
-/// then ack what was printed. Runs right after `hello`, before the
-/// command's own frame, so every command delivers what is waiting.
-async fn print_unread_preamble(conn: &mut Conn, json: bool) -> Result<(), String> {
-    send_frame(conn, &Inbound::Inbox).await?;
-    let messages = match recv_frame(conn).await? {
-        Outbound::Inbox { messages } => messages,
-        Outbound::Error { code, message } => return Err(format!("{code}: {message}")),
-        _ => return Err("server sent an unexpected frame instead of inbox".to_string()),
-    };
-    if messages.is_empty() {
-        return Ok(());
-    }
-    for message in &messages {
-        if json {
-            print!("{}", format_watch_line(message)?);
-        } else {
-            println!("{}", model::render_message(message));
-        }
-    }
-    use std::io::Write;
-    std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
-    let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
-    send_frame(conn, &Inbound::Ack { ids }).await?;
-    match recv_frame(conn).await? {
-        Outbound::Acked { .. } => Ok(()),
-        Outbound::Error { code, message } => Err(format!("{code}: {message}")),
-        _ => Err("server sent an unexpected frame instead of acked".to_string()),
-    }
-}
-
-async fn publish(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
-    outgoing: Outgoing,
-    json: bool,
-) -> Result<u64, String> {
-    let mut conn = hello(server, address, token).await?;
-    print_unread_preamble(&mut conn, json).await?;
-    send_frame(
-        &mut conn,
-        &Inbound::Send {
-            to: outgoing.to,
-            body: outgoing.body,
-            reply_to: outgoing.reply_to,
-            topic: outgoing.topic,
-        },
-    )
-    .await?;
-    match recv_frame(&mut conn).await? {
-        Outbound::Sent { id } => Ok(id),
-        Outbound::Error { code, message } => Err(format!("{code}: {message}")),
-        _ => Err("server sent an unexpected frame instead of sent".to_string()),
-    }
-}
-
-/// Fetch every unread message for `address`, in id order. Fetched
-/// messages stay unread until the caller acks them.
-pub async fn fetch_inbox(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
-) -> Result<Vec<Message>, String> {
-    let mut conn = hello(server, address, token).await?;
-    send_frame(&mut conn, &Inbound::Inbox).await?;
-    match recv_frame(&mut conn).await? {
-        Outbound::Inbox { messages } => Ok(messages),
-        Outbound::Error { code, message } => Err(format!("{code}: {message}")),
-        _ => Err("server sent an unexpected frame instead of inbox".to_string()),
-    }
+/// Fetch every unread message for the endpoint address, in id order.
+/// Fetched messages stay unread until the caller acks them.
+#[cfg(test)]
+pub async fn fetch_inbox(endpoint: &Endpoint) -> Result<Vec<Message>, ClientError> {
+    Client::connect(endpoint).await?.unread().await
 }
 
 /// Seconds between reconnects, doubling from 1 s to 30 s. Shared by
@@ -226,174 +318,85 @@ pub fn next_backoff_secs(current: u64) -> u64 {
     (current * 2).min(30)
 }
 
-/// A failure of `wait_for_reply` or `ask`. A timeout carries the id that
-/// never got a reply, so the caller can report it and exit 2.
-#[derive(Debug, PartialEq, Eq)]
-pub enum WaitError {
-    Timeout { id: u64 },
-    Failed(String),
-}
-
-impl From<String> for WaitError {
-    fn from(error: String) -> WaitError {
-        WaitError::Failed(error)
-    }
-}
-
-/// True when the error is a broker `error` frame rather than a dropped
-/// connection. Server errors fail the wait; anything else reconnects.
-fn is_server_error(error: &str) -> bool {
-    const CODES: [&str; 11] = [
-        "bad_frame",
-        "hello_required",
-        "bad_version",
-        "bad_address",
-        "bad_token",
-        "bad_topic",
-        "empty_body",
-        "too_large",
-        "unknown_message",
-        "not_recipient",
-        "internal",
-    ];
-    match error.split_once(':') {
-        Some((code, _)) => CODES.contains(&code),
-        None => false,
-    }
-}
-
-/// An open `wait`: one reply id, then one `message` frame.
-pub struct WaitConn {
-    conn: Conn,
-}
-
-impl WaitConn {
-    /// Say hello and park a `wait` for `reply_to` on this connection.
-    pub async fn connect(
-        server: &str,
-        address: &str,
-        token: Option<&str>,
-        reply_to: u64,
-    ) -> Result<WaitConn, String> {
-        let mut conn = hello(server, address, token).await?;
-        send_frame(&mut conn, &Inbound::Wait { reply_to }).await?;
-        Ok(WaitConn { conn })
-    }
-
-    /// Block until the broker delivers the reply.
-    pub async fn next_message(&mut self) -> Result<Message, String> {
-        loop {
-            match recv_frame(&mut self.conn).await? {
-                Outbound::Message(message) => return Ok(message),
-                Outbound::Error { code, message } => {
-                    return Err(format!("{code}: {message}"));
-                }
-                _ => continue,
+/// Sleep for one backoff step, bounded by `deadline`. A passed deadline
+/// is the `ask` timeout for `reply_to`.
+async fn pause_backoff(
+    deadline: Option<tokio::time::Instant>,
+    backoff_secs: u64,
+    reply_to: u64,
+) -> Result<(), ClientError> {
+    match deadline {
+        Some(end) => {
+            let now = tokio::time::Instant::now();
+            if now >= end {
+                return Err(ClientError::Timeout { id: reply_to });
             }
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs).min(end - now)).await;
+            if tokio::time::Instant::now() >= end {
+                return Err(ClientError::Timeout { id: reply_to });
+            }
+            Ok(())
+        }
+        None => {
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            Ok(())
         }
     }
 }
 
-/// Wait for the reply to `reply_to`, reconnecting with backoff when the
-/// connection drops and resending only the `wait`. The question is sent
-/// once by the caller and never here. `timeout_secs` of zero waits with
-/// no limit; otherwise the whole wait, reconnects included, is bounded.
+/// Wait for the reply to `reply_to` on `client`, reconnecting with
+/// backoff when the connection drops and resending only the `wait` on a
+/// new connection. Only an I/O failure reconnects; a broker error or a
+/// bad frame fails the wait. The question is sent once by the caller and
+/// never here. `timeout_secs` of zero waits with no limit; otherwise the
+/// whole wait, reconnects included, is bounded. On success the live
+/// connection comes back with the reply, so the caller acks on it.
 pub async fn wait_for_reply(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
+    endpoint: &Endpoint,
+    client: Client,
     reply_to: u64,
     timeout_secs: u64,
-) -> Result<Message, WaitError> {
+) -> Result<(Client, Message), ClientError> {
     let deadline = if timeout_secs == 0 {
         None
     } else {
         Some(tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs))
     };
     let mut backoff_secs: u64 = 1;
+    let mut current = Some(client);
     loop {
-        match WaitConn::connect(server, address, token, reply_to).await {
-            Ok(mut stream) => {
-                backoff_secs = 1;
-                let wait = stream.next_message();
-                match deadline {
-                    Some(end) => match tokio::time::timeout_at(end, wait).await {
-                        Ok(Ok(message)) => return Ok(message),
-                        Ok(Err(error)) => {
-                            if is_server_error(&error) {
-                                return Err(WaitError::Failed(error));
-                            }
-                            if tokio::time::Instant::now() >= end {
-                                return Err(WaitError::Timeout { id: reply_to });
-                            }
-                            eprintln!(
-                                "chattrs: ask disconnected: {error}, \
-                                 retrying in {backoff_secs}s"
-                            );
-                        }
-                        Err(_) => return Err(WaitError::Timeout { id: reply_to }),
-                    },
-                    None => match wait.await {
-                        Ok(message) => return Ok(message),
-                        Err(error) => {
-                            if is_server_error(&error) {
-                                return Err(WaitError::Failed(error));
-                            }
-                            eprintln!(
-                                "chattrs: ask disconnected: {error}, \
-                                 retrying in {backoff_secs}s"
-                            );
-                        }
-                    },
+        let mut conn = match current.take() {
+            Some(conn) => conn,
+            None => match Client::reconnect(endpoint).await {
+                Ok(conn) => conn,
+                Err(error) => {
+                    eprintln!("chattrs: ask cannot connect: {error}, retrying in {backoff_secs}s");
+                    pause_backoff(deadline, backoff_secs, reply_to).await?;
+                    backoff_secs = next_backoff_secs(backoff_secs);
+                    continue;
                 }
-            }
+            },
+        };
+        backoff_secs = 1;
+        let waited = match deadline {
+            Some(end) => match tokio::time::timeout_at(end, conn.wait_reply(reply_to)).await {
+                Ok(result) => result,
+                Err(_) => return Err(ClientError::Timeout { id: reply_to }),
+            },
+            None => conn.wait_reply(reply_to).await,
+        };
+        match waited {
+            Ok(message) => return Ok((conn, message)),
+            Err(error @ ClientError::Server { .. }) => return Err(error),
+            Err(error @ ClientError::Protocol(_)) => return Err(error),
+            Err(error @ ClientError::Timeout { .. }) => return Err(error),
             Err(error) => {
-                if is_server_error(&error) {
-                    return Err(WaitError::Failed(error));
-                }
-                if let Some(end) = deadline {
-                    if tokio::time::Instant::now() >= end {
-                        return Err(WaitError::Timeout { id: reply_to });
-                    }
-                }
-                eprintln!("chattrs: ask cannot connect: {error}, retrying in {backoff_secs}s");
+                eprintln!("chattrs: ask disconnected: {error}, retrying in {backoff_secs}s");
+                pause_backoff(deadline, backoff_secs, reply_to).await?;
+                backoff_secs = next_backoff_secs(backoff_secs);
             }
         }
-        match deadline {
-            Some(end) => {
-                let now = tokio::time::Instant::now();
-                if now >= end {
-                    return Err(WaitError::Timeout { id: reply_to });
-                }
-                let pause = std::time::Duration::from_secs(backoff_secs).min(end - now);
-                tokio::time::sleep(pause).await;
-                if tokio::time::Instant::now() >= end {
-                    return Err(WaitError::Timeout { id: reply_to });
-                }
-            }
-            None => {
-                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-            }
-        }
-        backoff_secs = next_backoff_secs(backoff_secs);
     }
-}
-
-/// Post a question and wait for its reply. The question is sent once;
-/// reconnects resend only the `wait`. Returns the question id and reply.
-/// Unread messages print before the question is sent, so the preamble
-/// never contains the reply to this `ask`.
-pub async fn ask(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
-    outgoing: Outgoing,
-    timeout_secs: u64,
-    json: bool,
-) -> Result<(u64, Message), WaitError> {
-    let id = publish(server, address, token, outgoing, json).await.map_err(WaitError::Failed)?;
-    let reply = wait_for_reply(server, address, token, id, timeout_secs).await?;
-    Ok((id, reply))
 }
 
 /// One `log` page holds at most this many rows. The client pages with
@@ -401,203 +404,127 @@ pub async fn ask(
 pub const LOG_PAGE_SIZE: u64 = model::MAX_LOG_LIMIT;
 
 /// Fetch the full message history, oldest first. With `filter`, only
-/// messages it sent or received. Prints unread messages first, as text or
-/// as JSON `message` lines, on the same connection after `hello`.
+/// messages it sent or received.
+#[cfg(test)]
 pub async fn fetch_log(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
+    endpoint: &Endpoint,
     filter: Option<String>,
-    json: bool,
-) -> Result<Vec<LoggedMessage>, String> {
-    let mut conn = hello(server, address, token).await?;
-    print_unread_preamble(&mut conn, json).await?;
-    let mut history = Vec::new();
-    let mut after = 0;
-    loop {
-        send_frame(
-            &mut conn,
-            &Inbound::Log { address: filter.clone(), after, limit: LOG_PAGE_SIZE },
-        )
-        .await?;
-        let page = match recv_frame(&mut conn).await? {
-            Outbound::Log { messages } => messages,
-            Outbound::Error { code, message } => return Err(format!("{code}: {message}")),
-            _ => return Err("server sent an unexpected frame instead of log".to_string()),
-        };
-        let count = page.len();
-        if let Some(last) = page.last() {
-            after = last.id;
-        }
-        history.extend(page);
-        if count < LOG_PAGE_SIZE as usize {
-            return Ok(history);
-        }
-    }
-}
-
-/// Format one history row exactly as `log --json` prints it: the logged
-/// message with `type` `log` and `untrusted`, so a reader tells log rows
-/// from the preamble `message` lines.
-pub fn format_log_json(message: &LoggedMessage) -> Result<String, String> {
-    let mut value = serde_json::to_value(message).map_err(|e| e.to_string())?;
-    value["type"] = serde_json::Value::String("log".to_string());
-    value["untrusted"] = serde_json::Value::Bool(true);
-    serde_json::to_string(&value).map(|json| format!("{json}\n")).map_err(|e| e.to_string())
+) -> Result<Vec<LoggedMessage>, ClientError> {
+    Client::connect(endpoint).await?.log(filter).await
 }
 
 /// List every address that ever said `hello`, sorted by address.
-/// Prints unread messages first, as text or as JSON `message` lines.
-pub async fn fetch_agents(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
-    json: bool,
-) -> Result<Vec<Agent>, String> {
-    let mut conn = hello(server, address, token).await?;
-    print_unread_preamble(&mut conn, json).await?;
-    send_frame(&mut conn, &Inbound::Agents).await?;
-    match recv_frame(&mut conn).await? {
-        Outbound::Agents { agents } => Ok(agents),
-        Outbound::Error { code, message } => Err(format!("{code}: {message}")),
-        _ => Err("server sent an unexpected frame instead of agents".to_string()),
-    }
-}
-
-/// An open `watch` stream: unread messages first, then each new one.
-/// With topics, the stream carries announcements to those rooms instead
-/// of the inbox watch.
-pub struct WatchConn {
-    conn: Conn,
-}
-
-impl WatchConn {
-    /// Say hello and start streaming for `address`. With topics, the
-    /// broker replays each room's recent announcements, then each new
-    /// one; without topics, it replays the unread inbox.
-    pub async fn connect(
-        server: &str,
-        address: &str,
-        token: Option<&str>,
-        topics: &[String],
-    ) -> Result<WatchConn, String> {
-        let mut conn = hello(server, address, token).await?;
-        send_frame(&mut conn, &Inbound::Watch { topics: topics.to_vec() }).await?;
-        Ok(WatchConn { conn })
-    }
-
-    /// Wait for the next streamed message.
-    pub async fn next_message(&mut self) -> Result<Message, String> {
-        loop {
-            match recv_frame(&mut self.conn).await? {
-                Outbound::Message(message) => return Ok(message),
-                Outbound::Error { code, message } => {
-                    return Err(format!("{code}: {message}"));
-                }
-                _ => continue,
-            }
-        }
-    }
-}
-
-/// Format one watched message exactly as `watch` prints it: one JSON
-/// `message` line marked `untrusted`, since the body is from another
-/// agent and carries no user authority. The broker never sends or
-/// stores the flag; only the CLI adds it when printing.
-pub fn format_watch_line(message: &Message) -> Result<String, String> {
-    let mut value = serde_json::to_value(message).map_err(|e| e.to_string())?;
-    value["type"] = serde_json::Value::String("message".to_string());
-    value["untrusted"] = serde_json::Value::Bool(true);
-    serde_json::to_string(&value).map(|json| format!("{json}\n")).map_err(|e| e.to_string())
-}
-
-/// Print one watched message as JSON, flush stdout, then ack it. Printing
-/// before acking keeps delivery at least once across a crash in between.
-pub async fn print_and_ack(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
-    message: &Message,
-) -> Result<(), String> {
-    let line = format_watch_line(message)?;
-    print!("{line}");
-    use std::io::Write;
-    std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
-    ack(server, address, token, &[message.id]).await?;
-    Ok(())
-}
-
-/// Print one watched announcement as JSON and flush stdout, without
-/// acking: announcements belong to no inbox.
-pub fn print_announcement(message: &Message) -> Result<(), String> {
-    print!("{}", format_watch_line(message)?);
-    use std::io::Write;
-    std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
-    Ok(())
-}
-
-/// Stream messages forever, printing one JSON line each. With topics, the
-/// stream carries announcements and never acks. When the connection
-/// drops, reconnect with backoff from 1 s to 30 s. Logs go to stderr only.
-pub async fn watch(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
-    topics: &[String],
-) -> Result<(), String> {
-    let announcing = !topics.is_empty();
-    let mut backoff_secs: u64 = 1;
-    loop {
-        match WatchConn::connect(server, address, token, topics).await {
-            Ok(mut stream) => {
-                backoff_secs = 1;
-                loop {
-                    match stream.next_message().await {
-                        Ok(message) => {
-                            backoff_secs = 1;
-                            let printed = if announcing {
-                                print_announcement(&message)
-                            } else {
-                                print_and_ack(server, address, token, &message).await
-                            };
-                            if let Err(e) = printed {
-                                eprintln!(
-                                    "chattrs: watch failed: {e}, retrying in {backoff_secs}s"
-                                );
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "chattrs: watch disconnected: {e}, retrying in {backoff_secs}s"
-                            );
-                            break;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("chattrs: watch cannot connect: {e}, retrying in {backoff_secs}s");
-            }
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-        backoff_secs = next_backoff_secs(backoff_secs);
-    }
+#[cfg(test)]
+pub async fn fetch_agents(endpoint: &Endpoint) -> Result<Vec<Agent>, ClientError> {
+    Client::connect(endpoint).await?.agents().await
 }
 
 /// Ack message ids and return the ids that changed to read.
-pub async fn ack(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
-    ids: &[u64],
-) -> Result<Vec<u64>, String> {
-    let mut conn = hello(server, address, token).await?;
-    send_frame(&mut conn, &Inbound::Ack { ids: ids.to_vec() }).await?;
-    match recv_frame(&mut conn).await? {
-        Outbound::Acked { ids } => Ok(ids),
-        Outbound::Error { code, message } => Err(format!("{code}: {message}")),
-        _ => Err("server sent an unexpected frame instead of acked".to_string()),
+#[cfg(test)]
+pub async fn ack(endpoint: &Endpoint, ids: &[u64]) -> Result<Vec<u64>, ClientError> {
+    Client::connect(endpoint).await?.ack(ids).await
+}
+
+/// A `watch` stream that reconnects on I/O failure and hands each message
+/// to its caller. Only an I/O failure reconnects; a broker error or a bad
+/// frame ends the stream with that error. With topics, the stream carries
+/// announcements; with none, it carries the own inbox. Logs go to stderr
+/// only.
+pub struct Watcher {
+    endpoint: Endpoint,
+    topics: Vec<String>,
+    client: Option<Client>,
+    backoff_secs: u64,
+    /// True after the first successful connect. Later connects are
+    /// reconnects and never start a broker.
+    connected_once: bool,
+}
+
+impl Watcher {
+    /// A stream for `endpoint` over `topics`; an empty list watches the
+    /// own inbox.
+    pub fn new(endpoint: Endpoint, topics: Vec<String>) -> Watcher {
+        Watcher { endpoint, topics, client: None, backoff_secs: 1, connected_once: false }
+    }
+
+    /// Drop the current connection, so the next message reconnects and
+    /// the broker replays what is still unread.
+    pub fn reset(&mut self) {
+        self.client = None;
+    }
+
+    /// Ack one printed message on the watch connection itself. The
+    /// `acked` answer is skipped by the next `next_message` call.
+    pub async fn ack(&mut self, id: u64) -> Result<(), ClientError> {
+        match self.client.as_mut() {
+            Some(client) => client.ack_sent(id).await,
+            None => Err(ClientError::Io("watch is not connected".to_string())),
+        }
+    }
+
+    /// Connect and send the `watch` frame. An I/O failure is returned for
+    /// the caller to retry; any other failure ends the stream.
+    async fn connect(&mut self) -> Result<(), ClientError> {
+        let mut client = if self.connected_once {
+            Client::reconnect(&self.endpoint).await?
+        } else {
+            Client::connect(&self.endpoint).await?
+        };
+        self.connected_once = true;
+        client.send_frame(&Inbound::Watch { topics: self.topics.clone() }).await?;
+        self.client = Some(client);
+        self.backoff_secs = 1;
+        Ok(())
+    }
+
+    /// Wait for the next streamed message, reconnecting with backoff from
+    /// 1 s to 30 s when the connection drops.
+    pub async fn next_message(&mut self) -> Result<Message, ClientError> {
+        loop {
+            if self.client.is_none() {
+                match self.connect().await {
+                    Ok(()) => {}
+                    Err(error @ ClientError::Server { .. }) => return Err(error),
+                    Err(error @ ClientError::Protocol(_)) => return Err(error),
+                    Err(error @ ClientError::Timeout { .. }) => return Err(error),
+                    Err(error) => {
+                        eprintln!(
+                            "chattrs: watch cannot connect: {error}, \
+                             retrying in {}s",
+                            self.backoff_secs
+                        );
+                        self.sleep().await;
+                        continue;
+                    }
+                }
+            }
+            let result = match self.client.as_mut() {
+                Some(client) => client.next_message().await,
+                None => continue,
+            };
+            match result {
+                Ok(message) => {
+                    self.backoff_secs = 1;
+                    return Ok(message);
+                }
+                Err(error @ ClientError::Server { .. }) => return Err(error),
+                Err(error @ ClientError::Protocol(_)) => return Err(error),
+                Err(error @ ClientError::Timeout { .. }) => return Err(error),
+                Err(error) => {
+                    eprintln!(
+                        "chattrs: watch disconnected: {error}, retrying in {}s",
+                        self.backoff_secs
+                    );
+                    self.client = None;
+                    self.sleep().await;
+                }
+            }
+        }
+    }
+
+    async fn sleep(&mut self) {
+        tokio::time::sleep(std::time::Duration::from_secs(self.backoff_secs)).await;
+        self.backoff_secs = next_backoff_secs(self.backoff_secs);
     }
 }
 
@@ -606,24 +533,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn log_json_line_carries_type_log_and_untrusted() {
-        let message = LoggedMessage {
-            id: 13,
-            from: "codex@box1".into(),
-            to: Some("opus@mac".into()),
-            body: "hi".into(),
-            ts: 1763200000000,
-            reply_to: Some(12),
-            topic: None,
-            acked_at: None,
-        };
-        let line = format_log_json(&message).unwrap();
-        assert!(line.ends_with('\n'));
-        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
-        assert_eq!(value["type"].as_str(), Some("log"));
-        assert_eq!(value["untrusted"].as_bool(), Some(true));
-        assert_eq!(value["id"].as_u64(), Some(13));
-        assert_eq!(value["reply_to"].as_u64(), Some(12));
-        assert!(value["acked_at"].is_null(), "unread row has null acked_at");
+    fn server_error_displays_code_and_message() {
+        let error =
+            ClientError::Server { code: "bad_token".into(), message: "token is wrong".into() };
+        assert_eq!(error.to_string(), "bad_token: token is wrong");
+        assert_eq!(String::from(error), "bad_token: token is wrong");
     }
 }
