@@ -2,8 +2,9 @@
 
 `chattrs` is a distributed client/server messaging system for cross-agent
 coordination, written in Rust. One broker, many agents (`claude`, `muse`,
-`codex`, scripts) joining named sessions over a line-JSON TCP protocol.
-Crate and binary are both called `chattrs`.
+`codex`, scripts) with `agent@host` addresses, sending messages through
+protocol v1 over a line-JSON TCP protocol. Crate and binary are both called
+`chattrs`.
 
 Start with [README.md](README.md) for what it is and the wire protocol, then
 this file for commands and architecture.
@@ -20,9 +21,8 @@ cargo clippy --all-targets -- -D warnings   # lint gate, same as CI
 Run a broker and exercise the client against an ephemeral port:
 
 ```bash
-target/debug/chattrs serve --listen 127.0.0.1:47654
-target/debug/chattrs send --server 127.0.0.1:47654 --agent claude "hi"
-target/debug/chattrs list --server 127.0.0.1:47654 --json
+target/debug/chattrs serve --listen 127.0.0.1:47654 --db /tmp/c.db
+CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to muse@h "hi"
 ```
 
 ## Architecture
@@ -30,24 +30,21 @@ target/debug/chattrs list --server 127.0.0.1:47654 --json
 | File | Owns |
 | ---- | ---- |
 | `src/main.rs` | Thin entry: parse `cli`, dispatch to `server`/`client` |
-| `src/cli.rs` | Clap `Args` + subcommand structs, `--server`/`--session`/`--agent` defaults |
-| `src/model.rs` | Wire types (`Message`, `SessionInfo`, `Inbound`, `Outbound`) and their serde shapes |
+| `src/cli.rs` | Clap `Args` + subcommand structs, `--server`/`--address`/`--token` flags |
+| `src/model.rs` | Wire types (`Inbound`, `Outbound`), limits, address validation, serde shapes |
 | `src/protocol.rs` | Line-JSON framing: `encode`/`decode` |
-| `src/server.rs` | The broker: sessions, history ring buffer, presence, broadcast |
-| `src/client.rs` | One TCP connection per command (`send`/`list`/`watch`/`sessions`) |
+| `src/store.rs` | SQLite storage: one `Connection` in `Arc<Mutex<_>>`, blocking calls |
+| `src/server.rs` | The broker: `hello` then `send`, commit to `store` before `sent` |
+| `src/client.rs` | One TCP connection per command (`send`) |
 
 Key patterns:
 
 - **Data first.** Types live in `model.rs` and carry the wire shape; behavior
   follows. `model`/`protocol` stay pure — no sockets, no IO.
 - **Never block the broker.** Each connection runs its own tokio task with a
-  reader loop and a writer task, so a slow subscriber cannot stall the rest.
-- **Presence is counts, not accounts.** An agent joins a session on `hello`
-  and leaves when its connection closes; sessions with no history and no
-  agents are dropped.
-- **Broadcast for live, ring buffer for catch-up.** `watch` subscribes to
-  new messages; `list` reads retained history. The buffer is capped by
-  `serve --history`.
+  reader loop; storage calls run in `spawn_blocking`.
+- **Commit before confirm.** A send is written to SQLite before the broker
+  replies `sent`. The broker never deletes a message.
 
 ## Code style
 

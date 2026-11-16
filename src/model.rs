@@ -1,72 +1,103 @@
-//! chattrs — data model for messages, sessions, and wire frames.
+//! chattrs — data model: limits, addresses, and wire frames.
 //!
 //! This module is pure: types and their serde shapes only. Framing lives in
-//! `protocol`, the broker in `server`, and the client in `client`.
+//! `protocol`, storage in `store`, the broker in `server`, and commands in
+//! `client`.
 
 use serde::{Deserialize, Serialize};
 
-/// One message in a session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct Message {
-    pub id: u64,
-    pub session: String,
-    pub agent: String,
-    pub body: String,
-    /// Milliseconds since the Unix epoch, as stamped by the broker.
-    pub ts: u64,
-    pub reply_to: Option<u64>,
-}
+/// Protocol version spoken by this broker and client.
+pub const PROTOCOL_VERSION: u32 = 1;
 
-/// A session summary returned by `sessions`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionInfo {
-    pub name: String,
-    /// Connected agents, sorted.
-    pub agents: Vec<String>,
-    pub message_count: usize,
+/// Largest accepted message body, in bytes.
+pub const MAX_BODY_BYTES: usize = 64 * 1024;
+
+/// Largest accepted inbound line, in bytes.
+pub const MAX_LINE_BYTES: usize = 128 * 1024;
+
+/// Largest accepted address, in bytes.
+pub const MAX_ADDRESS_BYTES: usize = 128;
+
+/// An address is valid when it is `user@host` with only letters, digits,
+/// `.`, `_`, `-` on each side, and at most 128 bytes long.
+pub fn is_valid_address(address: &str) -> bool {
+    if address.is_empty() || address.len() > MAX_ADDRESS_BYTES {
+        return false;
+    }
+    let Some((user, host)) = address.split_once('@') else {
+        return false;
+    };
+    if user.is_empty() || host.is_empty() || host.contains('@') {
+        return false;
+    }
+    address
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'@'))
 }
 
 /// Frames a client sends to the broker.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Inbound {
-    /// Register an agent on a session; must precede the other frames.
-    Hello { agent: String, session: String },
-    Send { body: String, reply_to: Option<u64> },
-    List { limit: Option<usize>, after: Option<u64> },
-    Watch,
-    Sessions,
+    /// Identify as an address; must be the first frame on a connection.
+    Hello {
+        v: u32,
+        address: String,
+        #[serde(default)]
+        token: Option<String>,
+    },
+    /// Store a message for the `to` address. The broker fills in `from`.
+    Send {
+        to: String,
+        body: String,
+        #[serde(default)]
+        reply_to: Option<u64>,
+    },
 }
 
 /// Frames the broker sends to a client.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Outbound {
-    Welcome { server: String, session: String },
-    /// Acknowledges a published message with its id.
-    Ack { id: u64 },
-    Message {
-        id: u64,
-        session: String,
-        agent: String,
-        body: String,
-        ts: u64,
-        reply_to: Option<u64>,
-    },
-    History { messages: Vec<Message> },
-    Sessions { sessions: Vec<SessionInfo> },
-    Error { message: String },
+    Welcome { server: String, v: u32, address: String },
+    /// Confirms a stored message with its id.
+    Sent { id: u64 },
+    Error { code: String, message: String },
 }
 
-impl From<Message> for Outbound {
-    fn from(message: Message) -> Outbound {
-        Outbound::Message {
-            id: message.id,
-            session: message.session,
-            agent: message.agent,
-            body: message.body,
-            ts: message.ts,
-            reply_to: message.reply_to,
+impl Outbound {
+    /// Build an `error` frame with a machine-readable code.
+    pub fn error(code: &str, message: impl Into<String>) -> Outbound {
+        Outbound::Error { code: code.to_string(), message: message.into() }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_addresses_pass() {
+        for address in ["a@h", "codex@box1", "opus.mac@tail-scale_01", "A.9-x_y@Z.8-w_v"] {
+            assert!(is_valid_address(address), "{address}");
+        }
+    }
+
+    #[test]
+    fn invalid_addresses_fail() {
+        let long = format!("{}@h", "a".repeat(127));
+        let cases = vec![
+            "".to_string(),
+            "no-at-sign".to_string(),
+            "@h".to_string(),
+            "a@".to_string(),
+            "a@b@c".to_string(),
+            "a b@c".to_string(),
+            "a@h!".to_string(),
+            long,
+        ];
+        for address in cases {
+            assert!(!is_valid_address(&address), "{address}");
         }
     }
 }

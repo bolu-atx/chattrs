@@ -9,8 +9,11 @@ keywords = ["agents", "messaging", "cli"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-chrono = "0.4"
 clap = { version = "4", features = ["derive", "env"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"

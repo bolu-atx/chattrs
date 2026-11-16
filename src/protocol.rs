@@ -26,18 +26,15 @@ pub fn decode<T: DeserializeOwned>(line: &str) -> Result<T, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{self, Inbound, Outbound};
+    use crate::model::{Inbound, Outbound};
 
     #[test]
     fn inbound_frames_round_trip() {
         let frames = vec![
-            Inbound::Hello { agent: "claude".into(), session: "default".into() },
-            Inbound::Send { body: "hi".into(), reply_to: Some(3) },
-            Inbound::Send { body: "hi".into(), reply_to: None },
-            Inbound::List { limit: Some(10), after: Some(2) },
-            Inbound::List { limit: None, after: None },
-            Inbound::Watch,
-            Inbound::Sessions,
+            Inbound::Hello { v: 1, address: "codex@box1".into(), token: None },
+            Inbound::Hello { v: 1, address: "codex@box1".into(), token: Some("s3cret".into()) },
+            Inbound::Send { to: "opus@mac".into(), body: "hi".into(), reply_to: None },
+            Inbound::Send { to: "opus@mac".into(), body: "hi".into(), reply_to: Some(3) },
         ];
         for frame in frames {
             let line = encode(&frame).unwrap();
@@ -48,38 +45,44 @@ mod tests {
 
     #[test]
     fn outbound_frames_round_trip() {
-        let message = model::Message {
-            id: 1,
-            session: "default".into(),
-            agent: "claude".into(),
-            body: "hi".into(),
-            ts: 1_234_567,
-            reply_to: None,
-        };
         let frames = vec![
-            Outbound::Welcome { server: "chattrs".into(), session: "default".into() },
-            Outbound::Ack { id: 1 },
-            Outbound::Message {
-                id: 1,
-                session: "default".into(),
-                agent: "claude".into(),
-                body: "hi".into(),
-                ts: 1_234_567,
-                reply_to: None,
-            },
-            Outbound::History { messages: vec![message] },
-            Outbound::Sessions {
-                sessions: vec![model::SessionInfo {
-                    name: "default".into(),
-                    agents: vec!["claude".into()],
-                    message_count: 1,
-                }],
-            },
-            Outbound::Error { message: "bad".into() },
+            Outbound::Welcome { server: "chattrs".into(), v: 1, address: "codex@box1".into() },
+            Outbound::Sent { id: 12 },
+            Outbound::Error { code: "empty_body".into(), message: "body is empty".into() },
         ];
         for frame in frames {
             let line = encode(&frame).unwrap();
+            assert!(line.ends_with('\n'));
             assert_eq!(decode::<Outbound>(&line).unwrap(), frame);
+        }
+    }
+
+    #[test]
+    fn every_line_carries_a_type_tag() {
+        let frames = vec![
+            serde_json::to_value(Inbound::Hello {
+                v: 1,
+                address: "a@h".into(),
+                token: None,
+            })
+            .unwrap(),
+            serde_json::to_value(Inbound::Send {
+                to: "b@h".into(),
+                body: "hi".into(),
+                reply_to: None,
+            })
+            .unwrap(),
+            serde_json::to_value(Outbound::Welcome {
+                server: "chattrs".into(),
+                v: 1,
+                address: "a@h".into(),
+            })
+            .unwrap(),
+            serde_json::to_value(Outbound::Sent { id: 1 }).unwrap(),
+            serde_json::to_value(Outbound::error("bad_frame", "nope")).unwrap(),
+        ];
+        for frame in frames {
+            assert!(frame.get("type").is_some(), "{frame}");
         }
     }
 
@@ -90,8 +93,8 @@ mod tests {
 
     #[test]
     fn decode_ignores_trailing_newline() {
-        let frame = Inbound::Watch;
+        let frame = Outbound::Sent { id: 7 };
         let line = encode(&frame).unwrap();
-        assert_eq!(decode::<Inbound>(line.trim_end()).unwrap(), frame);
+        assert_eq!(decode::<Outbound>(line.trim_end()).unwrap(), frame);
     }
 }
