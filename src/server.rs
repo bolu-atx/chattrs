@@ -1153,15 +1153,13 @@ mod tests {
         static BUILD_ONCE: std::sync::Once = std::sync::Once::new();
         let path = test_bin_path();
         BUILD_ONCE.call_once(|| {
-            if !path.exists() {
-                let status = std::process::Command::new("cargo")
-                    .arg("build")
-                    .arg("--bin")
-                    .arg("chattrs")
-                    .status()
-                    .expect("run cargo build");
-                assert!(status.success(), "cargo build failed");
-            }
+            let status = std::process::Command::new("cargo")
+                .arg("build")
+                .arg("--bin")
+                .arg("chattrs")
+                .status()
+                .expect("run cargo build");
+            assert!(status.success(), "cargo build failed");
         });
         assert!(path.exists(), "chattrs binary missing at {}", path.display());
         path
