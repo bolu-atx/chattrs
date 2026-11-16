@@ -3,5 +3,5 @@
 # lint. Bump this on purpose, in its own PR, and fix new lints there.
 [toolchain]
 channel = "1.100.0"
-components = ["clippy"]
+components = ["clippy", "rustfmt"]
 profile = "minimal"

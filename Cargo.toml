@@ -22,3 +22,8 @@ tempfile = "3"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[lints.clippy]
+# Clippy has no cyclomatic lint. `cognitive_complexity` is its measure of
+# branches and nesting per function. The limit is in `clippy.toml`.
+cognitive_complexity = "deny"

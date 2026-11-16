@@ -1,0 +1,2 @@
+# Functions above this complexity fail `make check`.
+cognitive-complexity-threshold = 40

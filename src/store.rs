@@ -132,9 +132,7 @@ impl Store {
     pub fn default_path() -> PathBuf {
         #[cfg(windows)]
         {
-            nonempty_env("APPDATA")
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("chattrs/chattrs.db")
+            nonempty_env("APPDATA").unwrap_or_else(|| PathBuf::from(".")).join("chattrs/chattrs.db")
         }
         #[cfg(not(windows))]
         {
@@ -155,8 +153,7 @@ fn open_blocking(path: &Path) -> Result<Store, String> {
                 .map_err(|e| format!("create db dir {}: {e}", parent.display()))?;
         }
     }
-    let conn =
-        Connection::open(path).map_err(|e| format!("open db {}: {e}", path.display()))?;
+    let conn = Connection::open(path).map_err(|e| format!("open db {}: {e}", path.display()))?;
     conn.execute_batch(
         "PRAGMA journal_mode=WAL;
          PRAGMA synchronous=FULL;
@@ -189,11 +186,8 @@ fn open_blocking(path: &Path) -> Result<Store, String> {
 /// Databases created before the topic story have no column; the broker
 /// adds it on open so old rows read back with a null topic.
 fn has_topic_column(conn: &Connection) -> Result<bool, String> {
-    let mut stmt =
-        conn.prepare("PRAGMA table_info(messages)").map_err(|e| e.to_string())?;
-    let names = stmt
-        .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("PRAGMA table_info(messages)").map_err(|e| e.to_string())?;
+    let names = stmt.query_map([], |row| row.get::<_, String>(1)).map_err(|e| e.to_string())?;
     for name in names {
         if name.map_err(|e| e.to_string())? == "topic" {
             return Ok(true);
@@ -246,13 +240,14 @@ fn insert_blocking(
 /// Map a stored recipient back to the wire: the empty string means the
 /// row is an announcement with no owning inbox.
 fn read_recipient(raw: String) -> Option<String> {
-    if raw.is_empty() { None } else { Some(raw) }
+    if raw.is_empty() {
+        None
+    } else {
+        Some(raw)
+    }
 }
 
-fn get_blocking(
-    conn: &Arc<Mutex<Connection>>,
-    id: u64,
-) -> Result<Option<Message>, String> {
+fn get_blocking(conn: &Arc<Mutex<Connection>>, id: u64) -> Result<Option<Message>, String> {
     let conn = lock(conn)?;
     let mut stmt = conn
         .prepare(
@@ -279,10 +274,7 @@ fn get_blocking(
     }
 }
 
-fn inbox_blocking(
-    conn: &Arc<Mutex<Connection>>,
-    recipient: &str,
-) -> Result<Vec<Message>, String> {
+fn inbox_blocking(conn: &Arc<Mutex<Connection>>, recipient: &str) -> Result<Vec<Message>, String> {
     let conn = lock(conn)?;
     let mut stmt = conn
         .prepare(
@@ -420,20 +412,17 @@ fn topic_backlog_blocking(
             )
             .map_err(|e| e.to_string())?;
         let rows = stmt
-            .query_map(
-                rusqlite::params![topic, MAX_TOPIC_BACKLOG as i64],
-                |row| {
-                    Ok(Message {
-                        id: row.get::<_, i64>(0)? as u64,
-                        from: row.get(1)?,
-                        to: read_recipient(row.get(2)?),
-                        body: row.get(3)?,
-                        ts: row.get::<_, i64>(4)? as u64,
-                        reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
-                        topic: row.get(6)?,
-                    })
-                },
-            )
+            .query_map(rusqlite::params![topic, MAX_TOPIC_BACKLOG as i64], |row| {
+                Ok(Message {
+                    id: row.get::<_, i64>(0)? as u64,
+                    from: row.get(1)?,
+                    to: read_recipient(row.get(2)?),
+                    body: row.get(3)?,
+                    ts: row.get::<_, i64>(4)? as u64,
+                    reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
+                    topic: row.get(6)?,
+                })
+            })
             .map_err(|e| e.to_string())?;
         for row in rows {
             backlog.push(row.map_err(|e| e.to_string())?);
@@ -443,10 +432,7 @@ fn topic_backlog_blocking(
     Ok(backlog)
 }
 
-fn touch_agent_blocking(
-    conn: &Arc<Mutex<Connection>>,
-    address: &str,
-) -> Result<(), String> {
+fn touch_agent_blocking(conn: &Arc<Mutex<Connection>>, address: &str) -> Result<(), String> {
     let conn = lock(conn)?;
     conn.execute(
         "INSERT INTO agents (address, last_seen) VALUES (?1, ?2)
@@ -464,10 +450,7 @@ fn agents_blocking(conn: &Arc<Mutex<Connection>>) -> Result<Vec<Agent>, String> 
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
-            Ok(Agent {
-                address: row.get(0)?,
-                last_seen: row.get::<_, i64>(1)? as u64,
-            })
+            Ok(Agent { address: row.get(0)?, last_seen: row.get::<_, i64>(1)? as u64 })
         })
         .map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
@@ -500,10 +483,7 @@ mod tests {
         std::env::set_var("CHATTRS_TEST_PROBE_DIR", "   ");
         assert_eq!(nonempty_env("CHATTRS_TEST_PROBE_DIR"), None);
         std::env::set_var("CHATTRS_TEST_PROBE_DIR", "/tmp/probe");
-        assert_eq!(
-            nonempty_env("CHATTRS_TEST_PROBE_DIR"),
-            Some(PathBuf::from("/tmp/probe"))
-        );
+        assert_eq!(nonempty_env("CHATTRS_TEST_PROBE_DIR"), Some(PathBuf::from("/tmp/probe")));
         std::env::remove_var("CHATTRS_TEST_PROBE_DIR");
     }
 
@@ -523,14 +503,10 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db = dir.path().join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
-        let first = store
-            .insert("a@h".into(), Some("b@h".into()), "one".into(), None, None)
-            .await
-            .unwrap();
-        let second = store
-            .insert("a@h".into(), Some("b@h".into()), "two".into(), None, None)
-            .await
-            .unwrap();
+        let first =
+            store.insert("a@h".into(), Some("b@h".into()), "one".into(), None, None).await.unwrap();
+        let second =
+            store.insert("a@h".into(), Some("b@h".into()), "two".into(), None, None).await.unwrap();
         let other = store
             .insert("a@h".into(), Some("c@h".into()), "other".into(), None, None)
             .await
@@ -558,10 +534,8 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db = dir.path().join("sub").join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
-        let id = store
-            .insert("a@h".into(), Some("b@h".into()), "hi".into(), None, None)
-            .await
-            .unwrap();
+        let id =
+            store.insert("a@h".into(), Some("b@h".into()), "hi".into(), None, None).await.unwrap();
         assert_eq!(id, 1);
         assert_eq!(read_row(&db, id), ("a@h".into(), "b@h".into(), "hi".into()));
         drop(store);
@@ -583,13 +557,7 @@ mod tests {
         let mut first_kept = 0;
         for i in 0..crate::model::MAX_TOPIC_BACKLOG + 5 {
             let id = store
-                .insert(
-                    "a@h".into(),
-                    None,
-                    format!("note {i}"),
-                    None,
-                    Some("release-26".into()),
-                )
+                .insert("a@h".into(), None, format!("note {i}"), None, Some("release-26".into()))
                 .await
                 .unwrap();
             if i == 5 {
@@ -614,10 +582,8 @@ mod tests {
             .await
             .unwrap();
 
-        let backlog = store
-            .topic_backlog(vec!["release-26".into(), "other-topic".into()])
-            .await
-            .unwrap();
+        let backlog =
+            store.topic_backlog(vec!["release-26".into(), "other-topic".into()]).await.unwrap();
         assert_eq!(backlog.len(), crate::model::MAX_TOPIC_BACKLOG as usize + 1);
         let ids: Vec<u64> = backlog.iter().map(|message| message.id).collect();
         assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "backlog is in id order");

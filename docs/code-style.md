@@ -125,8 +125,11 @@ What good code looks like here:
 
 ## Formatting
 
-- 100 characters per line. Do not reformat lines you did not touch; a mass
-  reformat hides real changes in review.
+- rustfmt decides the layout (`rustfmt.toml`, 100 characters per line). Run
+  `make fmt` before you commit. `make check` fails on unformatted code.
+- Complexity limit: 40 per function (clippy `cognitive_complexity`, set in
+  `clippy.toml`). `make check` fails above it. Split the function; do not add
+  an `allow`.
 
 ## Tests
 

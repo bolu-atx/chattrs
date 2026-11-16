@@ -50,10 +50,7 @@ pub fn is_loopback_server(server: &str) -> bool {
         return addr.ip().is_loopback();
     }
     let host = server.rsplit_once(':').map(|part| part.0).unwrap_or(server);
-    let bare = host
-        .strip_prefix('[')
-        .and_then(|rest| rest.strip_suffix(']'))
-        .unwrap_or(host);
+    let bare = host.strip_prefix('[').and_then(|rest| rest.strip_suffix(']')).unwrap_or(host);
     bare.eq_ignore_ascii_case("localhost")
 }
 
@@ -71,10 +68,7 @@ fn spawn_broker(server: &str, db: &Path, token: Option<&str>) -> Result<(), Stri
         .map_err(|e| format!("open log {}: {e}", log_path(db).display()))?;
     let out = log.try_clone().map_err(|e| format!("open log: {e}"))?;
     let mut command = std::process::Command::new(exe);
-    command.arg("serve").arg(format!("--listen={server}")).arg(format!(
-        "--db={}",
-        db.display()
-    ));
+    command.arg("serve").arg(format!("--listen={server}")).arg(format!("--db={}", db.display()));
     if let Some(token) = token {
         command.arg(format!("--token={token}"));
     }
