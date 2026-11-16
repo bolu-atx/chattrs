@@ -51,6 +51,15 @@ pub(crate) fn stdout_error(error: std::io::Error) -> String {
     format!("write stdout: {error}")
 }
 
+/// Build the one endpoint for a client command from its flags.
+fn endpoint(client: &cli::ClientArgs) -> Result<client::Endpoint, String> {
+    Ok(client::Endpoint {
+        server: client.server.clone(),
+        address: client.resolve_address()?,
+        token: client.token.clone(),
+    })
+}
+
 async fn run(args: Args) -> Result<(), String> {
     match args.command {
         Command::Serve(c) => {
@@ -58,14 +67,12 @@ async fn run(args: Args) -> Result<(), String> {
             server::serve(&c.listen, &db, c.token.clone()).await
         }
         Command::Send(c) => {
-            let address = c.client.resolve_address()?;
+            let endpoint = endpoint(&c.client)?;
             if c.to.is_none() && c.topic.is_none() {
                 return Err("send needs --to or --topic".to_string());
             }
-            let id = client::send(
-                &c.client.server,
-                &address,
-                c.client.token.as_deref(),
+            let id = client::publish(
+                &endpoint,
                 client::Outgoing {
                     to: c.to.clone(),
                     body: c.body(),
@@ -84,17 +91,8 @@ async fn run(args: Args) -> Result<(), String> {
             Ok(())
         }
         Command::Reply(c) => {
-            let address = c.client.resolve_address()?;
-            let id = client::reply(
-                &c.client.server,
-                &address,
-                c.client.token.as_deref(),
-                c.id,
-                &c.body(),
-                c.topic.as_deref(),
-                c.json,
-            )
-            .await?;
+            let endpoint = endpoint(&c.client)?;
+            let id = client::reply(&endpoint, c.id, &c.body(), c.topic.as_deref(), c.json).await?;
             if c.json {
                 let line = protocol::encode(&model::Outbound::Sent { id })?;
                 write_stdout(&line).map_err(stdout_error)?;
@@ -104,20 +102,18 @@ async fn run(args: Args) -> Result<(), String> {
             Ok(())
         }
         Command::Watch(c) => {
-            let address = c.client.resolve_address()?;
+            let endpoint = endpoint(&c.client)?;
             if let Some(bad) = c.topic.iter().find(|topic| !model::is_valid_topic(topic)) {
                 return Err(format!("topic is invalid: {bad}"));
             }
-            client::watch(&c.client.server, &address, c.client.token.as_deref(), &c.topic).await
+            client::watch(&endpoint, &c.topic).await.map_err(String::from)
         }
         Command::Ask(c) => {
-            let address = c.client.resolve_address()?;
+            let endpoint = endpoint(&c.client)?;
             let timeout = c.timeout;
             let json = c.json;
             match client::ask(
-                &c.client.server,
-                &address,
-                c.client.token.as_deref(),
+                &endpoint,
                 client::Outgoing {
                     to: Some(c.to.clone()),
                     body: c.body(),
@@ -137,11 +133,10 @@ async fn run(args: Args) -> Result<(), String> {
                         write_stdout(&format!("{}\n", model::render_message(&reply)))
                             .map_err(stdout_error)?;
                     }
-                    client::ack(&c.client.server, &address, c.client.token.as_deref(), &[reply.id])
-                        .await?;
+                    client::ack(&endpoint, &[reply.id]).await?;
                     Ok(())
                 }
-                Err(client::WaitError::Timeout { id }) => {
+                Err(client::ClientError::Timeout { id }) => {
                     if json {
                         write_stdout(&format!("{{\"type\":\"timeout\",\"id\":{id}}}\n"))
                             .map_err(stdout_error)?;
@@ -149,13 +144,12 @@ async fn run(args: Args) -> Result<(), String> {
                     eprintln!("timeout: no reply to {id}");
                     std::process::exit(2);
                 }
-                Err(client::WaitError::Failed(error)) => Err(error),
+                Err(error) => Err(error.into()),
             }
         }
         Command::Inbox(c) => {
-            let address = c.client.resolve_address()?;
-            let messages =
-                client::fetch_inbox(&c.client.server, &address, c.client.token.as_deref()).await?;
+            let endpoint = endpoint(&c.client)?;
+            let messages = client::fetch_inbox(&endpoint).await?;
             if messages.is_empty() {
                 return Ok(());
             }
@@ -171,7 +165,7 @@ async fn run(args: Args) -> Result<(), String> {
                 }
             }
             let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
-            client::ack(&c.client.server, &address, c.client.token.as_deref(), &ids).await?;
+            client::ack(&endpoint, &ids).await?;
             Ok(())
         }
         Command::Skill => {
@@ -179,20 +173,13 @@ async fn run(args: Args) -> Result<(), String> {
             Ok(())
         }
         Command::Log(c) => {
-            let address = c.client.resolve_address()?;
+            let endpoint = endpoint(&c.client)?;
             if let Some(about) = c.about.as_deref() {
                 if !model::is_valid_address(about) {
                     return Err(format!("address is invalid: {about}"));
                 }
             }
-            let messages = client::fetch_log(
-                &c.client.server,
-                &address,
-                c.client.token.as_deref(),
-                c.about.clone(),
-                c.json,
-            )
-            .await?;
+            let messages = client::fetch_log(&endpoint, c.about.clone(), c.json).await?;
             if c.json {
                 for message in &messages {
                     write_stdout(&client::format_log_json(message)?).map_err(stdout_error)?;
@@ -208,10 +195,8 @@ async fn run(args: Args) -> Result<(), String> {
             Ok(())
         }
         Command::Agents(c) => {
-            let address = c.client.resolve_address()?;
-            let agents =
-                client::fetch_agents(&c.client.server, &address, c.client.token.as_deref(), c.json)
-                    .await?;
+            let endpoint = endpoint(&c.client)?;
+            let agents = client::fetch_agents(&endpoint, c.json).await?;
             for agent in &agents {
                 if c.json {
                     let mut value = serde_json::to_value(agent).map_err(|e| e.to_string())?;
