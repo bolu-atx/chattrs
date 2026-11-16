@@ -21,11 +21,50 @@ use tokio::sync::mpsc;
 pub struct Broker {
     store: Store,
     watchers: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Message>>>>,
+    token: Option<String>,
 }
 
 impl Broker {
-    pub fn new(store: Store) -> Broker {
-        Broker { store, watchers: Mutex::new(HashMap::new()) }
+    pub fn new(store: Store, token: Option<String>) -> Broker {
+        Broker { store, watchers: Mutex::new(HashMap::new()), token }
+    }
+
+    /// Compare a presented token against the expected one without
+    /// short-circuiting on the first difference.
+    fn token_matches(presented: Option<&str>, expected: &str) -> bool {
+        let Some(presented) = presented else {
+            return false;
+        };
+        let got = presented.as_bytes();
+        let want = expected.as_bytes();
+        let longest = got.len().max(want.len());
+        let mut diff = got.len() ^ want.len();
+        for i in 0..longest {
+            let pair = got.get(i).copied().unwrap_or(0) ^ want.get(i).copied().unwrap_or(0);
+            diff |= pair as usize;
+        }
+        diff == 0
+    }
+
+    /// Reject the `hello` token when this broker requires one. Returns true
+    /// when the connection may continue.
+    async fn check_token(
+        &self,
+        writer: &mut OwnedWriteHalf,
+        presented: Option<&str>,
+    ) -> bool {
+        let Some(expected) = self.token.as_deref() else {
+            return true;
+        };
+        if Self::token_matches(presented, expected) {
+            return true;
+        }
+        write_error(
+            writer,
+            Outbound::error("bad_token", "token is missing or incorrect"),
+        )
+        .await;
+        false
     }
 
     /// Hand one stored message to every live `watch` connection of its
@@ -93,7 +132,10 @@ impl Broker {
             };
             match peer.clone() {
                 None => match frame {
-                    Inbound::Hello { v, address, .. } => {
+                    Inbound::Hello { v, address, token } => {
+                        if !self.check_token(&mut write_half, token.as_deref()).await {
+                            break;
+                        }
                         if v != model::PROTOCOL_VERSION {
                             write_error(
                                 &mut write_half,
@@ -134,7 +176,10 @@ impl Broker {
                     }
                 },
                 Some(from) => match frame {
-                    Inbound::Hello { v, address, .. } => {
+                    Inbound::Hello { v, address, token } => {
+                        if !self.check_token(&mut write_half, token.as_deref()).await {
+                            break;
+                        }
                         if v != model::PROTOCOL_VERSION {
                             write_error(
                                 &mut write_half,
@@ -371,12 +416,30 @@ async fn write_error(writer: &mut OwnedWriteHalf, frame: Outbound) {
     write_frame(writer, &frame).await;
 }
 
+/// True when `listen` binds a loopback address. Anything else, including
+/// `0.0.0.0` and `::`, counts as reachable from the network.
+pub fn is_loopback_listen(listen: &str) -> bool {
+    listen
+        .parse::<std::net::SocketAddr>()
+        .map(|addr| addr.ip().is_loopback())
+        .unwrap_or(false)
+}
+
+/// Refuse a network-reachable bind that has no token.
+pub fn check_listen(listen: &str, token: Option<&str>) -> Result<(), String> {
+    if token.is_none() && !is_loopback_listen(listen) {
+        return Err(format!("non-loopback bind {listen} requires a token"));
+    }
+    Ok(())
+}
+
 /// Bind and serve until the process exits.
-pub async fn serve(listen: &str, db: &Path) -> Result<(), String> {
+pub async fn serve(listen: &str, db: &Path, token: Option<String>) -> Result<(), String> {
+    check_listen(listen, token.as_deref())?;
     let listener = TcpListener::bind(listen).await.map_err(|e| format!("bind {listen}: {e}"))?;
     let store = Store::open(db.to_path_buf()).await?;
     println!("chattrs: serving on {listen}");
-    let broker = Arc::new(Broker::new(store));
+    let broker = Arc::new(Broker::new(store, token));
     run_listener(listener, broker).await
 }
 
@@ -403,7 +466,7 @@ mod tests {
         let store = Store::open(dir.path().join("chattrs.db")).await.unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        let broker = Arc::new(Broker::new(store));
+        let broker = Arc::new(Broker::new(store, None));
         let handle = tokio::spawn(async move {
             let _ = run_listener(listener, broker).await;
         });
@@ -414,7 +477,7 @@ mod tests {
         let store = Store::open(db.to_path_buf()).await.unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
-        let broker = Arc::new(Broker::new(store));
+        let broker = Arc::new(Broker::new(store, None));
         let handle = tokio::spawn(async move {
             let _ = run_listener(listener, broker).await;
         });
@@ -528,6 +591,84 @@ mod tests {
             let frame = raw_hello(&mut raw, &hello).await;
             assert_eq!(error_code(&frame), "bad_address", "for {address}");
         }
+        handle.abort();
+    }
+
+    async fn spawn_with_token(
+        token: &str,
+    ) -> (String, TempDir, tokio::task::JoinHandle<()>) {
+        let dir = TempDir::new().unwrap();
+        let store = Store::open(dir.path().join("chattrs.db")).await.unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let broker = Arc::new(Broker::new(store, Some(token.to_string())));
+        let handle = tokio::spawn(async move {
+            let _ = run_listener(listener, broker).await;
+        });
+        (addr, dir, handle)
+    }
+
+    #[tokio::test]
+    async fn non_loopback_bind_without_token_refuses_to_start() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        for listen in ["0.0.0.0:0", "[::]:0"] {
+            let err = serve(listen, &db, None).await.unwrap_err();
+            assert!(err.contains("token"), "got: {err}");
+            assert!(!err.contains("s3"), "token never appears: {err}");
+        }
+        assert!(check_listen("127.0.0.1:0", None).is_ok());
+        assert!(check_listen("0.0.0.0:0", Some("s3")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn loopback_bind_without_token_starts() {
+        assert!(check_listen("127.0.0.1:0", None).is_ok());
+        let (addr, _dir, handle) = spawn().await;
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, id);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn hello_with_wrong_token_is_rejected_and_closed() {
+        let (addr, _dir, handle) = spawn_with_token("s3").await;
+        let mut raw = raw_connect(&addr).await;
+        let frame = raw_hello(
+            &mut raw,
+            "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\",\"token\":\"wrong\"}\n",
+        )
+        .await;
+        assert_eq!(error_code(&frame), "bad_token");
+        assert!(raw_recv(&mut raw).await.is_err(), "connection closes after bad_token");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn hello_with_missing_token_is_rejected_when_broker_has_token() {
+        let (addr, _dir, handle) = spawn_with_token("s3").await;
+        let mut raw = raw_connect(&addr).await;
+        let frame =
+            raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\"}\n").await;
+        assert_eq!(error_code(&frame), "bad_token");
+        assert!(raw_recv(&mut raw).await.is_err(), "connection closes after bad_token");
+        let err = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap_err();
+        assert!(err.contains("bad_token"), "got: {err}");
+        assert!(!err.contains("s3"), "token never appears: {err}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn hello_with_right_token_is_welcomed() {
+        let (addr, _dir, handle) = spawn_with_token("s3").await;
+        let id =
+            client::send(&addr, "a@h", Some("s3"), "b@h", "hi", None).await.unwrap();
+        let messages = client::fetch_inbox(&addr, "b@h", Some("s3")).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, id);
+        assert_eq!(messages[0].body, "hi");
         handle.abort();
     }
 
