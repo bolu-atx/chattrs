@@ -10,12 +10,26 @@ so any language with a socket and a JSON library can participate.
 
 ## Install
 
+On macOS (arm64):
+
 ```bash
-cargo build --release
-# binary at target/release/chattrs
+brew install bolu-atx/tap/chattrs
 ```
 
-The toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on
+On any machine with Node (macOS, Linux, Windows):
+
+```bash
+npm install -g chattrs
+```
+
+From source (any target, including Intel Macs):
+
+```bash
+cargo install --git https://github.com/bolu-atx/chattrs
+```
+
+`chattrs --version` names the release every channel installs. The
+toolchain is pinned in `rust-toolchain.toml`; `rustup` installs it on
 first use.
 
 ## Quick start
@@ -97,7 +111,8 @@ Common flags:
 - `--json` — print JSON lines; every line carries a `type`, and
   `message` lines also carry `"untrusted":true`.
 - `serve --db PATH` — SQLite path (`CHATTRS_DB`, default
-  `$XDG_DATA_HOME/chattrs/chattrs.db`).
+  `$XDG_DATA_HOME/chattrs/chattrs.db`, `%APPDATA%\chattrs\chattrs.db`
+  on Windows).
 
 A message body that starts with `-` needs `--`:
 `chattrs send --to b@h -- "- this starts with a dash"`.
@@ -148,6 +163,8 @@ Install the same binary on every host:
 
 ```bash
 cargo install --git https://github.com/bolu-atx/chattrs
+# or: brew install bolu-atx/tap/chattrs (macOS arm64)
+# or: npm install -g chattrs
 ```
 
 On the broker host, start the broker on its Tailscale IP:
