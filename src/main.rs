@@ -1,8 +1,8 @@
 //! chattrs — distributed messaging for cross-agent coordination.
 //!
 //! A thin entry point: parse `cli`, then dispatch to `server` (the broker) or
-//! `client` (`send`). `model` owns the wire types, `protocol` the line-JSON
-//! framing, and `store` the SQLite storage.
+//! `client` (`send`, `inbox`). `model` owns the wire types, `protocol` the
+//! line-JSON framing, and `store` the SQLite storage.
 //!
 //! Quick start:
 //! ```text
@@ -52,6 +52,29 @@ async fn run(args: Args) -> Result<(), String> {
             } else {
                 println!("{id}");
             }
+            Ok(())
+        }
+        Command::Inbox(c) => {
+            let messages =
+                client::fetch_inbox(&c.client.server, &c.client.address, c.client.token.as_deref())
+                    .await?;
+            if messages.is_empty() {
+                return Ok(());
+            }
+            for message in &messages {
+                if c.json {
+                    let mut value = serde_json::to_value(message).map_err(|e| e.to_string())?;
+                    value["type"] = serde_json::Value::String("message".to_string());
+                    println!("{value}");
+                } else {
+                    println!("{}", model::render_message(message));
+                }
+            }
+            use std::io::Write;
+            std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
+            let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
+            client::ack(&c.client.server, &c.client.address, c.client.token.as_deref(), &ids)
+                .await?;
             Ok(())
         }
     }

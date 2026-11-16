@@ -20,6 +20,8 @@ pub enum Command {
     Serve(ServeArgs),
     /// Post a message to an address and print its id.
     Send(SendArgs),
+    /// Read the own inbox and ack what was printed.
+    Inbox(InboxArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -78,6 +80,16 @@ impl SendArgs {
         let _ = std::io::stdin().read_to_string(&mut body);
         body.trim_end().to_string()
     }
+}
+
+#[derive(clap::Args, Debug)]
+pub struct InboxArgs {
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Print one JSON object per message instead of a text line.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[cfg(test)]

@@ -35,6 +35,8 @@ mod tests {
             Inbound::Hello { v: 1, address: "codex@box1".into(), token: Some("s3cret".into()) },
             Inbound::Send { to: "opus@mac".into(), body: "hi".into(), reply_to: None },
             Inbound::Send { to: "opus@mac".into(), body: "hi".into(), reply_to: Some(3) },
+            Inbound::Inbox,
+            Inbound::Ack { ids: vec![12, 13] },
         ];
         for frame in frames {
             let line = encode(&frame).unwrap();
@@ -45,9 +47,19 @@ mod tests {
 
     #[test]
     fn outbound_frames_round_trip() {
+        let message = crate::model::Message {
+            id: 12,
+            from: "codex@box1".into(),
+            to: "opus@mac".into(),
+            body: "hi".into(),
+            ts: 1763200000000,
+            reply_to: None,
+        };
         let frames = vec![
             Outbound::Welcome { server: "chattrs".into(), v: 1, address: "codex@box1".into() },
             Outbound::Sent { id: 12 },
+            Outbound::Inbox { messages: vec![message] },
+            Outbound::Acked { ids: vec![12, 13] },
             Outbound::Error { code: "empty_body".into(), message: "body is empty".into() },
         ];
         for frame in frames {
@@ -79,6 +91,10 @@ mod tests {
             })
             .unwrap(),
             serde_json::to_value(Outbound::Sent { id: 1 }).unwrap(),
+            serde_json::to_value(Inbound::Inbox).unwrap(),
+            serde_json::to_value(Inbound::Ack { ids: vec![1] }).unwrap(),
+            serde_json::to_value(Outbound::Inbox { messages: vec![] }).unwrap(),
+            serde_json::to_value(Outbound::Acked { ids: vec![1] }).unwrap(),
             serde_json::to_value(Outbound::error("bad_frame", "nope")).unwrap(),
         ];
         for frame in frames {

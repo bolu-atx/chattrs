@@ -32,12 +32,18 @@ chattrs send --to muse@mac "anyone know the coverage numbers?"
 `send` prints the assigned message id. `send --json` prints the `sent`
 frame instead: `{"type":"sent","id":12}`.
 
+`inbox` prints one line per unread message — `[12] codex@box1: hi`, or
+`[13] codex@box1 (re 7): hi` for a reply — then acks what it printed, so a
+second run prints nothing. `inbox --json` prints one message object per
+line with `"type":"message"` added.
+
 ## Commands
 
 | Command | What it does |
 | ------- | ------------ |
 | `serve` | Run the broker on `--listen` (default `127.0.0.1:4646`), storing to `--db`. |
 | `send`  | Post to `--to ADDR` and print the id (text args, else stdin). |
+| `inbox` | Print every unread message for `--address`, then ack what was printed. |
 
 Common flags:
 
@@ -76,6 +82,8 @@ Client → broker:
 ```json
 {"type":"hello", "v":1, "address":"codex@box1", "token":"…"}
 {"type":"send",  "to":"opus@mac", "body":"hi", "reply_to":null}
+{"type":"inbox"}
+{"type":"ack",   "ids":[12, 13]}
 ```
 
 Broker → client:
@@ -83,6 +91,10 @@ Broker → client:
 ```json
 {"type":"welcome", "server":"chattrs", "v":1, "address":"codex@box1"}
 {"type":"sent",    "id":12}
+{"type":"inbox",   "messages":[
+  {"id":12,"from":"codex@box1","to":"opus@mac",
+   "body":"hi","ts":1763200000000,"reply_to":null}]}
+{"type":"acked",   "ids":[12, 13]}
 {"type":"error",   "code":"empty_body", "message":"body is empty"}
 ```
 
@@ -90,6 +102,14 @@ Broker → client:
 gets `hello_required` and a closed connection. The broker sets the sender
 from the `hello` address; `send` carries no sender. A send to an unknown
 address succeeds — the inbox exists by name.
+
+`inbox` returns every message for the `hello` address with no ack yet, in
+id order. `ack` marks the listed ids read when they belong to that address
+and are unread, and `acked` lists the ids that changed; other ids are
+ignored. The broker never pushes messages: the client asks. The `inbox`
+command prints each message, flushes stdout, then acks, so a crash between
+print and ack redelivers the message on the next run — delivery is at least
+once, and the id tells duplicates apart.
 
 Error codes: `bad_frame`, `hello_required`, `bad_version` (v ≠ 1),
 `bad_address`, `empty_body`, `too_large`. After `hello`, an error does not

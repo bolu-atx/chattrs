@@ -84,7 +84,7 @@ impl Broker {
                         )
                         .await;
                     }
-                    Inbound::Send { .. } => {
+                    Inbound::Send { .. } | Inbound::Inbox | Inbound::Ack { .. } => {
                         write_error(
                             &mut write_half,
                             Outbound::error("hello_required", "hello must be the first frame"),
@@ -149,6 +149,28 @@ impl Broker {
                         }
                         match self.store.insert(from.clone(), to, body, reply_to).await {
                             Ok(id) => write_frame(&mut write_half, &Outbound::Sent { id }).await,
+                            Err(e) => {
+                                write_error(&mut write_half, Outbound::error("internal", e)).await;
+                                continue;
+                            }
+                        }
+                    }
+                    Inbound::Inbox => {
+                        match self.store.inbox(from.clone()).await {
+                            Ok(messages) => {
+                                write_frame(&mut write_half, &Outbound::Inbox { messages }).await;
+                            }
+                            Err(e) => {
+                                write_error(&mut write_half, Outbound::error("internal", e)).await;
+                                continue;
+                            }
+                        }
+                    }
+                    Inbound::Ack { ids } => {
+                        match self.store.ack(from.clone(), ids).await {
+                            Ok(ids) => {
+                                write_frame(&mut write_half, &Outbound::Acked { ids }).await;
+                            }
                             Err(e) => {
                                 write_error(&mut write_half, Outbound::error("internal", e)).await;
                                 continue;
@@ -349,6 +371,119 @@ mod tests {
         let body = "x".repeat(model::MAX_BODY_BYTES + 1);
         let err = client::send(&addr, "a@h", None, "b@h", &body, None).await.unwrap_err();
         assert!(err.contains("too_large"), "got: {err}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn inbox_returns_only_messages_for_own_address() {
+        let (addr, _dir, handle) = spawn().await;
+        let to_b = client::send(&addr, "a@h", None, "b@h", "for b", None).await.unwrap();
+        let to_c = client::send(&addr, "a@h", None, "c@h", "for c", None).await.unwrap();
+
+        let b_messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(b_messages.len(), 1);
+        assert_eq!(b_messages[0].id, to_b);
+        assert_eq!(b_messages[0].from, "a@h");
+        assert_eq!(b_messages[0].to, "b@h");
+        assert_eq!(b_messages[0].body, "for b");
+
+        let c_messages = client::fetch_inbox(&addr, "c@h", None).await.unwrap();
+        assert_eq!(c_messages.len(), 1);
+        assert_eq!(c_messages[0].id, to_c);
+        assert_eq!(c_messages[0].to, "c@h");
+        assert_eq!(c_messages[0].body, "for c");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn inbox_returns_messages_in_id_order() {
+        let (addr, _dir, handle) = spawn().await;
+        let mut expected = Vec::new();
+        for i in 0..3 {
+            let id =
+                client::send(&addr, "a@h", None, "b@h", &format!("msg {i}"), None).await.unwrap();
+            expected.push(id);
+        }
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
+        assert_eq!(ids, expected);
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "ids grow in id order");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn unacked_message_is_redelivered_after_disconnect() {
+        let (addr, _dir, handle) = spawn().await;
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+
+        let mut raw = raw_connect(&addr).await;
+        raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"b@h\"}\n").await;
+        raw_send(&mut raw, "{\"type\":\"inbox\"}\n").await;
+        match raw_recv(&mut raw).await.unwrap() {
+            Outbound::Inbox { messages } => {
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].id, id);
+            }
+            other => panic!("expected an inbox frame, got {other:?}"),
+        }
+        drop(raw);
+
+        let again = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(again.len(), 1);
+        assert_eq!(again[0].id, id);
+        assert_eq!(again[0].body, "hi");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn acked_message_is_not_redelivered() {
+        let (addr, _dir, handle) = spawn().await;
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        let acked = client::ack(&addr, "b@h", None, &[id]).await.unwrap();
+        assert_eq!(acked, vec![id]);
+
+        let again = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert!(again.is_empty(), "acked message stays gone: {again:?}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn ack_ignores_ids_of_other_addresses() {
+        let (addr, _dir, handle) = spawn().await;
+        let to_b = client::send(&addr, "a@h", None, "b@h", "for b", None).await.unwrap();
+        let to_c = client::send(&addr, "a@h", None, "c@h", "for c", None).await.unwrap();
+
+        let acked = client::ack(&addr, "b@h", None, &[to_b, to_c]).await.unwrap();
+        assert_eq!(acked, vec![to_b], "only the own id changes");
+
+        let c_messages = client::fetch_inbox(&addr, "c@h", None).await.unwrap();
+        assert_eq!(c_messages.len(), 1);
+        assert_eq!(c_messages[0].id, to_c);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn message_to_offline_address_survives_restart_and_arrives_once() {
+        let (addr, dir, handle) = spawn().await;
+        let db = dir.path().join("chattrs.db");
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        handle.abort();
+
+        let (addr, handle) = spawn_at(&db).await;
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, id);
+        assert_eq!(messages[0].from, "a@h");
+        assert_eq!(messages[0].to, "b@h");
+        assert_eq!(messages[0].body, "hi");
+
+        let acked = client::ack(&addr, "b@h", None, &[id]).await.unwrap();
+        assert_eq!(acked, vec![id]);
+        let again = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert!(again.is_empty(), "message arrives once: {again:?}");
         handle.abort();
     }
 }

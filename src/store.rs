@@ -4,9 +4,12 @@
 //! runs on a blocking thread so the broker never stalls. The broker commits
 //! a row before it writes `sent`, and messages are never deleted.
 
-use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+
+use rusqlite::Connection;
+
+use crate::model::Message;
 
 /// SQLite store for messages, safe to share across broker tasks.
 #[derive(Debug, Clone)]
@@ -36,6 +39,23 @@ impl Store {
         })
         .await
         .map_err(|e| format!("db task failed: {e}"))?
+    }
+
+    /// List every unread message for `recipient`, in id order.
+    pub async fn inbox(&self, recipient: String) -> Result<Vec<Message>, String> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || inbox_blocking(&conn, &recipient))
+            .await
+            .map_err(|e| format!("db task failed: {e}"))?
+    }
+
+    /// Mark the listed ids as read when they belong to `recipient` and are
+    /// unread, and return the ids that changed. Other ids are ignored.
+    pub async fn ack(&self, recipient: String, ids: Vec<u64>) -> Result<Vec<u64>, String> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || ack_blocking(&conn, &recipient, &ids))
+            .await
+            .map_err(|e| format!("db task failed: {e}"))?
     }
 
     /// Default database path: `$XDG_DATA_HOME/chattrs/chattrs.db`, else
@@ -100,6 +120,54 @@ fn insert_blocking(
     Ok(conn.last_insert_rowid() as u64)
 }
 
+fn inbox_blocking(
+    conn: &Arc<Mutex<Connection>>,
+    recipient: &str,
+) -> Result<Vec<Message>, String> {
+    let conn = lock(conn)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, sender, recipient, body, ts, reply_to FROM messages
+             WHERE recipient = ?1 AND acked_at IS NULL ORDER BY id",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([recipient], |row| {
+            Ok(Message {
+                id: row.get::<_, i64>(0)? as u64,
+                from: row.get(1)?,
+                to: row.get(2)?,
+                body: row.get(3)?,
+                ts: row.get::<_, i64>(4)? as u64,
+                reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+fn ack_blocking(
+    conn: &Arc<Mutex<Connection>>,
+    recipient: &str,
+    ids: &[u64],
+) -> Result<Vec<u64>, String> {
+    let conn = lock(conn)?;
+    let mut changed = Vec::new();
+    for id in ids {
+        let n = conn
+            .execute(
+                "UPDATE messages SET acked_at = ?1
+                 WHERE id = ?2 AND recipient = ?3 AND acked_at IS NULL",
+                rusqlite::params![now_ms() as i64, *id as i64, recipient],
+            )
+            .map_err(|e| e.to_string())?;
+        if n == 1 {
+            changed.push(*id);
+        }
+    }
+    Ok(changed)
+}
+
 fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
@@ -118,6 +186,32 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn inbox_lists_unread_in_id_order_and_ack_marks_read() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let store = Store::open(db.clone()).await.unwrap();
+        let first = store.insert("a@h".into(), "b@h".into(), "one".into(), None).await.unwrap();
+        let second = store.insert("a@h".into(), "b@h".into(), "two".into(), None).await.unwrap();
+        let other = store.insert("a@h".into(), "c@h".into(), "other".into(), None).await.unwrap();
+
+        let messages = store.inbox("b@h".into()).await.unwrap();
+        let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
+        assert_eq!(ids, vec![first, second]);
+        assert_eq!(messages[0].from, "a@h");
+        assert_eq!(messages[0].body, "one");
+
+        let changed = store.ack("b@h".into(), vec![first, other]).await.unwrap();
+        assert_eq!(changed, vec![first]);
+
+        let messages = store.inbox("b@h".into()).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, second);
+        let kept = store.inbox("c@h".into()).await.unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].id, other);
     }
 
     #[tokio::test]
