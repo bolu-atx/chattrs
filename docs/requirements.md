@@ -26,6 +26,10 @@ Address = `agent@host`.
 - **CLI-9** Own address defaults to `<agent>@<hostname>`. *(N9)*
 - **CLI-10** `inbox` prints unread messages and acks them. *(N6)*
 
+## Distribution
+
+- **DIST-1** A release is one git tag. Every channel installs the binary built from that tag, and `chattrs --version` names it.
+
 ## Security
 
 - **SEC-1** Loopback by default. Other binds require a token. *(N7)*
@@ -46,4 +50,4 @@ Address = `agent@host`.
 - **Timeout.** `ask` waits 600 seconds by default. Exit 0 = reply, 2 = timeout, 1 = error.
 - **Identity.** An address is self-asserted. The fleet shares one token. Any token holder can claim any address and read its inbox. Two agents with the same address share one inbox, so the coordinator gives each worker a unique address.
 
-Limits: ≤10 hosts, macOS + Linux. The broker runs on an always-on host.
+Limits: ≤10 hosts, macOS + Linux + Windows (x64). The broker runs on an always-on host.

@@ -1,0 +1,19 @@
+# Release pipeline for chattrs, managed by cargo-dist (dist).
+# One release is one git tag: bump the crate version, commit, tag vX.Y.Z,
+# push the tag. The release workflow rejects a tag that mismatches.
+[workspace]
+members = ["cargo:./"]
+
+[dist]
+cargo-dist-version = "0.34.0"
+ci = ["github"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+]
+installers = ["shell", "powershell", "homebrew", "npm"]
+tap = "bolu-atx/homebrew-tap"
+publish-jobs = ["homebrew", "npm"]
+checksum = "sha256"

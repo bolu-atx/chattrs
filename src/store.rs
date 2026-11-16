@@ -112,16 +112,25 @@ impl Store {
             .map_err(|e| format!("db task failed: {e}"))?
     }
 
-    /// Default database path: `$XDG_DATA_HOME/chattrs/chattrs.db`, else
+    /// Default database path: `%APPDATA%/chattrs/chattrs.db` on Windows,
+    /// else `$XDG_DATA_HOME/chattrs/chattrs.db`, else
     /// `~/.local/share/chattrs/chattrs.db`.
     pub fn default_path() -> PathBuf {
-        if let Ok(dir) = std::env::var("XDG_DATA_HOME") {
-            if !dir.trim().is_empty() {
-                return PathBuf::from(dir).join("chattrs/chattrs.db");
+        #[cfg(windows)]
+        {
+            nonempty_env("APPDATA")
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("chattrs/chattrs.db")
+        }
+        #[cfg(not(windows))]
+        {
+            if let Some(dir) = nonempty_env("XDG_DATA_HOME") {
+                dir.join("chattrs/chattrs.db")
+            } else {
+                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                PathBuf::from(home).join(".local/share/chattrs/chattrs.db")
             }
         }
-        let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(home).join(".local/share/chattrs/chattrs.db")
     }
 }
 
@@ -155,6 +164,15 @@ fn open_blocking(path: &Path) -> Result<Store, String> {
     )
     .map_err(|e| e.to_string())?;
     Ok(Store { conn: Arc::new(Mutex::new(conn)) })
+}
+
+/// Read an env var, treating a missing or blank value as absent.
+fn nonempty_env(name: &str) -> Option<PathBuf> {
+    let value = std::env::var(name).ok()?;
+    if value.trim().is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(value))
 }
 
 fn lock(conn: &Arc<Mutex<Connection>>) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
@@ -377,6 +395,31 @@ mod tests {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .unwrap()
+    }
+
+    #[test]
+    fn nonempty_env_ignores_missing_and_blank_values() {
+        std::env::remove_var("CHATTRS_TEST_PROBE_DIR");
+        assert_eq!(nonempty_env("CHATTRS_TEST_PROBE_DIR"), None);
+        std::env::set_var("CHATTRS_TEST_PROBE_DIR", "   ");
+        assert_eq!(nonempty_env("CHATTRS_TEST_PROBE_DIR"), None);
+        std::env::set_var("CHATTRS_TEST_PROBE_DIR", "/tmp/probe");
+        assert_eq!(
+            nonempty_env("CHATTRS_TEST_PROBE_DIR"),
+            Some(PathBuf::from("/tmp/probe"))
+        );
+        std::env::remove_var("CHATTRS_TEST_PROBE_DIR");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn default_path_uses_appdata_on_windows() {
+        std::env::set_var("APPDATA", "C:\\Users\\tester\\AppData\\Roaming");
+        assert_eq!(
+            Store::default_path(),
+            PathBuf::from("C:\\Users\\tester\\AppData\\Roaming").join("chattrs/chattrs.db")
+        );
+        std::env::remove_var("APPDATA");
     }
 
     #[tokio::test]

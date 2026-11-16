@@ -20,3 +20,36 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test
+  smoke-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain
+        run: rustup show
+      - name: Build
+        run: cargo build
+      - name: Version
+        run: ./target/debug/chattrs.exe --version
+      - name: Loopback serve/send/inbox round trip
+        shell: pwsh
+        run: |
+          $db = Join-Path $env:TEMP "chattrs-smoke.db"
+          if (Test-Path $db) { Remove-Item $db }
+          $serve = Start-Process ./target/debug/chattrs.exe `
+            -ArgumentList "serve", "--listen", "127.0.0.1:47654", "--db", $db `
+            -PassThru -NoNewWindow
+          try {
+            ./target/debug/chattrs.exe send --server 127.0.0.1:47654 `
+              --address tester@host --to smoke@host "smoke hi"
+            $inbox = ./target/debug/chattrs.exe inbox --server 127.0.0.1:47654 `
+              --address smoke@host
+            if ($inbox -notmatch "smoke hi") {
+              Write-Error "inbox missed the smoke message: $inbox"
+              exit 1
+            }
+            $env:CHATTRS_AGENT = "smoke"
+            ./target/debug/chattrs.exe inbox --server 127.0.0.1:47654
+          } finally {
+            Stop-Process -Id $serve.Id -Force
+          }
