@@ -97,11 +97,14 @@ pub struct SendArgs {
     #[command(flatten)]
     pub client: ClientArgs,
 
-    /// Recipient address, as `user@host`.
+    /// Recipient address, as `user@host`. Without it, the message is an
+    /// announcement to `--topic` instead of a direct message.
     #[arg(long)]
-    pub to: String,
+    pub to: Option<String>,
 
-    /// Topic slug naming the workstream this message belongs to.
+    /// Topic slug naming the workstream this message belongs to. With no
+    /// `--to`, the message is an announcement to this room: any agent
+    /// watching the topic hears it.
     #[arg(long)]
     pub topic: Option<String>,
 
@@ -161,6 +164,12 @@ impl ReplyArgs {
 pub struct WatchArgs {
     #[command(flatten)]
     pub client: ClientArgs,
+
+    /// Topic room to watch instead of the own inbox. Repeat to watch
+    /// several rooms; the broker replays each room's recent
+    /// announcements, then each new one.
+    #[arg(long)]
+    pub topic: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -242,7 +251,7 @@ mod tests {
                 agent: None,
                 token: None,
             },
-            to: "b@h".into(),
+            to: Some("b@h".into()),
             topic: None,
             message: message.into_iter().map(|m| m.to_string()).collect(),
             json: false,

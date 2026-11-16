@@ -48,7 +48,8 @@ mod tests {
             Inbound::Send { to: None, body: "hi".into(), reply_to: Some(3), topic: None },
             Inbound::Inbox,
             Inbound::Ack { ids: vec![12, 13] },
-            Inbound::Watch,
+            Inbound::Watch { topics: vec![] },
+            Inbound::Watch { topics: vec!["release-26".into()] },
             Inbound::Wait { reply_to: 12 },
             Inbound::Agents,
             Inbound::Log { address: None, after: 0, limit: 500 },
@@ -70,7 +71,7 @@ mod tests {
         let logged = crate::model::LoggedMessage {
             id: 12,
             from: "codex@box1".into(),
-            to: "opus@mac".into(),
+            to: Some("opus@mac".into()),
             body: "hi".into(),
             ts: 1763200000000,
             reply_to: None,
@@ -80,7 +81,7 @@ mod tests {
         let message = crate::model::Message {
             id: 12,
             from: "codex@box1".into(),
-            to: "opus@mac".into(),
+            to: Some("opus@mac".into()),
             body: "hi".into(),
             ts: 1763200000000,
             reply_to: None,
@@ -91,6 +92,15 @@ mod tests {
             Outbound::Sent { id: 12 },
             Outbound::Inbox { messages: vec![message.clone()] },
             Outbound::Message(message),
+            Outbound::Message(crate::model::Message {
+                id: 13,
+                from: "codex@box1".into(),
+                to: None,
+                body: "build 421 is red".into(),
+                ts: 1763200000000,
+                reply_to: None,
+                topic: Some("release-26".into()),
+            }),
             Outbound::Agents { agents: vec![] },
             Outbound::Log { messages: vec![logged] },
             Outbound::Acked { ids: vec![12, 13] },
@@ -119,7 +129,7 @@ mod tests {
                 topic: None,
             })
             .unwrap(),
-            serde_json::to_value(Inbound::Watch).unwrap(),
+            serde_json::to_value(Inbound::Watch { topics: vec![] }).unwrap(),
             serde_json::to_value(Inbound::Wait { reply_to: 12 }).unwrap(),
             serde_json::to_value(Outbound::Welcome {
                 server: "chattrs".into(),
@@ -141,6 +151,12 @@ mod tests {
         for frame in frames {
             assert!(frame.get("type").is_some(), "{frame}");
         }
+    }
+
+    #[test]
+    fn watch_without_topics_is_the_inbox_watch() {
+        let frame: Inbound = decode("{\"type\":\"watch\"}\n").unwrap();
+        assert_eq!(frame, Inbound::Watch { topics: vec![] });
     }
 
     #[test]

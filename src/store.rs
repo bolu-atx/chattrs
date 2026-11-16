@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use crate::model::{Agent, LoggedMessage, Message};
+use crate::model::{Agent, LoggedMessage, Message, MAX_TOPIC_BACKLOG};
 
 /// SQLite store for messages, safe to share across broker tasks.
 #[derive(Debug, Clone)]
@@ -26,18 +26,20 @@ impl Store {
     }
 
     /// Insert a message and return its id, which grows with send order.
-    /// A `None` topic is the general chat.
+    /// A `None` topic is the general chat. A `None` recipient is a topic
+    /// announcement: it is stored with no owning inbox and survives a
+    /// restart like any message.
     pub async fn insert(
         &self,
         sender: String,
-        recipient: String,
+        recipient: Option<String>,
         body: String,
         reply_to: Option<u64>,
         topic: Option<String>,
     ) -> Result<u64, String> {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
-            insert_blocking(&conn, &sender, &recipient, &body, reply_to, topic.as_deref())
+            insert_blocking(&conn, &sender, recipient.as_deref(), &body, reply_to, topic.as_deref())
         })
         .await
         .map_err(|e| format!("db task failed: {e}"))?
@@ -102,6 +104,16 @@ impl Store {
     ) -> Result<Vec<LoggedMessage>, String> {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || log_blocking(&conn, address.as_deref(), after, limit))
+            .await
+            .map_err(|e| format!("db task failed: {e}"))?
+    }
+
+    /// Replay the most recent announcements per topic, merged in id
+    /// order, at most `MAX_TOPIC_BACKLOG` rows per topic. Direct
+    /// messages that merely carry a topic are never announcements.
+    pub async fn topic_backlog(&self, topics: Vec<String>) -> Result<Vec<Message>, String> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || topic_backlog_blocking(&conn, &topics))
             .await
             .map_err(|e| format!("db task failed: {e}"))?
     }
@@ -203,10 +215,13 @@ fn lock(conn: &Arc<Mutex<Connection>>) -> Result<std::sync::MutexGuard<'_, Conne
     conn.lock().map_err(|_| "db lock poisoned".to_string())
 }
 
+/// Announcements have no owning inbox, so they are stored with an empty
+/// recipient. No valid address is empty, so they never match an inbox.
+/// Readers map the empty recipient back to `None`.
 fn insert_blocking(
     conn: &Arc<Mutex<Connection>>,
     sender: &str,
-    recipient: &str,
+    recipient: Option<&str>,
     body: &str,
     reply_to: Option<u64>,
     topic: Option<&str>,
@@ -217,7 +232,7 @@ fn insert_blocking(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![
             sender,
-            recipient,
+            recipient.unwrap_or(""),
             body,
             now_ms() as i64,
             reply_to.map(|id| id as i64),
@@ -226,6 +241,12 @@ fn insert_blocking(
     )
     .map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid() as u64)
+}
+
+/// Map a stored recipient back to the wire: the empty string means the
+/// row is an announcement with no owning inbox.
+fn read_recipient(raw: String) -> Option<String> {
+    if raw.is_empty() { None } else { Some(raw) }
 }
 
 fn get_blocking(
@@ -244,7 +265,7 @@ fn get_blocking(
             Ok(Message {
                 id: row.get::<_, i64>(0)? as u64,
                 from: row.get(1)?,
-                to: row.get(2)?,
+                to: read_recipient(row.get(2)?),
                 body: row.get(3)?,
                 ts: row.get::<_, i64>(4)? as u64,
                 reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
@@ -274,7 +295,7 @@ fn inbox_blocking(
             Ok(Message {
                 id: row.get::<_, i64>(0)? as u64,
                 from: row.get(1)?,
-                to: row.get(2)?,
+                to: read_recipient(row.get(2)?),
                 body: row.get(3)?,
                 ts: row.get::<_, i64>(4)? as u64,
                 reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
@@ -302,7 +323,7 @@ fn find_reply_blocking(
             Ok(Message {
                 id: row.get::<_, i64>(0)? as u64,
                 from: row.get(1)?,
-                to: row.get(2)?,
+                to: read_recipient(row.get(2)?),
                 body: row.get(3)?,
                 ts: row.get::<_, i64>(4)? as u64,
                 reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
@@ -349,7 +370,7 @@ fn log_blocking(
         Ok(LoggedMessage {
             id: row.get::<_, i64>(0)? as u64,
             from: row.get(1)?,
-            to: row.get(2)?,
+            to: read_recipient(row.get(2)?),
             body: row.get(3)?,
             ts: row.get::<_, i64>(4)? as u64,
             reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
@@ -383,6 +404,43 @@ fn log_blocking(
             .map_err(|e| e.to_string())?;
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
     }
+}
+
+fn topic_backlog_blocking(
+    conn: &Arc<Mutex<Connection>>,
+    topics: &[String],
+) -> Result<Vec<Message>, String> {
+    let conn = lock(conn)?;
+    let mut backlog = Vec::new();
+    for topic in topics {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, sender, recipient, body, ts, reply_to, topic FROM messages
+                 WHERE topic = ?1 AND recipient = '' ORDER BY id DESC LIMIT ?2",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(
+                rusqlite::params![topic, MAX_TOPIC_BACKLOG as i64],
+                |row| {
+                    Ok(Message {
+                        id: row.get::<_, i64>(0)? as u64,
+                        from: row.get(1)?,
+                        to: read_recipient(row.get(2)?),
+                        body: row.get(3)?,
+                        ts: row.get::<_, i64>(4)? as u64,
+                        reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
+                        topic: row.get(6)?,
+                    })
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            backlog.push(row.map_err(|e| e.to_string())?);
+        }
+    }
+    backlog.sort_by_key(|message| message.id);
+    Ok(backlog)
 }
 
 fn touch_agent_blocking(
@@ -465,12 +523,18 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db = dir.path().join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
-        let first =
-            store.insert("a@h".into(), "b@h".into(), "one".into(), None, None).await.unwrap();
-        let second =
-            store.insert("a@h".into(), "b@h".into(), "two".into(), None, None).await.unwrap();
-        let other =
-            store.insert("a@h".into(), "c@h".into(), "other".into(), None, None).await.unwrap();
+        let first = store
+            .insert("a@h".into(), Some("b@h".into()), "one".into(), None, None)
+            .await
+            .unwrap();
+        let second = store
+            .insert("a@h".into(), Some("b@h".into()), "two".into(), None, None)
+            .await
+            .unwrap();
+        let other = store
+            .insert("a@h".into(), Some("c@h".into()), "other".into(), None, None)
+            .await
+            .unwrap();
 
         let messages = store.inbox("b@h".into()).await.unwrap();
         let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
@@ -494,16 +558,74 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db = dir.path().join("sub").join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
-        let id =
-            store.insert("a@h".into(), "b@h".into(), "hi".into(), None, None).await.unwrap();
+        let id = store
+            .insert("a@h".into(), Some("b@h".into()), "hi".into(), None, None)
+            .await
+            .unwrap();
         assert_eq!(id, 1);
         assert_eq!(read_row(&db, id), ("a@h".into(), "b@h".into(), "hi".into()));
         drop(store);
 
         let store = Store::open(db.clone()).await.unwrap();
-        let next =
-            store.insert("b@h".into(), "a@h".into(), "yo".into(), Some(id), None).await.unwrap();
+        let next = store
+            .insert("b@h".into(), Some("a@h".into()), "yo".into(), Some(id), None)
+            .await
+            .unwrap();
         assert_eq!(next, id + 1);
         assert_eq!(read_row(&db, id), ("a@h".into(), "b@h".into(), "hi".into()));
+    }
+
+    #[tokio::test]
+    async fn topic_backlog_returns_most_recent_500_per_topic_in_id_order() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let store = Store::open(db.clone()).await.unwrap();
+        let mut first_kept = 0;
+        for i in 0..crate::model::MAX_TOPIC_BACKLOG + 5 {
+            let id = store
+                .insert(
+                    "a@h".into(),
+                    None,
+                    format!("note {i}"),
+                    None,
+                    Some("release-26".into()),
+                )
+                .await
+                .unwrap();
+            if i == 5 {
+                first_kept = id;
+            }
+            if i >= 5 {
+                assert!(id >= first_kept, "ids grow with send order");
+            }
+        }
+        let other = store
+            .insert("a@h".into(), None, "other room".into(), None, Some("other-topic".into()))
+            .await
+            .unwrap();
+        let direct = store
+            .insert(
+                "a@h".into(),
+                Some("b@h".into()),
+                "direct".into(),
+                None,
+                Some("release-26".into()),
+            )
+            .await
+            .unwrap();
+
+        let backlog = store
+            .topic_backlog(vec!["release-26".into(), "other-topic".into()])
+            .await
+            .unwrap();
+        assert_eq!(backlog.len(), crate::model::MAX_TOPIC_BACKLOG as usize + 1);
+        let ids: Vec<u64> = backlog.iter().map(|message| message.id).collect();
+        assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "backlog is in id order");
+        assert_eq!(ids[0], first_kept, "only the most recent 500 replay per topic");
+        assert!(ids.contains(&other), "the other room replays too");
+        assert!(!ids.contains(&direct), "a direct message never replays as an announcement");
+        for message in &backlog {
+            assert_eq!(message.to, None, "backlog rows belong to no inbox");
+        }
     }
 }

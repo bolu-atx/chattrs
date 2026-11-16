@@ -427,19 +427,24 @@ pub async fn fetch_agents(
 }
 
 /// An open `watch` stream: unread messages first, then each new one.
+/// With topics, the stream carries announcements to those rooms instead
+/// of the inbox watch.
 pub struct WatchConn {
     conn: Conn,
 }
 
 impl WatchConn {
-    /// Say hello and start streaming for `address`.
+    /// Say hello and start streaming for `address`. With topics, the
+    /// broker replays each room's recent announcements, then each new
+    /// one; without topics, it replays the unread inbox.
     pub async fn connect(
         server: &str,
         address: &str,
         token: Option<&str>,
+        topics: &[String],
     ) -> Result<WatchConn, String> {
         let mut conn = hello(server, address, token).await?;
-        send_frame(&mut conn, &Inbound::Watch).await?;
+        send_frame(&mut conn, &Inbound::Watch { topics: topics.to_vec() }).await?;
         Ok(WatchConn { conn })
     }
 
@@ -486,20 +491,40 @@ pub async fn print_and_ack(
     Ok(())
 }
 
-/// Stream messages forever, printing one JSON line each. When the connection
+/// Print one watched announcement as JSON and flush stdout, without
+/// acking: announcements belong to no inbox.
+pub fn print_announcement(message: &Message) -> Result<(), String> {
+    print!("{}", format_watch_line(message)?);
+    use std::io::Write;
+    std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
+    Ok(())
+}
+
+/// Stream messages forever, printing one JSON line each. With topics, the
+/// stream carries announcements and never acks. When the connection
 /// drops, reconnect with backoff from 1 s to 30 s. Logs go to stderr only.
-pub async fn watch(server: &str, address: &str, token: Option<&str>) -> Result<(), String> {
+pub async fn watch(
+    server: &str,
+    address: &str,
+    token: Option<&str>,
+    topics: &[String],
+) -> Result<(), String> {
+    let announcing = !topics.is_empty();
     let mut backoff_secs: u64 = 1;
     loop {
-        match WatchConn::connect(server, address, token).await {
+        match WatchConn::connect(server, address, token, topics).await {
             Ok(mut stream) => {
                 backoff_secs = 1;
                 loop {
                     match stream.next_message().await {
                         Ok(message) => {
                             backoff_secs = 1;
-                            if let Err(e) = print_and_ack(server, address, token, &message).await
-                            {
+                            let printed = if announcing {
+                                print_announcement(&message)
+                            } else {
+                                print_and_ack(server, address, token, &message).await
+                            };
+                            if let Err(e) = printed {
                                 eprintln!(
                                     "chattrs: watch failed: {e}, retrying in {backoff_secs}s"
                                 );
@@ -549,7 +574,7 @@ mod tests {
         let message = LoggedMessage {
             id: 13,
             from: "codex@box1".into(),
-            to: "opus@mac".into(),
+            to: Some("opus@mac".into()),
             body: "hi".into(),
             ts: 1763200000000,
             reply_to: Some(12),

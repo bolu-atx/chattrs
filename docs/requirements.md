@@ -13,6 +13,7 @@ Address = `agent@host`.
 - **MSG-4** A reply carries the id of the message it answers. *(N5)*
 - **MSG-5** Every client command except `watch` prints unread messages before its own output, then acks them. *(N10)*
 - **MSG-6** A message may carry a topic slug. A reply inherits the topic of the message it answers unless it sets its own. No topic is the general chat.
+- **MSG-7** An agent may announce to a topic instead of an address. Any agent watching that topic receives the announcement. An announcement belongs to no inbox.
 
 ## CLI
 
