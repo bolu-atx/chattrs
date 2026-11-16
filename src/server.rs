@@ -23,6 +23,7 @@ use tokio::sync::mpsc;
 pub struct Broker {
     store: Store,
     watchers: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Message>>>>,
+    topic_watchers: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Message>>>>,
     waiters: Mutex<HashMap<String, Vec<Waiter>>>,
     token: Option<String>,
 }
@@ -39,6 +40,7 @@ impl Broker {
         Broker {
             store,
             watchers: Mutex::new(HashMap::new()),
+            topic_watchers: Mutex::new(HashMap::new()),
             waiters: Mutex::new(HashMap::new()),
             token,
         }
@@ -139,6 +141,42 @@ impl Broker {
         }
     }
 
+    /// Hand one announcement to every live topic `watch` connection of
+    /// its room. Direct messages never reach topic watchers, and
+    /// announcements never reach inbox watchers. Dead connections are
+    /// pruned; nothing is waited on.
+    fn notify_topic(&self, topic: &str, message: Message) {
+        let Ok(mut watchers) = self.topic_watchers.lock() else {
+            return;
+        };
+        let Some(list) = watchers.get_mut(topic) else {
+            return;
+        };
+        list.retain(|sender| !sender.is_closed());
+        for sender in list.iter() {
+            let _ = sender.send(message.clone());
+        }
+    }
+
+    /// Forget the closed `watch` senders of the listed topics.
+    fn untopic(&self, topics: &[String]) {
+        let Ok(mut watchers) = self.topic_watchers.lock() else {
+            return;
+        };
+        for topic in topics {
+            let prune = match watchers.get_mut(topic) {
+                Some(list) => {
+                    list.retain(|sender| !sender.is_closed());
+                    list.is_empty()
+                }
+                None => false,
+            };
+            if prune {
+                watchers.remove(topic);
+            }
+        }
+    }
+
     /// Forget the closed `watch` senders of one address.
     fn unwatch(&self, address: &str) {
         let Ok(mut watchers) = self.watchers.lock() else {
@@ -227,7 +265,7 @@ impl Broker {
                     Inbound::Send { .. }
                     | Inbound::Inbox
                     | Inbound::Ack { .. }
-                    | Inbound::Watch
+                    | Inbound::Watch { .. }
                     | Inbound::Wait { .. }
                     | Inbound::Agents
                     | Inbound::Log { .. } => {
@@ -314,7 +352,7 @@ impl Broker {
                         }
                         let saved_reply_to = reply_to;
                         let mut parent_topic: Option<String> = None;
-                        let recipient = match (to, reply_to) {
+                        let recipient: Option<String> = match (to, reply_to) {
                             (Some(to), reply_to) => {
                                 if let Some(id) = reply_to {
                                     match self.store.get(id).await {
@@ -342,13 +380,13 @@ impl Broker {
                                         }
                                     }
                                 }
-                                to
+                                Some(to)
                             }
                             (None, Some(id)) => {
                                 match self.store.get(id).await {
                                     Ok(Some(original)) => {
                                         parent_topic = original.topic.clone();
-                                        if original.to != from {
+                                        if original.to.as_deref() != Some(from.as_str()) {
                                             write_error(
                                                 &mut write_half,
                                                 Outbound::error(
@@ -359,7 +397,7 @@ impl Broker {
                                             .await;
                                             continue;
                                         }
-                                        original.from
+                                        Some(original.from)
                                     }
                                     Ok(None) => {
                                         write_error(
@@ -383,12 +421,18 @@ impl Broker {
                                 }
                             }
                             (None, None) => {
-                                write_error(
-                                    &mut write_half,
-                                    Outbound::error("bad_address", "recipient is missing"),
-                                )
-                                .await;
-                                continue;
+                                if topic.is_none() {
+                                    write_error(
+                                        &mut write_half,
+                                        Outbound::error(
+                                            "bad_address",
+                                            "recipient is missing",
+                                        ),
+                                    )
+                                    .await;
+                                    continue;
+                                }
+                                None
                             }
                         };
                         let stored_topic = topic.or(parent_topic);
@@ -405,8 +449,17 @@ impl Broker {
                         {
                             Ok(id) => {
                                 if let Ok(Some(message)) = self.store.get(id).await {
-                                    self.notify(&recipient, message.clone());
-                                    self.notify_waiters(&recipient, &message);
+                                    match recipient.as_deref() {
+                                        Some(address) => {
+                                            self.notify(address, message.clone());
+                                            self.notify_waiters(address, &message);
+                                        }
+                                        None => {
+                                            if let Some(room) = message.topic.clone() {
+                                                self.notify_topic(&room, message);
+                                            }
+                                        }
+                                    }
                                 }
                                 write_frame(&mut write_half, &Outbound::Sent { id }).await;
                             }
@@ -535,13 +588,34 @@ impl Broker {
                             self.remove_one_waiter(&from, reply_to);
                         }
                     }
-                    Inbound::Watch => {
+                    Inbound::Watch { topics } => {
+                        if topics.iter().any(|topic| !model::is_valid_topic(topic)) {
+                            write_error(
+                                &mut write_half,
+                                Outbound::error("bad_topic", "topic is invalid"),
+                            )
+                            .await;
+                            continue;
+                        }
                         let (sender, mut live) = mpsc::unbounded_channel();
-                        if let Ok(mut watchers) = self.watchers.lock() {
-                            watchers.entry(from.clone()).or_default().push(sender);
+                        if topics.is_empty() {
+                            if let Ok(mut watchers) = self.watchers.lock() {
+                                watchers.entry(from.clone()).or_default().push(sender);
+                            }
+                        } else {
+                            if let Ok(mut watchers) = self.topic_watchers.lock() {
+                                for topic in &topics {
+                                    watchers.entry(topic.clone()).or_default().push(sender.clone());
+                                }
+                            }
                         }
                         let mut highest = 0;
-                        match self.store.inbox(from.clone()).await {
+                        let backlog = if topics.is_empty() {
+                            self.store.inbox(from.clone()).await
+                        } else {
+                            self.store.topic_backlog(topics.clone()).await
+                        };
+                        match backlog {
                             Ok(messages) => {
                                 for message in messages {
                                     highest = highest.max(message.id);
@@ -580,7 +654,11 @@ impl Broker {
                                 }
                             }
                         }
-                        self.unwatch(&from);
+                        if topics.is_empty() {
+                            self.unwatch(&from);
+                        } else {
+                            self.untopic(&topics);
+                        }
                         break;
                     }
                 },
@@ -905,13 +983,13 @@ mod tests {
         assert_eq!(b_messages.len(), 1);
         assert_eq!(b_messages[0].id, to_b);
         assert_eq!(b_messages[0].from, "a@h");
-        assert_eq!(b_messages[0].to, "b@h");
+        assert_eq!(b_messages[0].to.as_deref(), Some("b@h"));
         assert_eq!(b_messages[0].body, "for b");
 
         let c_messages = client::fetch_inbox(&addr, "c@h", None).await.unwrap();
         assert_eq!(c_messages.len(), 1);
         assert_eq!(c_messages[0].id, to_c);
-        assert_eq!(c_messages[0].to, "c@h");
+        assert_eq!(c_messages[0].to.as_deref(), Some("c@h"));
         assert_eq!(c_messages[0].body, "for c");
         handle.abort();
     }
@@ -1001,7 +1079,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
         assert_eq!(messages[0].from, "b@h");
-        assert_eq!(messages[0].to, "a@h");
+        assert_eq!(messages[0].to.as_deref(), Some("a@h"));
         assert_eq!(messages[0].body, "yo");
         handle.abort();
     }
@@ -1336,6 +1414,253 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watch_topic_receives_announcement_from_another_agent() {
+        let (addr, _dir, handle) = spawn().await;
+        let mut watcher = raw_connect(&addr).await;
+        raw_topic_watch(&mut watcher, "ops@h", &["release-26"]).await;
+
+        let id = client::send(&addr, "w@h", None, announce("release-26", "build 421 is red"), false)
+            .await
+            .unwrap();
+        let got = read_watched_message(&mut watcher).await;
+        assert_eq!(got.id, id);
+        assert_eq!(got.from, "w@h");
+        assert_eq!(got.to, None);
+        assert_eq!(got.topic.as_deref(), Some("release-26"));
+        assert_eq!(got.body, "build 421 is red");
+        let value = serde_json::to_value(&got).unwrap();
+        assert!(value["to"].is_null(), "the wire message has to null");
+        assert_eq!(value["topic"].as_str(), Some("release-26"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn announcement_needs_no_recipient() {
+        let (addr, _dir, handle) = spawn().await;
+        let mut raw = raw_connect(&addr).await;
+        raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"w@h\"}\n").await;
+        raw_send(&mut raw, "{\"type\":\"send\",\"topic\":\"release-26\",\"body\":\"hi\"}\n").await;
+        let id = match raw_recv(&mut raw).await.unwrap() {
+            Outbound::Sent { id } => id,
+            other => panic!("expected a sent frame, got {other:?}"),
+        };
+
+        let history = client::fetch_log(&addr, "reader@h", None, None, false).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, id);
+        assert_eq!(history[0].to, None);
+        assert_eq!(history[0].topic.as_deref(), Some("release-26"));
+        let value = serde_json::to_value(&history[0]).unwrap();
+        assert!(value["to"].is_null(), "the wire message has to null");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn watcher_only_gets_subscribed_topics() {
+        let (addr, _dir, handle) = spawn().await;
+        let mut watcher = raw_connect(&addr).await;
+        raw_topic_watch(&mut watcher, "ops@h", &["release-26"]).await;
+
+        let other =
+            client::send(&addr, "w@h", None, announce("other-topic", "elsewhere"), false)
+                .await
+                .unwrap();
+        let id = client::send(&addr, "w@h", None, announce("release-26", "here"), false)
+            .await
+            .unwrap();
+        assert!(other < id, "ids grow with send order");
+
+        let got = read_watched_message(&mut watcher).await;
+        assert_eq!(got.id, id);
+        assert_eq!(got.topic.as_deref(), Some("release-26"));
+        expect_no_message(&mut watcher).await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn watch_accepts_multiple_topics() {
+        let (addr, _dir, handle) = spawn().await;
+        let first =
+            client::send(&addr, "w@h", None, announce("room-a", "one"), false).await.unwrap();
+        let second =
+            client::send(&addr, "w@h", None, announce("room-b", "two"), false).await.unwrap();
+        assert!(first < second, "ids grow with send order");
+
+        let mut watcher = raw_connect(&addr).await;
+        raw_topic_watch(&mut watcher, "ops@h", &["room-a", "room-b"]).await;
+        let got_first = read_watched_message(&mut watcher).await;
+        let got_second = read_watched_message(&mut watcher).await;
+        assert_eq!(got_first.id, first);
+        assert_eq!(got_first.topic.as_deref(), Some("room-a"));
+        assert_eq!(got_second.id, second);
+        assert_eq!(got_second.topic.as_deref(), Some("room-b"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn announcement_appears_in_no_inbox() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+
+        client::send(&addr, "w@h", None, announce("release-26", "build 421 is red"), false)
+            .await
+            .unwrap();
+        for who in ["w@h", "ops@h", "fresh@h"] {
+            let messages = client::fetch_inbox(&addr, who, None).await.unwrap();
+            assert!(messages.is_empty(), "{who} has no announcement: {messages:?}");
+        }
+
+        let out = run_chattrs(&bin, "send", &addr, "ops@h", &["--to", "w@h", "hi"]);
+        assert!(out.status.success(), "send exits zero: {out:?}");
+        let lines = stdout_lines(&out);
+        assert_eq!(lines.len(), 1, "no preamble before the new id: {lines:?}");
+        lines[0].parse::<u64>().expect("the only line is the new id");
+
+        let messages = client::fetch_inbox(&addr, "w@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1, "only the direct message waits: {messages:?}");
+        assert_eq!(messages[0].body, "hi");
+    }
+
+    #[tokio::test]
+    async fn direct_message_with_topic_is_not_broadcast() {
+        let (addr, _dir, handle) = spawn().await;
+        let mut watcher = raw_connect(&addr).await;
+        raw_topic_watch(&mut watcher, "ops@h", &["release-26"]).await;
+
+        let id = client::send(
+            &addr,
+            "a@h",
+            None,
+            client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "hi") },
+            false,
+        )
+        .await
+        .unwrap();
+        expect_no_message(&mut watcher).await;
+
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, id);
+        assert_eq!(messages[0].to.as_deref(), Some("b@h"));
+        assert_eq!(messages[0].topic.as_deref(), Some("release-26"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn topic_watch_replays_recent_then_live_without_duplicates() {
+        let (addr, _dir, handle) = spawn().await;
+        let first =
+            client::send(&addr, "w@h", None, announce("release-26", "one"), false).await.unwrap();
+        let second =
+            client::send(&addr, "w@h", None, announce("release-26", "two"), false).await.unwrap();
+
+        let mut watcher = raw_connect(&addr).await;
+        raw_topic_watch(&mut watcher, "ops@h", &["release-26"]).await;
+        let got_first = read_watched_message(&mut watcher).await;
+        let got_second = read_watched_message(&mut watcher).await;
+        assert_eq!(got_first.id, first);
+        assert_eq!(got_second.id, second);
+
+        let third =
+            client::send(&addr, "w@h", None, announce("release-26", "three"), false)
+                .await
+                .unwrap();
+        let got_third = read_watched_message(&mut watcher).await;
+        assert_eq!(got_third.id, third);
+        assert_eq!([got_first.id, got_second.id, got_third.id], [first, second, third]);
+        expect_no_message(&mut watcher).await;
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn announcements_survive_broker_restart() {
+        let (addr, dir, handle) = spawn().await;
+        let db = dir.path().join("chattrs.db");
+        let id = client::send(&addr, "w@h", None, announce("release-26", "build 421 is red"), false)
+            .await
+            .unwrap();
+        handle.abort();
+
+        let (addr, handle) = spawn_at(&db).await;
+        let mut watcher = raw_connect(&addr).await;
+        raw_topic_watch(&mut watcher, "ops@h", &["release-26"]).await;
+        let got = read_watched_message(&mut watcher).await;
+        assert_eq!(got.id, id);
+        assert_eq!(got.to, None);
+        assert_eq!(got.topic.as_deref(), Some("release-26"));
+        assert_eq!(got.body, "build 421 is red");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn announcements_appear_in_log() {
+        let (addr, _dir, handle) = spawn().await;
+        let id = client::send(
+            &addr,
+            "codex@box1",
+            None,
+            announce("release-26", "build 421 is red"),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let history = client::fetch_log(&addr, "reader@h", None, None, false).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, id);
+        assert_eq!(history[0].to, None);
+        assert_eq!(history[0].topic.as_deref(), Some("release-26"));
+        let line = model::render_log_line(&history[0]);
+        assert!(line.contains("→ topic:release-26:"), "log names the room: {line}");
+        assert!(!line.contains("(topic "), "the room is not repeated as a suffix: {line}");
+
+        let by_sender = client::fetch_log(&addr, "reader@h", None, Some("codex@box1".into()), false)
+            .await
+            .unwrap();
+        assert_eq!(by_sender.len(), 1, "an address filter still matches the sender");
+        let by_other = client::fetch_log(&addr, "reader@h", None, Some("other@h".into()), false)
+            .await
+            .unwrap();
+        assert!(by_other.is_empty(), "an unrelated address matches nothing");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn topic_watch_cli_prints_announcement_as_json() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let out = dir.path().join("topic-watch.out");
+        let _watcher = start_topic_watch(&bin, &addr, "ops@h", &["release-26"], &out);
+
+        let id = client::send(&addr, "w@h", None, announce("release-26", "build 421 is red"), false)
+            .await
+            .unwrap();
+        let lines = wait_for_lines(&out, 1).await;
+        assert_eq!(lines.len(), 1, "watch prints one JSON line: {lines:?}");
+        let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
+        assert_eq!(value["type"].as_str(), Some("message"));
+        assert_eq!(value["id"].as_u64(), Some(id));
+        assert_eq!(value["topic"].as_str(), Some("release-26"));
+        assert!(value["to"].is_null(), "the announcement has no recipient");
+        assert_eq!(value["untrusted"], serde_json::Value::Bool(true));
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let again = read_out_lines(&out);
+        assert_eq!(again.len(), 1, "the announcement prints once: {again:?}");
+
+        let pending = client::fetch_inbox(&addr, "ops@h", None).await.unwrap();
+        assert!(pending.is_empty(), "the watcher acks nothing: {pending:?}");
+    }
+
+    #[tokio::test]
     async fn ask_topic_cli_run_shows_topic_in_reply() {
         let dir = TempDir::new().unwrap();
         let db = dir.path().join("chattrs.db");
@@ -1384,7 +1709,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
         assert_eq!(messages[0].from, "a@h");
-        assert_eq!(messages[0].to, "b@h");
+        assert_eq!(messages[0].to.as_deref(), Some("b@h"));
         assert_eq!(messages[0].body, "hi");
 
         let acked = client::ack(&addr, "b@h", None, &[id]).await.unwrap();
@@ -1486,11 +1811,11 @@ mod tests {
         let ids: Vec<u64> = history.iter().map(|message| message.id).collect();
         assert_eq!(ids, vec![first, second, third]);
         assert_eq!(history[0].from, "a@h");
-        assert_eq!(history[0].to, "b@h");
+        assert_eq!(history[0].to.as_deref(), Some("b@h"));
         assert_eq!(history[0].body, "one");
         assert_eq!(history[0].reply_to, None);
         assert_eq!(history[1].from, "b@h");
-        assert_eq!(history[1].to, "a@h");
+        assert_eq!(history[1].to.as_deref(), Some("a@h"));
         assert_eq!(history[1].reply_to, Some(first));
         assert_eq!(history[2].from, "c@h");
         handle.abort();
@@ -1625,6 +1950,34 @@ mod tests {
         raw_send(raw, "{\"type\":\"watch\"}\n").await;
     }
 
+    /// An announcement to `topic`: no recipient, only a room.
+    fn announce(topic: &str, body: &str) -> client::Outgoing {
+        client::Outgoing {
+            to: None,
+            body: body.to_string(),
+            reply_to: None,
+            topic: Some(topic.to_string()),
+        }
+    }
+
+    async fn raw_topic_watch(raw: &mut Raw, address: &str, topics: &[&str]) {
+        let hello = format!("{{\"type\":\"hello\",\"v\":1,\"address\":\"{address}\"}}\n");
+        raw_hello(raw, &hello).await;
+        let line = format!(
+            "{{\"type\":\"watch\",\"topics\":{}}}\n",
+            serde_json::to_string(topics).unwrap()
+        );
+        raw_send(raw, &line).await;
+    }
+
+    /// Fail when any frame arrives within half a second: the quiet
+    /// connection must stay quiet.
+    async fn expect_no_message(raw: &mut Raw) {
+        let result =
+            tokio::time::timeout(std::time::Duration::from_millis(500), raw_recv(raw)).await;
+        assert!(result.is_err(), "no message arrives, got {result:?}");
+    }
+
     #[tokio::test]
     async fn watch_delivers_unread_then_live_messages_in_order() {
         let (addr, _dir, handle) = spawn().await;
@@ -1731,13 +2084,28 @@ mod tests {
         who: &str,
         out: &std::path::Path,
     ) -> ProcChild {
+        start_topic_watch(bin, addr, who, &[], out)
+    }
+
+    fn start_topic_watch(
+        bin: &std::path::Path,
+        addr: &str,
+        who: &str,
+        topics: &[&str],
+        out: &std::path::Path,
+    ) -> ProcChild {
         let file = std::fs::File::create(out).expect("watch output file");
-        let child = std::process::Command::new(bin)
+        let mut command = std::process::Command::new(bin);
+        command
             .arg("watch")
             .arg("--server")
             .arg(addr)
             .arg("--address")
-            .arg(who)
+            .arg(who);
+        for topic in topics {
+            command.arg("--topic").arg(topic);
+        }
+        let child = command
             .stdout(file)
             .stderr(std::process::Stdio::null())
             .spawn()

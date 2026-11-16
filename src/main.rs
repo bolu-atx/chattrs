@@ -40,12 +40,15 @@ async fn run(args: Args) -> Result<(), String> {
         }
         Command::Send(c) => {
             let address = c.client.resolve_address()?;
+            if c.to.is_none() && c.topic.is_none() {
+                return Err("send needs --to or --topic".to_string());
+            }
             let id = client::send(
                 &c.client.server,
                 &address,
                 c.client.token.as_deref(),
                 client::Outgoing {
-                    to: Some(c.to.clone()),
+                    to: c.to.clone(),
                     body: c.body(),
                     reply_to: None,
                     topic: c.topic.clone(),
@@ -77,7 +80,10 @@ async fn run(args: Args) -> Result<(), String> {
         }
         Command::Watch(c) => {
             let address = c.client.resolve_address()?;
-            client::watch(&c.client.server, &address, c.client.token.as_deref()).await
+            if let Some(bad) = c.topic.iter().find(|topic| !model::is_valid_topic(topic)) {
+                return Err(format!("topic is invalid: {bad}"));
+            }
+            client::watch(&c.client.server, &address, c.client.token.as_deref(), &c.topic).await
         }
         Command::Ask(c) => {
             let address = c.client.resolve_address()?;
