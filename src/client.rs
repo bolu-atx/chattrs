@@ -90,6 +90,7 @@ pub async fn reply(
     reply_to: u64,
     body: &str,
     topic: Option<&str>,
+    json: bool,
 ) -> Result<u64, String> {
     publish(
         server,
@@ -101,7 +102,7 @@ pub async fn reply(
             reply_to: Some(reply_to),
             topic: topic.map(|topic| topic.to_string()),
         },
-        false,
+        json,
     )
     .await
 }
@@ -121,13 +122,13 @@ async fn print_unread_preamble(conn: &mut Conn, json: bool) -> Result<(), String
     }
     for message in &messages {
         if json {
-            print!("{}", format_watch_line(message)?);
+            let line = format_watch_line(message)?;
+            crate::write_stdout(&line).map_err(crate::stdout_error)?;
         } else {
-            println!("{}", model::render_message(message));
+            crate::write_stdout(&format!("{}\n", model::render_message(message)))
+                .map_err(crate::stdout_error)?;
         }
     }
-    use std::io::Write;
-    std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
     let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
     send_frame(conn, &Inbound::Ack { ids }).await?;
     match recv_frame(conn).await? {
@@ -479,9 +480,7 @@ pub async fn print_and_ack(
     message: &Message,
 ) -> Result<(), String> {
     let line = format_watch_line(message)?;
-    print!("{line}");
-    use std::io::Write;
-    std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
+    crate::write_stdout(&line).map_err(crate::stdout_error)?;
     ack(server, address, token, &[message.id]).await?;
     Ok(())
 }
@@ -489,9 +488,8 @@ pub async fn print_and_ack(
 /// Print one watched announcement as JSON and flush stdout, without
 /// acking: announcements belong to no inbox.
 pub fn print_announcement(message: &Message) -> Result<(), String> {
-    print!("{}", format_watch_line(message)?);
-    use std::io::Write;
-    std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
+    let line = format_watch_line(message)?;
+    crate::write_stdout(&line).map_err(crate::stdout_error)?;
     Ok(())
 }
 

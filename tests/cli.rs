@@ -4,7 +4,7 @@
 //! database, then runs client commands against it and checks stdout,
 //! stderr, and the exit code. Nothing here touches `src/`.
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write as _};
 use std::net::TcpStream;
 use std::path::PathBuf;
 use std::process::{Child, ChildStdout, Command, Output, Stdio};
@@ -242,6 +242,114 @@ fn errors_go_to_stderr_with_exit_one() {
         return;
     }
     panic!("every closed port accepted a connection");
+}
+
+/// Store `count` messages over one raw TCP connection speaking the
+/// line-JSON protocol, without spawning a child per message.
+fn seed_history(server: &str, count: usize) {
+    let mut stream = TcpStream::connect(server).expect("connect to the broker");
+    let mut reader = BufReader::new(stream.try_clone().expect("clone the stream"));
+    let mut exchange = |line: &str| {
+        stream.write_all(line.as_bytes()).expect("write a frame");
+        stream.flush().expect("flush a frame");
+        let mut reply = String::new();
+        reader.read_line(&mut reply).expect("read the reply");
+        reply
+    };
+    let welcome = exchange("{\"type\":\"hello\",\"v\":1,\"address\":\"seed@h\"}\n");
+    assert!(welcome.contains("\"type\":\"welcome\""), "broker welcomes: {welcome:?}");
+    for i in 0..count {
+        let line =
+            format!("{{\"type\":\"send\",\"to\":\"rcpt@h\",\"body\":\"seeded message {i}\"}}\n");
+        let reply = exchange(&line);
+        assert!(reply.contains("\"type\":\"sent\""), "broker acks send {i}: {reply:?}");
+    }
+}
+
+#[test]
+fn log_about_filters_by_sender_or_recipient() {
+    let broker = Broker::start();
+    for (from, to, body) in
+        [("a@h", "b@h", "alpha"), ("b@h", "a@h", "beta"), ("a@h", "c@h", "gamma")]
+    {
+        let sent = run_client(&broker.addr, from, "send", &["--to", to, body]);
+        assert_eq!(sent.status.code(), Some(0));
+    }
+    let sent = run_client(&broker.addr, "x@h", "send", &["--to", "y@h", "unrelated"]);
+    assert_eq!(sent.status.code(), Some(0));
+
+    let output = run_client(&broker.addr, "observer@h", "log", &["--about", "a@h"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = stdout_text(&output);
+    for body in ["alpha", "beta", "gamma"] {
+        assert!(stdout.contains(body), "log --about a@h keeps {body}: {stdout:?}");
+    }
+    assert!(!stdout.contains("unrelated"), "log --about a@h drops x@h: {stdout:?}");
+
+    let output = run_client(&broker.addr, "observer@h", "log", &["--about", "not-an-address"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty(), "stdout is empty");
+    let stderr = stderr_text(&output);
+    assert!(stderr.starts_with("chattrs: "), "stderr names chattrs: {stderr:?}");
+}
+
+#[test]
+fn reply_json_prints_a_sent_line() {
+    let broker = Broker::start();
+    let sent = run_client(&broker.addr, "a@h", "send", &["--to", "b@h", "question"]);
+    assert_eq!(sent.status.code(), Some(0));
+    let id: u64 = stdout_text(&sent).trim().parse().expect("send prints the id");
+
+    let output = run_client(&broker.addr, "b@h", "reply", &["--json", &id.to_string(), "answer"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = stdout_text(&output);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "preamble plus the sent line: {stdout:?}");
+    let preamble = parse_line(lines[0]);
+    assert_eq!(preamble["type"].as_str(), Some("message"));
+    assert_eq!(preamble["body"].as_str(), Some("question"));
+    let sent_line = parse_line(lines[1]);
+    assert_eq!(sent_line["type"].as_str(), Some("sent"));
+    let reply_id = sent_line["id"].as_u64().expect("sent line carries an id");
+    assert!(reply_id > id, "the reply id follows the question");
+}
+
+#[test]
+fn closed_stdout_does_not_panic() {
+    let broker = Broker::start();
+    seed_history(&broker.addr, 2000);
+
+    let mut command = Command::new(binary());
+    command.arg("log").arg("--server").arg(&broker.addr);
+    command.env("CHATTRS_ADDRESS", "reader@h");
+    clear_env(&mut command);
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn log");
+    let stdout = child.stdout.take().expect("log stdout");
+    let mut stderr = child.stderr.take().expect("log stderr");
+    let mut reader = BufReader::new(stdout);
+    let mut first = String::new();
+    reader.read_line(&mut first).expect("log prints a first line");
+    assert!(!first.is_empty(), "log prints before the pipe closes");
+    drop(reader);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("poll log") {
+            break status;
+        }
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("log did not exit after its stdout closed");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let mut err_bytes = Vec::new();
+    use std::io::Read as _;
+    stderr.read_to_end(&mut err_bytes).expect("read log stderr");
+    let stderr = String::from_utf8(err_bytes).expect("stderr is utf-8");
+    assert_eq!(status.code(), Some(0), "closed stdout exits zero");
+    assert!(!stderr.contains("panicked"), "no panic on a closed stdout: {stderr:?}");
 }
 
 #[test]

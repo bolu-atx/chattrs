@@ -25,10 +25,10 @@ impl Store {
             .map_err(|e| format!("db task failed: {e}"))?
     }
 
-    /// Insert a message and return its id, which grows with send order.
-    /// A `None` topic is the general chat. A `None` recipient is a topic
-    /// announcement: it is stored with no owning inbox and survives a
-    /// restart like any message.
+    /// Insert a message and return it, with its id and timestamp filled
+    /// in. The id grows with send order. A `None` topic is the general
+    /// chat. A `None` recipient is a topic announcement: it is stored with
+    /// no owning inbox and survives a restart like any message.
     pub async fn insert(
         &self,
         sender: String,
@@ -36,7 +36,7 @@ impl Store {
         body: String,
         reply_to: Option<u64>,
         topic: Option<String>,
-    ) -> Result<u64, String> {
+    ) -> Result<Message, String> {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
             insert_blocking(&conn, &sender, recipient.as_deref(), &body, reply_to, topic.as_deref())
@@ -219,8 +219,9 @@ fn insert_blocking(
     body: &str,
     reply_to: Option<u64>,
     topic: Option<&str>,
-) -> Result<u64, String> {
+) -> Result<Message, String> {
     let conn = lock(conn)?;
+    let ts = now_ms();
     conn.execute(
         "INSERT INTO messages (sender, recipient, body, ts, reply_to, topic)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -228,13 +229,21 @@ fn insert_blocking(
             sender,
             recipient.unwrap_or(""),
             body,
-            now_ms() as i64,
+            ts as i64,
             reply_to.map(|id| id as i64),
             topic
         ],
     )
     .map_err(|e| e.to_string())?;
-    Ok(conn.last_insert_rowid() as u64)
+    Ok(Message {
+        id: conn.last_insert_rowid() as u64,
+        from: sender.to_string(),
+        to: recipient.map(|recipient| recipient.to_string()),
+        body: body.to_string(),
+        ts,
+        reply_to,
+        topic: topic.map(|topic| topic.to_string()),
+    })
 }
 
 /// Map a stored recipient back to the wire: the empty string means the
@@ -503,14 +512,21 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db = dir.path().join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
-        let first =
-            store.insert("a@h".into(), Some("b@h".into()), "one".into(), None, None).await.unwrap();
-        let second =
-            store.insert("a@h".into(), Some("b@h".into()), "two".into(), None, None).await.unwrap();
+        let first = store
+            .insert("a@h".into(), Some("b@h".into()), "one".into(), None, None)
+            .await
+            .unwrap()
+            .id;
+        let second = store
+            .insert("a@h".into(), Some("b@h".into()), "two".into(), None, None)
+            .await
+            .unwrap()
+            .id;
         let other = store
             .insert("a@h".into(), Some("c@h".into()), "other".into(), None, None)
             .await
-            .unwrap();
+            .unwrap()
+            .id;
 
         let messages = store.inbox("b@h".into()).await.unwrap();
         let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
@@ -534,9 +550,14 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db = dir.path().join("sub").join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
-        let id =
+        let stored =
             store.insert("a@h".into(), Some("b@h".into()), "hi".into(), None, None).await.unwrap();
+        let id = stored.id;
         assert_eq!(id, 1);
+        assert_eq!(stored.from, "a@h");
+        assert_eq!(stored.to.as_deref(), Some("b@h"));
+        assert_eq!(stored.body, "hi");
+        assert!(stored.ts > 0);
         assert_eq!(read_row(&db, id), ("a@h".into(), "b@h".into(), "hi".into()));
         drop(store);
 
@@ -544,7 +565,8 @@ mod tests {
         let next = store
             .insert("b@h".into(), Some("a@h".into()), "yo".into(), Some(id), None)
             .await
-            .unwrap();
+            .unwrap()
+            .id;
         assert_eq!(next, id + 1);
         assert_eq!(read_row(&db, id), ("a@h".into(), "b@h".into(), "hi".into()));
     }
@@ -559,7 +581,8 @@ mod tests {
             let id = store
                 .insert("a@h".into(), None, format!("note {i}"), None, Some("release-26".into()))
                 .await
-                .unwrap();
+                .unwrap()
+                .id;
             if i == 5 {
                 first_kept = id;
             }
@@ -570,7 +593,8 @@ mod tests {
         let other = store
             .insert("a@h".into(), None, "other room".into(), None, Some("other-topic".into()))
             .await
-            .unwrap();
+            .unwrap()
+            .id;
         let direct = store
             .insert(
                 "a@h".into(),
@@ -580,7 +604,8 @@ mod tests {
                 Some("release-26".into()),
             )
             .await
-            .unwrap();
+            .unwrap()
+            .id;
 
         let backlog =
             store.topic_backlog(vec!["release-26".into(), "other-topic".into()]).await.unwrap();

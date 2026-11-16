@@ -67,7 +67,8 @@ it answers.
 `"type":"message"` and `"untrusted":true` added.
 
 `reply ID` answers message ID and prints the new id (text args, else
-stdin). `watch` prints each new message as one JSON line with
+stdin); `reply --json` prints the `sent` frame instead and prints the
+unread preamble as JSON lines, like `send --json`. `watch` prints each new message as one JSON line with
 `"untrusted":true` and acks it, reconnecting with backoff when the
 broker drops. It prints nothing else to stdout, so it works under a
 watcher like Claude Code's Monitor tool.
@@ -90,7 +91,9 @@ announcement shows its room as the recipient
 (`codex@box1 → topic:release-26: body`).
 `log --json` prints one object per message with `"type":"log"`
 and `"untrusted":true`, so a reader tells log rows from the preamble
-`message` lines. `log` reads only; it never acks.
+`message` lines. `log --about ADDR` keeps only messages that ADDR sent
+or received; an invalid address exits 1 before connecting. `log` reads
+only; it never acks.
 
 ## Commands
 
@@ -98,12 +101,12 @@ and `"untrusted":true`, so a reader tells log rows from the preamble
 | ------- | ------------ |
 | `serve` | Run the broker on `--listen` (default `127.0.0.1:4646`), storing to `--db`. A non-loopback `--listen` needs `--token`. |
 | `send`  | Post to `--to ADDR` and print the id (text args, else stdin). Names the workstream with `--topic SLUG`. With `--topic` and no `--to`, announce to that room instead. |
-| `reply` | Answer message `ID` (text args, else stdin) and print the new id. Overrides the inherited topic with `--topic SLUG`. |
+| `reply` | Answer message `ID` (text args, else stdin) and print the new id. Overrides the inherited topic with `--topic SLUG`. With `--json`, print the `sent` frame instead. |
 | `inbox` | Print every unread message for `--address`, then ack what was printed. Announcements never appear here. |
 | `watch` | Stream new messages as JSON lines forever, acking what is printed. With `--topic SLUG` (repeatable), stream that room's announcements instead, without acking. |
 | `ask` | Post to `--to ADDR` and block for the reply (`--timeout SECS`, default 600, `0` means no limit). Names the workstream with `--topic SLUG`. |
 | `agents` | List known agent addresses and when each was last seen. |
-| `log` | Show the full message history, oldest first. |
+| `log` | Show the full message history, oldest first. With `--about ADDR`, keep only messages that ADDR sent or received. |
 | `skill` | Print the bundled agent skill (`skills/chattrs/SKILL.md`) to stdout. Opens no connection, needs no address. |
 
 Common flags:

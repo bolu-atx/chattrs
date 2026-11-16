@@ -15,8 +15,8 @@ use crate::store::Store;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::io::{AsyncWriteExt, BufReader};
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
 
@@ -33,6 +33,59 @@ pub struct Broker {
 struct Waiter {
     reply_to: u64,
     sender: mpsc::UnboundedSender<Message>,
+}
+
+/// The outcome of one bounded line read: a closed peer, a line within the
+/// limit, or a line over the limit whose rest was discarded.
+enum LineRead {
+    Closed,
+    Line,
+    TooLarge,
+}
+
+/// Read one `\n`-ended line without buffering more than
+/// `MAX_LINE_BYTES` plus one byte. A line over the limit discards the
+/// rest of that line without storing it and reports `TooLarge`.
+async fn read_line_bounded(
+    reader: &mut BufReader<OwnedReadHalf>,
+    line: &mut String,
+) -> std::io::Result<LineRead> {
+    use tokio::io::AsyncBufReadExt as _;
+    line.clear();
+    let mut kept: Vec<u8> = Vec::new();
+    let mut total: usize = 0;
+    loop {
+        let (chunk, ended) = {
+            let buf = reader.fill_buf().await?;
+            if buf.is_empty() {
+                if total == 0 {
+                    return Ok(LineRead::Closed);
+                }
+                break;
+            }
+            match buf.iter().position(|byte| *byte == b'\n') {
+                Some(pos) => (buf[..pos + 1].to_vec(), true),
+                None => (buf.to_vec(), false),
+            }
+        };
+        reader.consume(chunk.len());
+        total += chunk.len();
+        let room = (model::MAX_LINE_BYTES + 1).saturating_sub(kept.len());
+        kept.extend_from_slice(&chunk[..chunk.len().min(room)]);
+        if ended {
+            break;
+        }
+    }
+    if total > model::MAX_LINE_BYTES {
+        line.clear();
+        return Ok(LineRead::TooLarge);
+    }
+    String::from_utf8(kept)
+        .map(|text| {
+            line.push_str(&text);
+            LineRead::Line
+        })
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 impl Broker {
@@ -196,18 +249,17 @@ impl Broker {
         let mut line = String::new();
 
         loop {
-            line.clear();
-            match reader.read_line(&mut line).await {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            if line.len() > model::MAX_LINE_BYTES {
-                let frame = Outbound::error("too_large", "inbound line is too large");
-                write_error(&mut write_half, frame).await;
-                if peer.is_none() {
-                    break;
+            match read_line_bounded(&mut reader, &mut line).await {
+                Ok(LineRead::Closed) | Err(_) => break,
+                Ok(LineRead::TooLarge) => {
+                    let frame = Outbound::error("too_large", "inbound line is too large");
+                    write_error(&mut write_half, frame).await;
+                    if peer.is_none() {
+                        break;
+                    }
+                    continue;
                 }
-                continue;
+                Ok(LineRead::Line) => {}
             }
             let frame: Inbound = match protocol::decode(&line) {
                 Ok(frame) => frame,
@@ -273,40 +325,13 @@ impl Broker {
                     }
                 },
                 Some(from) => match frame {
-                    Inbound::Hello { v, address, token } => {
-                        if !self.check_token(&mut write_half, token.as_deref()).await {
-                            break;
-                        }
-                        if v != model::PROTOCOL_VERSION {
-                            write_error(
-                                &mut write_half,
-                                Outbound::error("bad_version", "unsupported version, expected 1"),
-                            )
-                            .await;
-                            continue;
-                        }
-                        if !model::is_valid_address(&address) {
-                            write_error(
-                                &mut write_half,
-                                Outbound::error("bad_address", "address is invalid"),
-                            )
-                            .await;
-                            continue;
-                        }
-                        if let Err(e) = self.store.touch_agent(address.clone()).await {
-                            write_error(&mut write_half, Outbound::error("internal", e)).await;
-                            continue;
-                        }
-                        peer = Some(address.clone());
-                        write_frame(
+                    Inbound::Hello { .. } => {
+                        write_error(
                             &mut write_half,
-                            &Outbound::Welcome {
-                                server: protocol::SERVER_NAME.to_string(),
-                                v: model::PROTOCOL_VERSION,
-                                address,
-                            },
+                            Outbound::error("bad_frame", "hello is already set"),
                         )
                         .await;
+                        continue;
                     }
                     Inbound::Send { to, body, reply_to, topic } => {
                         if let Some(topic) = topic.as_deref() {
@@ -434,17 +459,16 @@ impl Broker {
                             )
                             .await
                         {
-                            Ok(id) => {
-                                if let Ok(Some(message)) = self.store.get(id).await {
-                                    match recipient.as_deref() {
-                                        Some(address) => {
-                                            self.notify(address, message.clone());
-                                            self.notify_waiters(address, &message);
-                                        }
-                                        None => {
-                                            if let Some(room) = message.topic.clone() {
-                                                self.notify_topic(&room, message);
-                                            }
+                            Ok(message) => {
+                                let id = message.id;
+                                match recipient.as_deref() {
+                                    Some(address) => {
+                                        self.notify(address, message.clone());
+                                        self.notify_waiters(address, &message);
+                                    }
+                                    None => {
+                                        if let Some(room) = message.topic.clone() {
+                                            self.notify_topic(&room, message);
                                         }
                                     }
                                 }
@@ -540,12 +564,11 @@ impl Broker {
                         let mut delivered = false;
                         loop {
                             tokio::select! {
-                                result = reader.read_line(&mut line) => {
+                                result = read_line_bounded(&mut reader, &mut line) => {
                                     match result {
-                                        Ok(0) | Err(_) => break,
+                                        Ok(LineRead::Closed) | Err(_) => break,
                                         Ok(_) => {}
                                     }
-                                    line.clear();
                                 }
                                 received = live.recv() => {
                                     match received {
@@ -608,12 +631,11 @@ impl Broker {
                         }
                         loop {
                             tokio::select! {
-                                result = reader.read_line(&mut line) => {
+                                result = read_line_bounded(&mut reader, &mut line) => {
                                     match result {
-                                        Ok(0) | Err(_) => break,
+                                        Ok(LineRead::Closed) | Err(_) => break,
                                         Ok(_) => {}
                                     }
-                                    line.clear();
                                 }
                                 received = live.recv() => {
                                     match received {
@@ -681,7 +703,7 @@ pub async fn serve(listen: &str, db: &Path, token: Option<String>) -> Result<(),
     check_listen(listen, token.as_deref())?;
     let listener = TcpListener::bind(listen).await.map_err(|e| format!("bind {listen}: {e}"))?;
     let store = Store::open(db.to_path_buf()).await?;
-    println!("chattrs: serving on {listen}");
+    eprintln!("chattrs: serving on {listen}");
     let broker = Arc::new(Broker::new(store, token));
     run_listener(listener, broker).await
 }
@@ -701,6 +723,7 @@ mod tests {
     use super::*;
     use crate::client;
     use tempfile::TempDir;
+    use tokio::io::AsyncBufReadExt as _;
     use tokio::io::BufReader as TokioBufReader;
     use tokio::net::TcpStream as TokioTcpStream;
 
@@ -847,6 +870,71 @@ mod tests {
             let hello = format!("{{\"type\":\"hello\",\"v\":1,\"address\":\"{address}\"}}\n");
             let frame = raw_hello(&mut raw, &hello).await;
             assert_eq!(error_code(&frame), "bad_address", "for {address}");
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn second_hello_is_rejected() {
+        let (addr, _dir, handle) = spawn().await;
+        let mut raw = raw_connect(&addr).await;
+        raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\"}\n").await;
+        let frame =
+            raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"other@h\"}\n").await;
+        assert_eq!(error_code(&frame), "bad_frame");
+        raw_send(&mut raw, "{\"type\":\"send\",\"to\":\"b@h\",\"body\":\"hi\"}\n").await;
+        match raw_recv(&mut raw).await.unwrap() {
+            Outbound::Sent { .. } => {}
+            other => panic!("expected a sent frame, got {other:?}"),
+        }
+        drop(raw);
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].from, "a@h");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn pipelined_frames_are_all_answered() {
+        let (addr, _dir, handle) = spawn().await;
+        let mut raw = raw_connect(&addr).await;
+        let frames = concat!(
+            "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\"}\n",
+            "{\"type\":\"send\",\"to\":\"b@h\",\"body\":\"one\"}\n",
+            "{\"type\":\"send\",\"to\":\"b@h\",\"body\":\"two\"}\n",
+        );
+        raw.writer.write_all(frames.as_bytes()).await.unwrap();
+        raw.writer.flush().await.unwrap();
+        match raw_recv(&mut raw).await.unwrap() {
+            Outbound::Welcome { address, .. } => assert_eq!(address, "a@h"),
+            other => panic!("expected a welcome frame, got {other:?}"),
+        }
+        let mut ids = Vec::new();
+        for _ in 0..2 {
+            match raw_recv(&mut raw).await.unwrap() {
+                Outbound::Sent { id } => ids.push(id),
+                other => panic!("expected a sent frame, got {other:?}"),
+            }
+        }
+        assert_ne!(ids[0], ids[1], "pipelined sends get different ids");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn oversize_line_is_rejected_without_buffering() {
+        let (addr, _dir, handle) = spawn().await;
+        let mut raw = raw_connect(&addr).await;
+        raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\"}\n").await;
+        raw.writer.write_all(&vec![b'x'; 1024 * 1024]).await.unwrap();
+        raw.writer.flush().await.unwrap();
+        raw.writer.write_all(b"\n").await.unwrap();
+        raw.writer.flush().await.unwrap();
+        let frame = raw_recv(&mut raw).await.unwrap();
+        assert_eq!(error_code(&frame), "too_large");
+        raw_send(&mut raw, "{\"type\":\"inbox\"}\n").await;
+        match raw_recv(&mut raw).await.unwrap() {
+            Outbound::Inbox { messages } => assert!(messages.is_empty()),
+            other => panic!("expected an inbox frame, got {other:?}"),
         }
         handle.abort();
     }
@@ -1041,7 +1129,7 @@ mod tests {
         let (addr, _dir, handle) = spawn().await;
         let original =
             client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
-        let id = client::reply(&addr, "b@h", None, original, "yo", None).await.unwrap();
+        let id = client::reply(&addr, "b@h", None, original, "yo", None, false).await.unwrap();
         assert!(id > original, "reply gets a fresh id");
 
         let messages = client::fetch_inbox(&addr, "a@h", None).await.unwrap();
@@ -1058,7 +1146,7 @@ mod tests {
         let (addr, _dir, handle) = spawn().await;
         let original =
             client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
-        let id = client::reply(&addr, "b@h", None, original, "yo", None).await.unwrap();
+        let id = client::reply(&addr, "b@h", None, original, "yo", None, false).await.unwrap();
 
         let messages = client::fetch_inbox(&addr, "a@h", None).await.unwrap();
         assert_eq!(messages.len(), 1);
@@ -1070,7 +1158,7 @@ mod tests {
     #[tokio::test]
     async fn reply_to_unknown_id_is_rejected() {
         let (addr, _dir, handle) = spawn().await;
-        let err = client::reply(&addr, "b@h", None, 9999, "yo", None).await.unwrap_err();
+        let err = client::reply(&addr, "b@h", None, 9999, "yo", None, false).await.unwrap_err();
         assert!(err.contains("unknown_message"), "got: {err}");
         let err = client::send(
             &addr,
@@ -1096,7 +1184,8 @@ mod tests {
         let (addr, _dir, handle) = spawn().await;
         let original =
             client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
-        let err = client::reply(&addr, "c@h", None, original, "intrude", None).await.unwrap_err();
+        let err =
+            client::reply(&addr, "c@h", None, original, "intrude", None, false).await.unwrap_err();
         assert!(err.contains("not_recipient"), "got: {err}");
 
         let id = client::send(
@@ -1169,7 +1258,7 @@ mod tests {
         )
         .await
         .unwrap();
-        let id = client::reply(&addr, "b@h", None, original, "yo", None).await.unwrap();
+        let id = client::reply(&addr, "b@h", None, original, "yo", None, false).await.unwrap();
         let messages = client::fetch_inbox(&addr, "a@h", None).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
@@ -1190,8 +1279,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let id =
-            client::reply(&addr, "b@h", None, original, "yo", Some("other-topic")).await.unwrap();
+        let id = client::reply(&addr, "b@h", None, original, "yo", Some("other-topic"), false)
+            .await
+            .unwrap();
         let messages = client::fetch_inbox(&addr, "a@h", None).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
@@ -1216,7 +1306,7 @@ mod tests {
         let question = wait_for_question(&addr, "c@h").await;
         assert_eq!(question.body, "go?");
         assert_eq!(question.topic.as_deref(), Some("release-26"));
-        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
+        client::reply(&addr, "c@h", None, question.id, "yes", None, false).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
@@ -1737,7 +1827,7 @@ mod tests {
     async fn log_returns_all_messages_oldest_first() {
         let (addr, _dir, handle) = spawn().await;
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
-        let second = client::reply(&addr, "b@h", None, first, "two", None).await.unwrap();
+        let second = client::reply(&addr, "b@h", None, first, "two", None, false).await.unwrap();
         let third =
             client::send(&addr, "c@h", None, outgoing("a@h", "three"), false).await.unwrap();
 
@@ -1844,7 +1934,7 @@ mod tests {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
-        let second = client::reply(&addr, "b@h", None, first, "two", None).await.unwrap();
+        let second = client::reply(&addr, "b@h", None, first, "two", None, false).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
@@ -2240,7 +2330,7 @@ mod tests {
         let question = wait_for_question(&addr, "c@h").await;
         assert_eq!(question.from, "w@h");
         assert_eq!(question.body, "go?");
-        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
+        client::reply(&addr, "c@h", None, question.id, "yes", None, false).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
@@ -2288,7 +2378,7 @@ mod tests {
         let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
 
         let question = wait_for_question(&addr, "c@h").await;
-        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
+        client::reply(&addr, "c@h", None, question.id, "yes", None, false).await.unwrap();
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
 
@@ -2311,7 +2401,8 @@ mod tests {
         let status = wait_for_exit(&mut asker.child, 10).await;
         assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
         let question = wait_for_question(&addr, "c@h").await;
-        let reply_id = client::reply(&addr, "c@h", None, question.id, "late", None).await.unwrap();
+        let reply_id =
+            client::reply(&addr, "c@h", None, question.id, "late", None, false).await.unwrap();
 
         let pending = client::fetch_inbox(&addr, "w@h", None).await.unwrap();
         assert_eq!(pending.len(), 1, "the late reply stays unread: {pending:?}");
@@ -2340,7 +2431,7 @@ mod tests {
             asker.child.try_wait().expect("poll ask child").is_none(),
             "noise does not end the wait"
         );
-        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
+        client::reply(&addr, "c@h", None, question.id, "yes", None, false).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
@@ -2370,7 +2461,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         let mut server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
+        client::reply(&addr, "c@h", None, question.id, "yes", None, false).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 30).await;
         assert_eq!(status.code(), Some(0), "ask exits zero after a restart");
@@ -2499,7 +2590,7 @@ mod tests {
         let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
 
         let question = wait_for_question(&addr, "c@h").await;
-        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
+        client::reply(&addr, "c@h", None, question.id, "yes", None, false).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
