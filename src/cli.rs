@@ -30,6 +30,8 @@ pub enum Command {
     Ask(AskArgs),
     /// List known agent addresses and when each was last seen.
     Agents(AgentsArgs),
+    /// Print the bundled agent skill to stdout.
+    Skill,
 }
 
 #[derive(clap::Args, Debug)]
