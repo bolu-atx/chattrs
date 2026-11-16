@@ -44,7 +44,7 @@ jobs:
               --address tester@host --to smoke@host "smoke hi"
             $inbox = ./target/debug/chattrs.exe inbox --server 127.0.0.1:47654 `
               --address smoke@host
-            if ($inbox -notmatch "smoke hi") {
+            if (($inbox -join "`n") -notmatch "smoke hi") {
               Write-Error "inbox missed the smoke message: $inbox"
               exit 1
             }
