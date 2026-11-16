@@ -46,7 +46,7 @@ to stdout, so it works under a watcher like Claude Code's Monitor tool.
 
 | Command | What it does |
 | ------- | ------------ |
-| `serve` | Run the broker on `--listen` (default `127.0.0.1:4646`), storing to `--db`. |
+| `serve` | Run the broker on `--listen` (default `127.0.0.1:4646`), storing to `--db`. A non-loopback `--listen` needs `--token`. |
 | `send`  | Post to `--to ADDR` and print the id (text args, else stdin). |
 | `reply` | Answer message `ID` (text args, else stdin) and print the new id. |
 | `inbox` | Print every unread message for `--address`, then ack what was printed. |
@@ -58,7 +58,8 @@ Common flags:
   `CHATTRS_SERVER`).
 - `--address ADDR` — own address, required until a default lands
   (`CHATTRS_ADDRESS`).
-- `--token TOKEN` — token for the broker (`CHATTRS_TOKEN`).
+- `--token TOKEN` — fleet token (`CHATTRS_TOKEN`). `serve` needs it for a
+  non-loopback bind; every other command sends it in `hello`.
 - `--json` — print JSON lines; every line carries a `type`.
 - `serve --db PATH` — SQLite path (`CHATTRS_DB`, default
   `$XDG_DATA_HOME/chattrs/chattrs.db`).
@@ -108,10 +109,14 @@ Broker → client:
 {"type":"error",   "code":"empty_body", "message":"body is empty"}
 ```
 
-`hello` (the token is optional) must be the first frame; anything else first
-gets `hello_required` and a closed connection. The broker sets the sender
-from the `hello` address; `send` carries no sender. A send to an unknown
-address succeeds — the inbox exists by name.
+`hello` must be the first frame; anything else first gets `hello_required`
+and a closed connection. The broker sets the sender from the `hello`
+address; `send` carries no sender. A send to an unknown address succeeds —
+the inbox exists by name. When the broker has a token, every `hello` must
+carry it (loopback too) or the broker answers `bad_token` and closes the
+connection; without a token the broker ignores the field. One token covers
+the fleet, and addresses stay self-asserted: the token proves fleet
+membership, not which address is yours.
 
 A `send` with a `reply_to` and no `to` is a reply: the broker addresses it
 to the sender of that message, and rejects an unknown id with
@@ -137,8 +142,9 @@ never exits by itself. When the connection drops it reconnects with
 backoff from 1 s to 30 s, logging to stderr only.
 
 Error codes: `bad_frame`, `hello_required`, `bad_version` (v ≠ 1),
-`bad_address`, `empty_body`, `too_large`, `unknown_message`,
-`not_recipient`. After `hello`, an error does not close the connection.
+`bad_address`, `bad_token`, `empty_body`, `too_large`, `unknown_message`,
+`not_recipient`. After `hello`, an error does not close the connection,
+except `bad_token`, which always closes it.
 
 Limits: an address is `user@host` (`[A-Za-z0-9._-]` each side, 128 bytes
 max). A body is 1 byte to 64 KiB. An inbound line over 128 KiB is rejected
@@ -150,8 +156,8 @@ with `too_large`.
   SQLite before it confirms the send, so a restart loses nothing. The broker
   never deletes a message.
 - **Addresses, not accounts.** An agent is whoever its `hello` says it is.
-  Run the broker on a trusted network or loopback. Token checks land in a
-  later story.
+  The broker stays on loopback unless a token guards a wider bind, and one
+  fleet token admits every address.
 - **Small and boring.** One SQLite file, line-JSON over TCP, no framework.
 
 ## Repository

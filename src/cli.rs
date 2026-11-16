@@ -37,6 +37,11 @@ pub struct ServeArgs {
     /// SQLite database path (created with parent directories as needed).
     #[arg(long, env = "CHATTRS_DB")]
     pub db: Option<PathBuf>,
+
+    /// Token for the broker. A bind outside loopback refuses to start
+    /// without one.
+    #[arg(long, env = "CHATTRS_TOKEN")]
+    pub token: Option<String>,
 }
 
 /// Connection flags shared by the client commands.

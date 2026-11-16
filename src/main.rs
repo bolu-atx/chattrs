@@ -34,7 +34,7 @@ async fn run(args: Args) -> Result<(), String> {
     match args.command {
         Command::Serve(c) => {
             let db = c.db.clone().unwrap_or_else(Store::default_path);
-            server::serve(&c.listen, &db).await
+            server::serve(&c.listen, &db, c.token.clone()).await
         }
         Command::Send(c) => {
             let id = client::send(
