@@ -808,8 +808,7 @@ mod tests {
     async fn message_survives_broker_restart() {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
-        let id =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
@@ -825,9 +824,8 @@ mod tests {
         assert_eq!(recipient, "b@h");
         assert_eq!(body, "hi");
 
-        let next = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "again"), false)
-            .await
-            .unwrap();
+        let next =
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "again")).await.unwrap();
         assert_eq!(next, id + 1);
         handle.abort();
     }
@@ -837,13 +835,9 @@ mod tests {
         let (addr, _dir, handle) = spawn().await;
         let mut last = 0;
         for i in 0..5 {
-            let id = client::publish(
-                &endpoint(&addr, "a@h"),
-                outgoing("b@h", &format!("msg {i}")),
-                false,
-            )
-            .await
-            .unwrap();
+            let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", &format!("msg {i}")))
+                .await
+                .unwrap();
             assert!(id > last, "ids increase with send order");
             last = id;
         }
@@ -980,8 +974,7 @@ mod tests {
     async fn loopback_bind_without_token_starts() {
         assert!(check_listen("127.0.0.1:0", None).is_ok());
         let (addr, _dir, handle) = spawn().await;
-        let id =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
         let messages = client::fetch_inbox(&endpoint(&addr, "b@h")).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
@@ -1009,9 +1002,8 @@ mod tests {
         let frame = raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\"}\n").await;
         assert_eq!(error_code(&frame), "bad_token");
         assert!(raw_recv(&mut raw).await.is_err(), "connection closes after bad_token");
-        let err = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false)
-            .await
-            .unwrap_err();
+        let err =
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap_err();
         assert!(err.to_string().contains("bad_token"), "got: {err}");
         assert!(!err.to_string().contains("s3"), "token never appears: {err}");
         handle.abort();
@@ -1025,8 +1017,7 @@ mod tests {
             address: address.to_string(),
             token: Some("s3".to_string()),
         };
-        let id =
-            client::publish(&token_endpoint("a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        let id = client::publish(&token_endpoint("a@h"), outgoing("b@h", "hi")).await.unwrap();
         let messages = client::fetch_inbox(&token_endpoint("b@h")).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
@@ -1037,8 +1028,7 @@ mod tests {
     #[tokio::test]
     async fn send_rejects_empty_body() {
         let (addr, _dir, handle) = spawn().await;
-        let err =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", ""), false).await.unwrap_err();
+        let err = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "")).await.unwrap_err();
         assert!(err.to_string().contains("empty_body"), "got: {err}");
         handle.abort();
     }
@@ -1047,9 +1037,8 @@ mod tests {
     async fn send_rejects_oversize_body() {
         let (addr, _dir, handle) = spawn().await;
         let body = "x".repeat(model::MAX_BODY_BYTES + 1);
-        let err = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", &body), false)
-            .await
-            .unwrap_err();
+        let err =
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", &body)).await.unwrap_err();
         assert!(err.to_string().contains("too_large"), "got: {err}");
         handle.abort();
     }
@@ -1057,12 +1046,10 @@ mod tests {
     #[tokio::test]
     async fn inbox_returns_only_messages_for_own_address() {
         let (addr, _dir, handle) = spawn().await;
-        let to_b = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "for b"), false)
-            .await
-            .unwrap();
-        let to_c = client::publish(&endpoint(&addr, "a@h"), outgoing("c@h", "for c"), false)
-            .await
-            .unwrap();
+        let to_b =
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "for b")).await.unwrap();
+        let to_c =
+            client::publish(&endpoint(&addr, "a@h"), outgoing("c@h", "for c")).await.unwrap();
 
         let b_messages = client::fetch_inbox(&endpoint(&addr, "b@h")).await.unwrap();
         assert_eq!(b_messages.len(), 1);
@@ -1084,13 +1071,9 @@ mod tests {
         let (addr, _dir, handle) = spawn().await;
         let mut expected = Vec::new();
         for i in 0..3 {
-            let id = client::publish(
-                &endpoint(&addr, "a@h"),
-                outgoing("b@h", &format!("msg {i}")),
-                false,
-            )
-            .await
-            .unwrap();
+            let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", &format!("msg {i}")))
+                .await
+                .unwrap();
             expected.push(id);
         }
         let messages = client::fetch_inbox(&endpoint(&addr, "b@h")).await.unwrap();
@@ -1103,8 +1086,7 @@ mod tests {
     #[tokio::test]
     async fn unacked_message_is_redelivered_after_disconnect() {
         let (addr, _dir, handle) = spawn().await;
-        let id =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
 
         let mut raw = raw_connect(&addr).await;
         raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"b@h\"}\n").await;
@@ -1128,8 +1110,7 @@ mod tests {
     #[tokio::test]
     async fn acked_message_is_not_redelivered() {
         let (addr, _dir, handle) = spawn().await;
-        let id =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
 
         let messages = client::fetch_inbox(&endpoint(&addr, "b@h")).await.unwrap();
         assert_eq!(messages.len(), 1);
@@ -1144,12 +1125,10 @@ mod tests {
     #[tokio::test]
     async fn ack_ignores_ids_of_other_addresses() {
         let (addr, _dir, handle) = spawn().await;
-        let to_b = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "for b"), false)
-            .await
-            .unwrap();
-        let to_c = client::publish(&endpoint(&addr, "a@h"), outgoing("c@h", "for c"), false)
-            .await
-            .unwrap();
+        let to_b =
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "for b")).await.unwrap();
+        let to_c =
+            client::publish(&endpoint(&addr, "a@h"), outgoing("c@h", "for c")).await.unwrap();
 
         let acked = client::ack(&endpoint(&addr, "b@h"), &[to_b, to_c]).await.unwrap();
         assert_eq!(acked, vec![to_b], "only the own id changes");
@@ -1164,8 +1143,8 @@ mod tests {
     async fn reply_goes_to_sender_of_original() {
         let (addr, _dir, handle) = spawn().await;
         let original =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
-        let id = client::reply(&endpoint(&addr, "b@h"), original, "yo", None, false).await.unwrap();
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
+        let id = client::reply(&endpoint(&addr, "b@h"), original, "yo", None).await.unwrap();
         assert!(id > original, "reply gets a fresh id");
 
         let messages = client::fetch_inbox(&endpoint(&addr, "a@h")).await.unwrap();
@@ -1181,8 +1160,8 @@ mod tests {
     async fn reply_carries_reply_to_id() {
         let (addr, _dir, handle) = spawn().await;
         let original =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
-        let id = client::reply(&endpoint(&addr, "b@h"), original, "yo", None, false).await.unwrap();
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
+        let id = client::reply(&endpoint(&addr, "b@h"), original, "yo", None).await.unwrap();
 
         let messages = client::fetch_inbox(&endpoint(&addr, "a@h")).await.unwrap();
         assert_eq!(messages.len(), 1);
@@ -1194,13 +1173,11 @@ mod tests {
     #[tokio::test]
     async fn reply_to_unknown_id_is_rejected() {
         let (addr, _dir, handle) = spawn().await;
-        let err =
-            client::reply(&endpoint(&addr, "b@h"), 9999, "yo", None, false).await.unwrap_err();
+        let err = client::reply(&endpoint(&addr, "b@h"), 9999, "yo", None).await.unwrap_err();
         assert!(err.to_string().contains("unknown_message"), "got: {err}");
         let err = client::publish(
             &endpoint(&addr, "a@h"),
             client::Outgoing { reply_to: Some(9999), ..outgoing("b@h", "hi") },
-            false,
         )
         .await
         .unwrap_err();
@@ -1218,16 +1195,14 @@ mod tests {
     async fn reply_by_non_recipient_is_rejected() {
         let (addr, _dir, handle) = spawn().await;
         let original =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
-        let err = client::reply(&endpoint(&addr, "c@h"), original, "intrude", None, false)
-            .await
-            .unwrap_err();
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
+        let err =
+            client::reply(&endpoint(&addr, "c@h"), original, "intrude", None).await.unwrap_err();
         assert!(err.to_string().contains("not_recipient"), "got: {err}");
 
         let id = client::publish(
             &endpoint(&addr, "c@h"),
             client::Outgoing { reply_to: Some(original), ..outgoing("d@h", "ref") },
-            false,
         )
         .await
         .unwrap();
@@ -1244,7 +1219,6 @@ mod tests {
         let id = client::publish(
             &endpoint(&addr, "a@h"),
             client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "hi") },
-            false,
         )
         .await
         .unwrap();
@@ -1254,7 +1228,7 @@ mod tests {
         assert_eq!(messages[0].topic.as_deref(), Some("release-26"));
         let value = serde_json::to_value(&messages[0]).unwrap();
         assert_eq!(value["topic"].as_str(), Some("release-26"));
-        let text = model::render_message(&messages[0]);
+        let text = crate::output::render_message(&messages[0]);
         assert!(text.contains("topic=\"release-26\""), "wrapper shows the topic: {text}");
         handle.abort();
     }
@@ -1262,19 +1236,18 @@ mod tests {
     #[tokio::test]
     async fn message_without_topic_is_general_chat() {
         let (addr, _dir, handle) = spawn().await;
-        let id =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
         let messages = client::fetch_inbox(&endpoint(&addr, "b@h")).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
         assert_eq!(messages[0].topic, None);
         let value = serde_json::to_value(&messages[0]).unwrap();
         assert!(value["topic"].is_null(), "general chat wires topic null");
-        let text = model::render_message(&messages[0]);
+        let text = crate::output::render_message(&messages[0]);
         assert!(!text.contains("topic="), "wrapper omits the topic: {text}");
-        let history = client::fetch_log(&endpoint(&addr, "reader@h"), None, false).await.unwrap();
+        let history = client::fetch_log(&endpoint(&addr, "reader@h"), None).await.unwrap();
         assert_eq!(history.len(), 1);
-        let line = model::render_log_line(&history[0]);
+        let line = crate::output::render_log_line(&history[0]);
         assert!(!line.contains("(topic"), "log line omits the topic: {line}");
         handle.abort();
     }
@@ -1285,11 +1258,10 @@ mod tests {
         let original = client::publish(
             &endpoint(&addr, "a@h"),
             client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "hi") },
-            false,
         )
         .await
         .unwrap();
-        let id = client::reply(&endpoint(&addr, "b@h"), original, "yo", None, false).await.unwrap();
+        let id = client::reply(&endpoint(&addr, "b@h"), original, "yo", None).await.unwrap();
         let messages = client::fetch_inbox(&endpoint(&addr, "a@h")).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
@@ -1304,11 +1276,10 @@ mod tests {
         let original = client::publish(
             &endpoint(&addr, "a@h"),
             client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "hi") },
-            false,
         )
         .await
         .unwrap();
-        let id = client::reply(&endpoint(&addr, "b@h"), original, "yo", Some("other-topic"), false)
+        let id = client::reply(&endpoint(&addr, "b@h"), original, "yo", Some("other-topic"))
             .await
             .unwrap();
         let messages = client::fetch_inbox(&endpoint(&addr, "a@h")).await.unwrap();
@@ -1335,7 +1306,7 @@ mod tests {
         let question = wait_for_question(&addr, "c@h").await;
         assert_eq!(question.body, "go?");
         assert_eq!(question.topic.as_deref(), Some("release-26"));
-        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None, false).await.unwrap();
+        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
@@ -1368,7 +1339,7 @@ mod tests {
             assert_eq!(error_code(&frame), "bad_topic", "topic {topic:?} is rejected");
         }
         let bad = client::Outgoing { topic: Some("Release 26".into()), ..outgoing("b@h", "hi") };
-        let err = client::publish(&endpoint(&addr, "a@h"), bad, false).await.unwrap_err();
+        let err = client::publish(&endpoint(&addr, "a@h"), bad).await.unwrap_err();
         assert!(err.to_string().contains("bad_topic"), "got: {err}");
         raw_send(&mut raw, "{\"type\":\"send\",\"to\":\"b@h\",\"body\":\"hi\"}\n").await;
         match raw_recv(&mut raw).await.unwrap() {
@@ -1385,7 +1356,6 @@ mod tests {
         let id = client::publish(
             &endpoint(&addr, "a@h"),
             client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "hi") },
-            false,
         )
         .await
         .unwrap();
@@ -1433,7 +1403,6 @@ mod tests {
         let id = client::publish(
             &endpoint(&addr, "a@h"),
             client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "new") },
-            false,
         )
         .await
         .unwrap();
@@ -1446,8 +1415,7 @@ mod tests {
     #[tokio::test]
     async fn topic_shows_in_log() {
         let (addr, _dir, handle) = spawn().await;
-        let first =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one"), false).await.unwrap();
+        let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
         let second = client::publish(
             &endpoint(&addr, "a@h"),
             client::Outgoing {
@@ -1455,25 +1423,24 @@ mod tests {
                 reply_to: Some(first),
                 ..outgoing("b@h", "two")
             },
-            false,
         )
         .await
         .unwrap();
-        let history = client::fetch_log(&endpoint(&addr, "reader@h"), None, false).await.unwrap();
+        let history = client::fetch_log(&endpoint(&addr, "reader@h"), None).await.unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].id, first);
         assert_eq!(history[0].topic, None);
         assert_eq!(history[1].id, second);
         assert_eq!(history[1].topic.as_deref(), Some("release-26"));
-        let plain = model::render_log_line(&history[0]);
+        let plain = crate::output::render_log_line(&history[0]);
         assert!(!plain.contains("(topic"), "general chat shows no topic: {plain}");
-        let lined = model::render_log_line(&history[1]);
+        let lined = crate::output::render_log_line(&history[1]);
         let wanted = format!("(topic release-26) (re {first})");
         assert!(lined.contains(&wanted), "topic comes before the reply id: {lined}");
-        let logged = client::format_log_json(&history[1]).unwrap();
+        let logged = crate::output::log_json(&history[1]);
         let value: serde_json::Value = serde_json::from_str(&logged).unwrap();
         assert_eq!(value["topic"].as_str(), Some("release-26"));
-        let logged = client::format_log_json(&history[0]).unwrap();
+        let logged = crate::output::log_json(&history[0]);
         let value: serde_json::Value = serde_json::from_str(&logged).unwrap();
         assert!(value["topic"].is_null(), "general chat logs null topic");
         handle.abort();
@@ -1485,13 +1452,10 @@ mod tests {
         let mut watcher = raw_connect(&addr).await;
         raw_topic_watch(&mut watcher, "ops@h", &["release-26"]).await;
 
-        let id = client::publish(
-            &endpoint(&addr, "w@h"),
-            announce("release-26", "build 421 is red"),
-            false,
-        )
-        .await
-        .unwrap();
+        let id =
+            client::publish(&endpoint(&addr, "w@h"), announce("release-26", "build 421 is red"))
+                .await
+                .unwrap();
         let got = read_watched_message(&mut watcher).await;
         assert_eq!(got.id, id);
         assert_eq!(got.from, "w@h");
@@ -1515,7 +1479,7 @@ mod tests {
             other => panic!("expected a sent frame, got {other:?}"),
         };
 
-        let history = client::fetch_log(&endpoint(&addr, "reader@h"), None, false).await.unwrap();
+        let history = client::fetch_log(&endpoint(&addr, "reader@h"), None).await.unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, id);
         assert_eq!(history[0].to, None);
@@ -1531,13 +1495,11 @@ mod tests {
         let mut watcher = raw_connect(&addr).await;
         raw_topic_watch(&mut watcher, "ops@h", &["release-26"]).await;
 
-        let other =
-            client::publish(&endpoint(&addr, "w@h"), announce("other-topic", "elsewhere"), false)
-                .await
-                .unwrap();
-        let id = client::publish(&endpoint(&addr, "w@h"), announce("release-26", "here"), false)
+        let other = client::publish(&endpoint(&addr, "w@h"), announce("other-topic", "elsewhere"))
             .await
             .unwrap();
+        let id =
+            client::publish(&endpoint(&addr, "w@h"), announce("release-26", "here")).await.unwrap();
         assert!(other < id, "ids grow with send order");
 
         let got = read_watched_message(&mut watcher).await;
@@ -1550,12 +1512,10 @@ mod tests {
     #[tokio::test]
     async fn watch_accepts_multiple_topics() {
         let (addr, _dir, handle) = spawn().await;
-        let first = client::publish(&endpoint(&addr, "w@h"), announce("room-a", "one"), false)
-            .await
-            .unwrap();
-        let second = client::publish(&endpoint(&addr, "w@h"), announce("room-b", "two"), false)
-            .await
-            .unwrap();
+        let first =
+            client::publish(&endpoint(&addr, "w@h"), announce("room-a", "one")).await.unwrap();
+        let second =
+            client::publish(&endpoint(&addr, "w@h"), announce("room-b", "two")).await.unwrap();
         assert!(first < second, "ids grow with send order");
 
         let mut watcher = raw_connect(&addr).await;
@@ -1578,7 +1538,7 @@ mod tests {
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
 
-        client::publish(&endpoint(&addr, "w@h"), announce("release-26", "build 421 is red"), false)
+        client::publish(&endpoint(&addr, "w@h"), announce("release-26", "build 421 is red"))
             .await
             .unwrap();
         for who in ["w@h", "ops@h", "fresh@h"] {
@@ -1606,7 +1566,6 @@ mod tests {
         let id = client::publish(
             &endpoint(&addr, "a@h"),
             client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "hi") },
-            false,
         )
         .await
         .unwrap();
@@ -1623,12 +1582,10 @@ mod tests {
     #[tokio::test]
     async fn topic_watch_replays_recent_then_live_without_duplicates() {
         let (addr, _dir, handle) = spawn().await;
-        let first = client::publish(&endpoint(&addr, "w@h"), announce("release-26", "one"), false)
-            .await
-            .unwrap();
-        let second = client::publish(&endpoint(&addr, "w@h"), announce("release-26", "two"), false)
-            .await
-            .unwrap();
+        let first =
+            client::publish(&endpoint(&addr, "w@h"), announce("release-26", "one")).await.unwrap();
+        let second =
+            client::publish(&endpoint(&addr, "w@h"), announce("release-26", "two")).await.unwrap();
 
         let mut watcher = raw_connect(&addr).await;
         raw_topic_watch(&mut watcher, "ops@h", &["release-26"]).await;
@@ -1637,10 +1594,9 @@ mod tests {
         assert_eq!(got_first.id, first);
         assert_eq!(got_second.id, second);
 
-        let third =
-            client::publish(&endpoint(&addr, "w@h"), announce("release-26", "three"), false)
-                .await
-                .unwrap();
+        let third = client::publish(&endpoint(&addr, "w@h"), announce("release-26", "three"))
+            .await
+            .unwrap();
         let got_third = read_watched_message(&mut watcher).await;
         assert_eq!(got_third.id, third);
         assert_eq!([got_first.id, got_second.id, got_third.id], [first, second, third]);
@@ -1652,13 +1608,10 @@ mod tests {
     async fn announcements_survive_broker_restart() {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
-        let id = client::publish(
-            &endpoint(&addr, "w@h"),
-            announce("release-26", "build 421 is red"),
-            false,
-        )
-        .await
-        .unwrap();
+        let id =
+            client::publish(&endpoint(&addr, "w@h"), announce("release-26", "build 421 is red"))
+                .await
+                .unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
@@ -1678,29 +1631,25 @@ mod tests {
         let id = client::publish(
             &endpoint(&addr, "codex@box1"),
             announce("release-26", "build 421 is red"),
-            false,
         )
         .await
         .unwrap();
 
-        let history = client::fetch_log(&endpoint(&addr, "reader@h"), None, false).await.unwrap();
+        let history = client::fetch_log(&endpoint(&addr, "reader@h"), None).await.unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, id);
         assert_eq!(history[0].to, None);
         assert_eq!(history[0].topic.as_deref(), Some("release-26"));
-        let line = model::render_log_line(&history[0]);
+        let line = crate::output::render_log_line(&history[0]);
         assert!(line.contains("→ topic:release-26:"), "log names the room: {line}");
         assert!(!line.contains("(topic "), "the room is not repeated as a suffix: {line}");
 
-        let by_sender =
-            client::fetch_log(&endpoint(&addr, "reader@h"), Some("codex@box1".into()), false)
-                .await
-                .unwrap();
+        let by_sender = client::fetch_log(&endpoint(&addr, "reader@h"), Some("codex@box1".into()))
+            .await
+            .unwrap();
         assert_eq!(by_sender.len(), 1, "an address filter still matches the sender");
         let by_other =
-            client::fetch_log(&endpoint(&addr, "reader@h"), Some("other@h".into()), false)
-                .await
-                .unwrap();
+            client::fetch_log(&endpoint(&addr, "reader@h"), Some("other@h".into())).await.unwrap();
         assert!(by_other.is_empty(), "an unrelated address matches nothing");
         handle.abort();
     }
@@ -1716,13 +1665,10 @@ mod tests {
         let out = dir.path().join("topic-watch.out");
         let _watcher = start_topic_watch(&bin, &addr, "ops@h", &["release-26"], &out);
 
-        let id = client::publish(
-            &endpoint(&addr, "w@h"),
-            announce("release-26", "build 421 is red"),
-            false,
-        )
-        .await
-        .unwrap();
+        let id =
+            client::publish(&endpoint(&addr, "w@h"), announce("release-26", "build 421 is red"))
+                .await
+                .unwrap();
         let lines = wait_for_lines(&out, 1).await;
         assert_eq!(lines.len(), 1, "watch prints one JSON line: {lines:?}");
         let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
@@ -1770,8 +1716,7 @@ mod tests {
     async fn message_to_offline_address_survives_restart_and_arrives_once() {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
-        let id =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
@@ -1792,10 +1737,10 @@ mod tests {
     #[tokio::test]
     async fn agents_lists_addresses_that_said_hello() {
         let (addr, _dir, handle) = spawn().await;
-        client::publish(&endpoint(&addr, "b@h"), outgoing("a@h", "hi"), false).await.unwrap();
+        client::publish(&endpoint(&addr, "b@h"), outgoing("a@h", "hi")).await.unwrap();
         client::fetch_inbox(&endpoint(&addr, "a@h")).await.unwrap();
 
-        let agents = client::fetch_agents(&endpoint(&addr, "a@h"), false).await.unwrap();
+        let agents = client::fetch_agents(&endpoint(&addr, "a@h")).await.unwrap();
         let names: Vec<&str> = agents.iter().map(|agent| agent.address.as_str()).collect();
         assert_eq!(names, vec!["a@h", "b@h"]);
         assert!(agents.iter().all(|agent| agent.last_seen > 0), "{agents:?}");
@@ -1805,9 +1750,9 @@ mod tests {
     #[tokio::test]
     async fn agents_omits_addresses_that_only_received() {
         let (addr, _dir, handle) = spawn().await;
-        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
 
-        let agents = client::fetch_agents(&endpoint(&addr, "a@h"), false).await.unwrap();
+        let agents = client::fetch_agents(&endpoint(&addr, "a@h")).await.unwrap();
         let names: Vec<&str> = agents.iter().map(|agent| agent.address.as_str()).collect();
         assert_eq!(names, vec!["a@h"]);
         handle.abort();
@@ -1840,7 +1785,7 @@ mod tests {
     }
 
     async fn seen(server: &str, address: &str) -> u64 {
-        client::fetch_agents(&endpoint(server, "observer@h"), false)
+        client::fetch_agents(&endpoint(server, "observer@h"))
             .await
             .unwrap()
             .into_iter()
@@ -1853,11 +1798,11 @@ mod tests {
     async fn agents_survive_broker_restart() {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
-        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
-        let agents = client::fetch_agents(&endpoint(&addr, "a@h"), false).await.unwrap();
+        let agents = client::fetch_agents(&endpoint(&addr, "a@h")).await.unwrap();
         assert!(agents.iter().any(|agent| agent.address == "a@h"), "agents survive: {agents:?}");
         handle.abort();
     }
@@ -1865,15 +1810,12 @@ mod tests {
     #[tokio::test]
     async fn log_returns_all_messages_oldest_first() {
         let (addr, _dir, handle) = spawn().await;
-        let first =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one"), false).await.unwrap();
-        let second =
-            client::reply(&endpoint(&addr, "b@h"), first, "two", None, false).await.unwrap();
-        let third = client::publish(&endpoint(&addr, "c@h"), outgoing("a@h", "three"), false)
-            .await
-            .unwrap();
+        let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
+        let second = client::reply(&endpoint(&addr, "b@h"), first, "two", None).await.unwrap();
+        let third =
+            client::publish(&endpoint(&addr, "c@h"), outgoing("a@h", "three")).await.unwrap();
 
-        let history = client::fetch_log(&endpoint(&addr, "reader@h"), None, false).await.unwrap();
+        let history = client::fetch_log(&endpoint(&addr, "reader@h"), None).await.unwrap();
         let ids: Vec<u64> = history.iter().map(|message| message.id).collect();
         assert_eq!(ids, vec![first, second, third]);
         assert_eq!(history[0].from, "a@h");
@@ -1890,21 +1832,13 @@ mod tests {
     #[tokio::test]
     async fn log_filters_by_sender_or_recipient() {
         let (addr, _dir, handle) = spawn().await;
-        let ab = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "a to b"), false)
-            .await
-            .unwrap();
-        let ba = client::publish(&endpoint(&addr, "b@h"), outgoing("a@h", "b to a"), false)
-            .await
-            .unwrap();
-        let ac = client::publish(&endpoint(&addr, "a@h"), outgoing("c@h", "a to c"), false)
-            .await
-            .unwrap();
-        let xy = client::publish(&endpoint(&addr, "x@h"), outgoing("y@h", "x to y"), false)
-            .await
-            .unwrap();
+        let ab = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "a to b")).await.unwrap();
+        let ba = client::publish(&endpoint(&addr, "b@h"), outgoing("a@h", "b to a")).await.unwrap();
+        let ac = client::publish(&endpoint(&addr, "a@h"), outgoing("c@h", "a to c")).await.unwrap();
+        let xy = client::publish(&endpoint(&addr, "x@h"), outgoing("y@h", "x to y")).await.unwrap();
 
         async fn filtered(addr: &str, who: &str) -> Vec<u64> {
-            client::fetch_log(&endpoint(addr, "reader@h"), Some(who.to_string()), false)
+            client::fetch_log(&endpoint(addr, "reader@h"), Some(who.to_string()))
                 .await
                 .unwrap()
                 .into_iter()
@@ -1915,7 +1849,7 @@ mod tests {
         assert_eq!(filtered(&addr, "b@h").await, vec![ab, ba]);
         assert_eq!(filtered(&addr, "y@h").await, vec![xy]);
 
-        let all = client::fetch_log(&endpoint(&addr, "reader@h"), None, false).await.unwrap();
+        let all = client::fetch_log(&endpoint(&addr, "reader@h"), None).await.unwrap();
         assert_eq!(all.len(), 4);
         handle.abort();
     }
@@ -1923,13 +1857,12 @@ mod tests {
     #[tokio::test]
     async fn log_includes_acked_and_unread_messages() {
         let (addr, _dir, handle) = spawn().await;
-        let first =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one"), false).await.unwrap();
+        let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
         let second =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "two"), false).await.unwrap();
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "two")).await.unwrap();
         client::ack(&endpoint(&addr, "b@h"), &[first]).await.unwrap();
 
-        let history = client::fetch_log(&endpoint(&addr, "a@h"), None, false).await.unwrap();
+        let history = client::fetch_log(&endpoint(&addr, "a@h"), None).await.unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].id, first);
         assert!(history[0].acked_at.is_some_and(|ts| ts > 0), "acked message carries acked_at");
@@ -1941,10 +1874,9 @@ mod tests {
     #[tokio::test]
     async fn log_does_not_ack() {
         let (addr, _dir, handle) = spawn().await;
-        let id =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
 
-        let history = client::fetch_log(&endpoint(&addr, "a@h"), None, false).await.unwrap();
+        let history = client::fetch_log(&endpoint(&addr, "a@h"), None).await.unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].id, id);
 
@@ -1959,13 +1891,9 @@ mod tests {
         let (addr, _dir, handle) = spawn().await;
         let mut expected = Vec::new();
         for i in 0..1200 {
-            let id = client::publish(
-                &endpoint(&addr, "a@h"),
-                outgoing("b@h", &format!("msg {i}")),
-                false,
-            )
-            .await
-            .unwrap();
+            let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", &format!("msg {i}")))
+                .await
+                .unwrap();
             expected.push(id);
         }
 
@@ -1980,7 +1908,7 @@ mod tests {
         }
         drop(raw);
 
-        let history = client::fetch_log(&endpoint(&addr, "a@h"), None, false).await.unwrap();
+        let history = client::fetch_log(&endpoint(&addr, "a@h"), None).await.unwrap();
         let ids: Vec<u64> = history.iter().map(|message| message.id).collect();
         assert_eq!(ids, expected, "all 1200 messages return once, in order");
         handle.abort();
@@ -1990,14 +1918,12 @@ mod tests {
     async fn log_survives_broker_restart() {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
-        let first =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one"), false).await.unwrap();
-        let second =
-            client::reply(&endpoint(&addr, "b@h"), first, "two", None, false).await.unwrap();
+        let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
+        let second = client::reply(&endpoint(&addr, "b@h"), first, "two", None).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
-        let history = client::fetch_log(&endpoint(&addr, "a@h"), None, false).await.unwrap();
+        let history = client::fetch_log(&endpoint(&addr, "a@h"), None).await.unwrap();
         let ids: Vec<u64> = history.iter().map(|message| message.id).collect();
         assert_eq!(ids, vec![first, second]);
         assert_eq!(history[0].body, "one");
@@ -2054,10 +1980,9 @@ mod tests {
     #[tokio::test]
     async fn watch_delivers_unread_then_live_messages_in_order() {
         let (addr, _dir, handle) = spawn().await;
-        let first =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one"), false).await.unwrap();
+        let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
         let second =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "two"), false).await.unwrap();
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "two")).await.unwrap();
 
         let mut first_watcher = raw_connect(&addr).await;
         raw_watch(&mut first_watcher, "b@h").await;
@@ -2075,9 +2000,8 @@ mod tests {
         assert_eq!(again_first.id, first);
         assert_eq!(again_second.id, second);
 
-        let third = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "three"), false)
-            .await
-            .unwrap();
+        let third =
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "three")).await.unwrap();
         let live_first = read_watched_message(&mut first_watcher).await;
         let live_second = read_watched_message(&mut second_watcher).await;
         assert_eq!(live_first.id, third);
@@ -2243,8 +2167,7 @@ mod tests {
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
-        let id =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
         let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
         assert_eq!(value["id"].as_u64(), Some(id));
@@ -2263,8 +2186,7 @@ mod tests {
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
-        let first =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one"), false).await.unwrap();
+        let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
         let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
         assert_eq!(value["id"].as_u64(), Some(first));
@@ -2274,7 +2196,7 @@ mod tests {
         let mut server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let second =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "two"), false).await.unwrap();
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "two")).await.unwrap();
         let lines = wait_for_lines(&out, 2).await;
         let value: serde_json::Value = serde_json::from_str(&lines[1]).expect("JSON line");
         assert_eq!(value["id"].as_u64(), Some(second));
@@ -2294,13 +2216,11 @@ mod tests {
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
-        let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "plain"), false)
-            .await
-            .unwrap();
+        let first =
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "plain")).await.unwrap();
         let second = client::publish(
             &endpoint(&addr, "a@h"),
             client::Outgoing { reply_to: Some(first), ..outgoing("b@h", "answer") },
-            false,
         )
         .await
         .unwrap();
@@ -2394,7 +2314,7 @@ mod tests {
         let question = wait_for_question(&addr, "c@h").await;
         assert_eq!(question.from, "w@h");
         assert_eq!(question.body, "go?");
-        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None, false).await.unwrap();
+        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
@@ -2442,7 +2362,7 @@ mod tests {
         let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
 
         let question = wait_for_question(&addr, "c@h").await;
-        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None, false).await.unwrap();
+        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None).await.unwrap();
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
 
@@ -2466,7 +2386,7 @@ mod tests {
         assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
         let question = wait_for_question(&addr, "c@h").await;
         let reply_id =
-            client::reply(&endpoint(&addr, "c@h"), question.id, "late", None, false).await.unwrap();
+            client::reply(&endpoint(&addr, "c@h"), question.id, "late", None).await.unwrap();
 
         let pending = client::fetch_inbox(&endpoint(&addr, "w@h")).await.unwrap();
         assert_eq!(pending.len(), 1, "the late reply stays unread: {pending:?}");
@@ -2488,15 +2408,14 @@ mod tests {
         let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
 
         let question = wait_for_question(&addr, "c@h").await;
-        let noise = client::publish(&endpoint(&addr, "x@h"), outgoing("w@h", "noise"), false)
-            .await
-            .unwrap();
+        let noise =
+            client::publish(&endpoint(&addr, "x@h"), outgoing("w@h", "noise")).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert!(
             asker.child.try_wait().expect("poll ask child").is_none(),
             "noise does not end the wait"
         );
-        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None, false).await.unwrap();
+        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
@@ -2526,7 +2445,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         let mut server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None, false).await.unwrap();
+        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 30).await;
         assert_eq!(status.code(), Some(0), "ask exits zero after a restart");
@@ -2575,8 +2494,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        let first =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one"), false).await.unwrap();
+        let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
 
         let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
         assert!(out.status.success(), "send exits zero: {out:?}");
@@ -2598,7 +2516,7 @@ mod tests {
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let original =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
         let id_arg = original.to_string();
 
         let out = run_chattrs(&bin, "reply", &addr, "b@h", &[&id_arg, "yo"]);
@@ -2624,7 +2542,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
 
         let out = run_chattrs(&bin, "agents", &addr, "b@h", &[]);
         assert!(out.status.success(), "agents exits zero: {out:?}");
@@ -2650,13 +2568,13 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        client::publish(&endpoint(&addr, "x@h"), outgoing("w@h", "noise"), false).await.unwrap();
+        client::publish(&endpoint(&addr, "x@h"), outgoing("w@h", "noise")).await.unwrap();
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
 
         let question = wait_for_question(&addr, "c@h").await;
-        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None, false).await.unwrap();
+        client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
@@ -2679,7 +2597,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one"), false).await.unwrap();
+        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
 
         let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
         assert!(out.status.success(), "send exits zero: {out:?}");
@@ -2703,7 +2621,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "old"), false).await.unwrap();
+        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "old")).await.unwrap();
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
@@ -2712,7 +2630,7 @@ mod tests {
         assert_eq!(value["type"].as_str(), Some("message"));
         assert_eq!(value["body"].as_str(), Some("old"));
 
-        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "new"), false).await.unwrap();
+        client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "new")).await.unwrap();
         let lines = wait_for_lines(&out, 2).await;
         let mut bodies = Vec::new();
         for line in &lines {
@@ -2731,8 +2649,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        let first =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one"), false).await.unwrap();
+        let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
 
         let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "--json", "two"]);
         assert!(out.status.success(), "send exits zero: {out:?}");
@@ -2758,8 +2675,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        let first =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
 
         let out = run_chattrs(&bin, "inbox", &addr, "b@h", &["--json"]);
         assert!(out.status.success(), "inbox exits zero: {out:?}");
@@ -2782,8 +2698,7 @@ mod tests {
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
-        let id =
-            client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi"), false).await.unwrap();
+        let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
         assert_eq!(lines.len(), 1, "watch prints one line per message: {lines:?}");
         let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");

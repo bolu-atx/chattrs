@@ -31,13 +31,14 @@ CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to
 
 | File | Owns |
 | ---- | ---- |
-| `src/main.rs` | Thin entry: parse `cli`, dispatch to `server`/`client` |
+| `src/main.rs` | Thin entry: parse `cli`, dispatch to one small function per command, map the result to an exit code |
 | `src/cli.rs` | Clap `Args` + subcommand structs, connection flags |
 | `src/model.rs` | Wire types (`Inbound`, `Outbound`), limits, address validation, serde shapes |
+| `src/output.rs` | Every line the CLI writes to stdout: text rendering, JSON lines, timestamps, the stdout writer |
 | `src/protocol.rs` | Line-JSON framing: `encode`/`decode` |
 | `src/store.rs` | SQLite storage: one `Connection` in `Arc<Mutex<_>>`, blocking calls |
 | `src/server.rs` | The broker: `hello`, `send`/`reply`, `inbox`/`ack`, `watch` fan-out, `wait`, `agents`, `log` |
-| `src/client.rs` | One connection per command; `watch` holds one open and streams, `ask` holds a `wait` open, `log` pages history |
+| `src/client.rs` | One connection per command, returns data and prints nothing; `watch` streams through a `Watcher`, `ask` holds a `wait` open, `log` pages history |
 | `src/skill.rs` | Embedded agent skill text printed by `chattrs skill` |
 | `skills/chattrs/SKILL.md` | Agent skill: `send`, `ask`, `reply`, no polling |
 
