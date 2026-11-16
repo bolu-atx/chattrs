@@ -37,9 +37,10 @@ async fn run(args: Args) -> Result<(), String> {
             server::serve(&c.listen, &db, c.token.clone()).await
         }
         Command::Send(c) => {
+            let address = c.client.resolve_address()?;
             let id = client::send(
                 &c.client.server,
-                &c.client.address,
+                &address,
                 c.client.token.as_deref(),
                 &c.to,
                 &c.body(),
@@ -55,9 +56,10 @@ async fn run(args: Args) -> Result<(), String> {
             Ok(())
         }
         Command::Reply(c) => {
+            let address = c.client.resolve_address()?;
             let id = client::reply(
                 &c.client.server,
-                &c.client.address,
+                &address,
                 c.client.token.as_deref(),
                 c.id,
                 &c.body(),
@@ -67,12 +69,13 @@ async fn run(args: Args) -> Result<(), String> {
             Ok(())
         }
         Command::Watch(c) => {
-            client::watch(&c.client.server, &c.client.address, c.client.token.as_deref()).await
+            let address = c.client.resolve_address()?;
+            client::watch(&c.client.server, &address, c.client.token.as_deref()).await
         }
         Command::Inbox(c) => {
+            let address = c.client.resolve_address()?;
             let messages =
-                client::fetch_inbox(&c.client.server, &c.client.address, c.client.token.as_deref())
-                    .await?;
+                client::fetch_inbox(&c.client.server, &address, c.client.token.as_deref()).await?;
             if messages.is_empty() {
                 return Ok(());
             }
@@ -88,8 +91,22 @@ async fn run(args: Args) -> Result<(), String> {
             use std::io::Write;
             std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
             let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
-            client::ack(&c.client.server, &c.client.address, c.client.token.as_deref(), &ids)
-                .await?;
+            client::ack(&c.client.server, &address, c.client.token.as_deref(), &ids).await?;
+            Ok(())
+        }
+        Command::Agents(c) => {
+            let address = c.client.resolve_address()?;
+            let agents =
+                client::fetch_agents(&c.client.server, &address, c.client.token.as_deref()).await?;
+            for agent in &agents {
+                if c.json {
+                    let mut value = serde_json::to_value(agent).map_err(|e| e.to_string())?;
+                    value["type"] = serde_json::Value::String("agent".to_string());
+                    println!("{value}");
+                } else {
+                    println!("{}  {}", agent.address, model::format_ts(agent.last_seen));
+                }
+            }
             Ok(())
         }
     }

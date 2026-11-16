@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use crate::model::Message;
+use crate::model::{Agent, Message};
 
 /// SQLite store for messages, safe to share across broker tasks.
 #[derive(Debug, Clone)]
@@ -66,6 +66,23 @@ impl Store {
             .map_err(|e| format!("db task failed: {e}"))?
     }
 
+    /// Record that `address` connected now on the broker clock, creating
+    /// its row when this is its first `hello`.
+    pub async fn touch_agent(&self, address: String) -> Result<(), String> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || touch_agent_blocking(&conn, &address))
+            .await
+            .map_err(|e| format!("db task failed: {e}"))?
+    }
+
+    /// List every address that ever said `hello`, sorted by address.
+    pub async fn agents(&self) -> Result<Vec<Agent>, String> {
+        let conn = Arc::clone(&self.conn);
+        tokio::task::spawn_blocking(move || agents_blocking(&conn))
+            .await
+            .map_err(|e| format!("db task failed: {e}"))?
+    }
+
     /// Default database path: `$XDG_DATA_HOME/chattrs/chattrs.db`, else
     /// `~/.local/share/chattrs/chattrs.db`.
     pub fn default_path() -> PathBuf {
@@ -101,7 +118,11 @@ fn open_blocking(path: &Path) -> Result<Store, String> {
            acked_at  INTEGER
          );
          CREATE INDEX IF NOT EXISTS messages_unread
-           ON messages(recipient, id) WHERE acked_at IS NULL;",
+           ON messages(recipient, id) WHERE acked_at IS NULL;
+         CREATE TABLE IF NOT EXISTS agents (
+           address   TEXT PRIMARY KEY,
+           last_seen INTEGER NOT NULL
+         );",
     )
     .map_err(|e| e.to_string())?;
     Ok(Store { conn: Arc::new(Mutex::new(conn)) })
@@ -203,6 +224,36 @@ fn ack_blocking(
         }
     }
     Ok(changed)
+}
+
+fn touch_agent_blocking(
+    conn: &Arc<Mutex<Connection>>,
+    address: &str,
+) -> Result<(), String> {
+    let conn = lock(conn)?;
+    conn.execute(
+        "INSERT INTO agents (address, last_seen) VALUES (?1, ?2)
+         ON CONFLICT(address) DO UPDATE SET last_seen = excluded.last_seen",
+        rusqlite::params![address, now_ms() as i64],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+fn agents_blocking(conn: &Arc<Mutex<Connection>>) -> Result<Vec<Agent>, String> {
+    let conn = lock(conn)?;
+    let mut stmt = conn
+        .prepare("SELECT address, last_seen FROM agents ORDER BY address")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(Agent {
+                address: row.get(0)?,
+                last_seen: row.get::<_, i64>(1)? as u64,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 fn now_ms() -> u64 {

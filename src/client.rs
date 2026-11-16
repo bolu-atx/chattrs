@@ -4,7 +4,7 @@
 //! frame, and reads the response. `watch` is the one exception: it holds the
 //! connection open and streams `message` frames, printing each as JSON.
 
-use crate::model::{self, Inbound, Message, Outbound};
+use crate::model::{self, Agent, Inbound, Message, Outbound};
 use crate::protocol;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -109,6 +109,21 @@ pub async fn fetch_inbox(
         Outbound::Inbox { messages } => Ok(messages),
         Outbound::Error { code, message } => Err(format!("{code}: {message}")),
         _ => Err("server sent an unexpected frame instead of inbox".to_string()),
+    }
+}
+
+/// List every address that ever said `hello`, sorted by address.
+pub async fn fetch_agents(
+    server: &str,
+    address: &str,
+    token: Option<&str>,
+) -> Result<Vec<Agent>, String> {
+    let mut conn = hello(server, address, token).await?;
+    send_frame(&mut conn, &Inbound::Agents).await?;
+    match recv_frame(&mut conn).await? {
+        Outbound::Agents { agents } => Ok(agents),
+        Outbound::Error { code, message } => Err(format!("{code}: {message}")),
+        _ => Err("server sent an unexpected frame instead of agents".to_string()),
     }
 }
 

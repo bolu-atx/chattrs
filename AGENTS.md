@@ -30,11 +30,11 @@ CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to
 | File | Owns |
 | ---- | ---- |
 | `src/main.rs` | Thin entry: parse `cli`, dispatch to `server`/`client` |
-| `src/cli.rs` | Clap `Args` + subcommand structs, `--server`/`--address`/`--token` flags |
+| `src/cli.rs` | Clap `Args` + subcommand structs, connection flags |
 | `src/model.rs` | Wire types (`Inbound`, `Outbound`), limits, address validation, serde shapes |
 | `src/protocol.rs` | Line-JSON framing: `encode`/`decode` |
 | `src/store.rs` | SQLite storage: one `Connection` in `Arc<Mutex<_>>`, blocking calls |
-| `src/server.rs` | The broker: `hello`, `send`/`reply`, `inbox`/`ack`, `watch` fan-out |
+| `src/server.rs` | The broker: `hello`, `send`/`reply`, `inbox`/`ack`, `watch` fan-out, `agents` |
 | `src/client.rs` | One connection per command; `watch` holds one open and streams |
 
 Key patterns:

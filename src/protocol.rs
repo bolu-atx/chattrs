@@ -43,6 +43,7 @@ mod tests {
             Inbound::Inbox,
             Inbound::Ack { ids: vec![12, 13] },
             Inbound::Watch,
+            Inbound::Agents,
         ];
         for frame in frames {
             let line = encode(&frame).unwrap();
@@ -66,6 +67,7 @@ mod tests {
             Outbound::Sent { id: 12 },
             Outbound::Inbox { messages: vec![message.clone()] },
             Outbound::Message(message),
+            Outbound::Agents { agents: vec![] },
             Outbound::Acked { ids: vec![12, 13] },
             Outbound::Error { code: "empty_body".into(), message: "body is empty".into() },
         ];
@@ -102,6 +104,8 @@ mod tests {
             serde_json::to_value(Inbound::Inbox).unwrap(),
             serde_json::to_value(Inbound::Ack { ids: vec![1] }).unwrap(),
             serde_json::to_value(Outbound::Inbox { messages: vec![] }).unwrap(),
+            serde_json::to_value(Outbound::Agents { agents: vec![] }).unwrap(),
+            serde_json::to_value(Inbound::Agents).unwrap(),
             serde_json::to_value(Outbound::Acked { ids: vec![1] }).unwrap(),
             serde_json::to_value(Outbound::error("bad_frame", "nope")).unwrap(),
         ];

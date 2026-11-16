@@ -47,6 +47,41 @@ pub struct Message {
     pub reply_to: Option<u64>,
 }
 
+/// One known agent: an address that completed a `hello`, and when the
+/// broker last saw it, in ms since the epoch on the broker clock.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Agent {
+    pub address: String,
+    pub last_seen: u64,
+}
+
+/// Render epoch ms as UTC `YYYY-MM-DDTHH:MM:SSZ`, to the second.
+pub fn format_ts(ts_ms: u64) -> String {
+    let secs = ts_ms / 1000;
+    let (year, month, day) = civil_from_days((secs / 86400) as i64);
+    let rest = (secs % 86400) as i64;
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rest / 3600,
+        (rest % 3600) / 60,
+        rest % 60
+    )
+}
+
+/// Split days since 1970-01-01 into year, month, and day.
+fn civil_from_days(days: i64) -> (i64, i64, i64) {
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// Render one message as a single text line: `[12] codex@box1: body`,
 /// or `[12] codex@box1 (re 7): body` for a reply.
 pub fn render_message(message: &Message) -> String {
@@ -80,6 +115,8 @@ pub enum Inbound {
     },
     /// Ask for every unread message addressed to the `hello` address.
     Inbox,
+    /// Ask for every address that ever said `hello`, sorted by address.
+    Agents,
     /// Stream every unread message, then each new one, as `message` frames.
     Watch,
     /// Mark messages as read. Only unread messages owned by the `hello`
@@ -96,6 +133,8 @@ pub enum Outbound {
     Sent { id: u64 },
     /// Every unread message for the `hello` address, in id order.
     Inbox { messages: Vec<Message> },
+    /// Every address that ever said `hello`, sorted by address.
+    Agents { agents: Vec<Agent> },
     /// One streamed message for a `watch` connection.
     Message(Message),
     /// The ids from `ack` that actually changed to read.
@@ -119,6 +158,13 @@ mod tests {
         for address in ["a@h", "codex@box1", "opus.mac@tail-scale_01", "A.9-x_y@Z.8-w_v"] {
             assert!(is_valid_address(address), "{address}");
         }
+    }
+
+    #[test]
+    fn format_ts_renders_utc_to_the_second() {
+        assert_eq!(format_ts(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_ts(1763164800000), "2025-11-15T00:00:00Z");
+        assert_eq!(format_ts(1763200000123), "2025-11-15T09:46:40Z");
     }
 
     #[test]
