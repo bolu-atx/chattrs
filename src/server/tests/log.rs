@@ -201,7 +201,7 @@ async fn send_prints_unread_messages_before_its_id() {
     wait_for_server(&addr).await;
     let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
 
-    let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
+    let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"], &db);
     assert!(out.status.success(), "send exits zero: {out:?}");
     let lines = stdout_lines(&out);
     assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
@@ -223,7 +223,7 @@ async fn reply_prints_unread_messages_first() {
     let original = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
     let id_arg = original.to_string();
 
-    let out = run_chattrs(&bin, "reply", &addr, "b@h", &[&id_arg, "yo"]);
+    let out = run_chattrs(&bin, "reply", &addr, "b@h", &[&id_arg, "yo"], &db);
     assert!(out.status.success(), "reply exits zero: {out:?}");
     let lines = stdout_lines(&out);
     assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
@@ -248,7 +248,7 @@ async fn agents_prints_unread_messages_first() {
     wait_for_server(&addr).await;
     client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
 
-    let out = run_chattrs(&bin, "agents", &addr, "b@h", &[]);
+    let out = run_chattrs(&bin, "agents", &addr, "b@h", &[], &db);
     assert!(out.status.success(), "agents exits zero: {out:?}");
     let lines = stdout_lines(&out);
     assert!(lines.len() >= 5, "wrapped preamble plus agent lines: {lines:?}");
@@ -274,14 +274,14 @@ async fn preamble_acks_what_it_prints() {
     wait_for_server(&addr).await;
     client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
 
-    let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
+    let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"], &db);
     assert!(out.status.success(), "send exits zero: {out:?}");
     let lines = stdout_lines(&out);
     assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
     let preamble = lines[..4].join("\n");
     assert!(preamble.contains("one"), "preamble is the unread message: {preamble}");
 
-    let again = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "three"]);
+    let again = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "three"], &db);
     assert!(again.status.success(), "send exits zero: {again:?}");
     let lines = stdout_lines(&again);
     assert_eq!(lines.len(), 1, "a second command prints only an id: {lines:?}");
@@ -298,7 +298,7 @@ async fn json_preamble_lines_have_type_message() {
     wait_for_server(&addr).await;
     let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
 
-    let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "--json", "two"]);
+    let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "--json", "two"], &db);
     assert!(out.status.success(), "send exits zero: {out:?}");
     let lines = stdout_lines(&out);
     assert_eq!(lines.len(), 2, "preamble plus the sent line: {lines:?}");
@@ -323,7 +323,7 @@ async fn json_message_lines_carry_untrusted_true() {
     wait_for_server(&addr).await;
     let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
 
-    let out = run_chattrs(&bin, "inbox", &addr, "b@h", &["--json"]);
+    let out = run_chattrs(&bin, "inbox", &addr, "b@h", &["--json"], &db);
     assert!(out.status.success(), "inbox exits zero: {out:?}");
     let lines = stdout_lines(&out);
     assert_eq!(lines.len(), 1, "one message line: {lines:?}");

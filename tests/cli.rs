@@ -244,20 +244,48 @@ fn log_json_lines_have_type_log() {
 
 #[test]
 fn errors_go_to_stderr_with_exit_one() {
-    // No broker listens on these ports: each was free a moment ago. Retry
-    // a few times in case another test's broker recycled one of them.
-    for _ in 0..5 {
-        let closed = format!("127.0.0.1:{}", free_port());
-        let output = run_client(&closed, "a@h", "inbox", &[]);
-        if output.status.code() != Some(1) {
-            continue;
-        }
-        assert!(output.stdout.is_empty(), "stdout is empty");
-        let stderr = stderr_text(&output);
-        assert!(stderr.starts_with("chattrs: "), "stderr names chattrs: {stderr:?}");
-        return;
-    }
-    panic!("every closed port accepted a connection");
+    // A loopback server with no broker starts one on demand (CLI-11):
+    // the command then runs against it. The DB is a temp path, so the
+    // real default database is never touched, and the broker this
+    // starts is stopped before the test ends.
+    let dir = tempfile::TempDir::new().expect("make a temp dir");
+    let db = dir.path().join("c.db");
+    let closed = format!("127.0.0.1:{}", free_port());
+    let mut command = Command::new(binary());
+    command.arg("inbox").arg("--server").arg(&closed);
+    command.env("CHATTRS_ADDRESS", "a@h");
+    command.env("CHATTRS_DB", &db);
+    command.env_remove("CHATTRS_TOKEN").env_remove("CHATTRS_AGENT").env_remove("CHATTRS_SERVER");
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = command.output().expect("run the client");
+    assert_eq!(output.status.code(), Some(0), "inbox auto-starts a broker: {output:?}");
+    assert!(output.stdout.is_empty(), "stdout is empty");
+    let stderr = stderr_text(&output);
+    assert!(stderr.contains("started a broker"), "stderr names the start: {stderr:?}");
+
+    let mut stop = Command::new(binary());
+    stop.arg("stop").env("CHATTRS_DB", &db);
+    stop.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let stopped = stop.output().expect("stop the broker");
+    assert_eq!(stopped.status.code(), Some(0), "stop exits zero: {stopped:?}");
+    assert!(stopped.stdout.is_empty(), "stop prints nothing");
+    assert!(TcpStream::connect(&closed).is_err(), "the port no longer answers after stop");
+
+    // A remote server is never auto-started: the failure is an error
+    // on stderr with exit 1, and it starts nothing.
+    let remote = format!("192.0.2.1:{}", free_port());
+    let mut command = Command::new(binary());
+    command.arg("inbox").arg("--server").arg(&remote);
+    command.env("CHATTRS_ADDRESS", "a@h");
+    command.env("CHATTRS_DB", &db);
+    command.env_remove("CHATTRS_TOKEN").env_remove("CHATTRS_AGENT").env_remove("CHATTRS_SERVER");
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = command.output().expect("run the client");
+    assert_eq!(output.status.code(), Some(1), "remote failure exits one: {output:?}");
+    assert!(output.stdout.is_empty(), "stdout is empty");
+    let stderr = stderr_text(&output);
+    assert!(stderr.starts_with("chattrs: "), "stderr names chattrs: {stderr:?}");
+    assert!(!dir.path().join("chattrs.pid").exists(), "no pidfile for a remote failure");
 }
 
 /// Store `count` messages over one raw TCP connection speaking the

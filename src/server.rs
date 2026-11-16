@@ -23,6 +23,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc};
 
+use crate::autostart;
 use crate::model::{self, Inbound, Message, Outbound};
 use crate::protocol;
 use crate::store::Store;
@@ -510,15 +511,24 @@ pub fn check_listen(listen: &str, token: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// Bind and serve until the process exits.
+/// Bind and serve until the process exits. A broker started on demand
+/// records its pid next to the DB and removes it when it exits.
 pub async fn serve(listen: &str, db: &Path, token: Option<String>) -> Result<(), String> {
     check_listen(listen, token.as_deref())?;
     let listener = TcpListener::bind(listen).await.map_err(|e| format!("bind {listen}: {e}"))?;
     let bound = listener.local_addr().map_err(|e| e.to_string())?;
     let store = Store::open(db.to_path_buf()).await?;
     eprintln!("chattrs: serving on {bound}");
+    let owned = autostart::is_autostart_child();
+    if owned {
+        autostart::write_pidfile(db)?;
+    }
     let broker = Arc::new(Broker::new(store, token));
-    run_listener(listener, broker).await
+    let result = run_listener(listener, broker).await;
+    if owned {
+        autostart::remove_pidfile(db);
+    }
+    result
 }
 
 async fn run_listener(listener: TcpListener, broker: Arc<Broker>) -> Result<(), String> {

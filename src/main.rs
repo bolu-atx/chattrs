@@ -1,9 +1,10 @@
 //! chattrs — distributed messaging for cross-agent coordination.
 //!
-//! A thin entry point: parse `cli`, then dispatch to `server` (the broker) or
-//! `client` (`send`, `reply`, `inbox`, `watch`, `ask`, `skill`). `model` owns
-//! the wire types, `protocol` the line-JSON framing, `store` the SQLite
-//! storage, and `output` every line printed to stdout.
+//! A thin entry point: parse `cli`, then dispatch to `server` (the broker),
+//! `client` (`send`, `reply`, `inbox`, `watch`, `ask`, `skill`), or
+//! `autostart` (`stop`). `model` owns the wire types, `protocol` the
+//! line-JSON framing, `store` the SQLite storage, and `output` every line
+//! printed to stdout.
 //!
 //! Quick start:
 //! ```text
@@ -11,6 +12,7 @@
 //! CHATTRS_ADDRESS=a@h chattrs send --to b@h "anyone there?"
 //! ```
 
+mod autostart;
 mod cli;
 mod client;
 mod model;
@@ -105,6 +107,7 @@ async fn deliver_unread(client: &mut client::Client, json: bool) -> Result<(), R
 async fn run(args: Args) -> Result<(), RunError> {
     match args.command {
         Command::Serve(c) => cmd_serve(c).await,
+        Command::Stop => cmd_stop(),
         Command::Send(c) => cmd_send(c).await,
         Command::Reply(c) => cmd_reply(c).await,
         Command::Watch(c) => cmd_watch(c).await,
@@ -114,6 +117,11 @@ async fn run(args: Args) -> Result<(), RunError> {
         Command::Log(c) => cmd_log(c).await,
         Command::Agents(c) => cmd_agents(c).await,
     }
+}
+
+fn cmd_stop() -> Result<(), RunError> {
+    let db = autostart::client_db_path();
+    autostart::stop_auto_started(&db).map_err(RunError::Message)
 }
 
 async fn cmd_serve(c: cli::ServeArgs) -> Result<(), RunError> {

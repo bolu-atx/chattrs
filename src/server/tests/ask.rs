@@ -14,13 +14,20 @@ async fn ask_topic_cli_run_shows_topic_in_reply() {
     wait_for_server(&addr).await;
     let out = dir.path().join("ask.out");
     let err = dir.path().join("ask.err");
-    let mut asker =
-        start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", Some("release-26"));
+    let mut asker = start_ask(
+        &bin,
+        &addr,
+        "w@h",
+        "15",
+        (&out, &err),
+        client::Outgoing { topic: Some("release-26".into()), ..outgoing("c@h", "go?") },
+        &db,
+    );
 
     let question = wait_for_question(&addr, "c@h").await;
     assert_eq!(question.topic.as_deref(), Some("release-26"));
     let id_arg = question.id.to_string();
-    let reply_out = run_chattrs(&bin, "reply", &addr, "c@h", &[&id_arg, "yes"]);
+    let reply_out = run_chattrs(&bin, "reply", &addr, "c@h", &[&id_arg, "yes"], &db);
     assert!(reply_out.status.success(), "reply exits zero: {reply_out:?}");
 
     let status = wait_for_exit(&mut asker.child, 15).await;
@@ -40,7 +47,7 @@ async fn ask_returns_reply_and_exits_zero() {
     wait_for_server(&addr).await;
     let out = dir.path().join("ask.out");
     let err = dir.path().join("ask.err");
-    let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+    let mut asker = start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
     let question = wait_for_question(&addr, "c@h").await;
     assert_eq!(question.from, "w@h");
@@ -68,7 +75,7 @@ async fn ask_times_out_with_exit_code_two() {
     wait_for_server(&addr).await;
     let out = dir.path().join("ask.out");
     let err = dir.path().join("ask.err");
-    let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?", None);
+    let mut asker = start_ask(&bin, &addr, "w@h", "1", (&out, &err), outgoing("c@h", "go?"), &db);
 
     let status = wait_for_exit(&mut asker.child, 10).await;
     assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
@@ -90,7 +97,7 @@ async fn ask_acks_its_reply() {
     wait_for_server(&addr).await;
     let out = dir.path().join("ask.out");
     let err = dir.path().join("ask.err");
-    let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+    let mut asker = start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
     let question = wait_for_question(&addr, "c@h").await;
     client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None).await.unwrap();
@@ -111,7 +118,7 @@ async fn late_reply_stays_unread_after_timeout() {
     wait_for_server(&addr).await;
     let out = dir.path().join("ask.out");
     let err = dir.path().join("ask.err");
-    let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?", None);
+    let mut asker = start_ask(&bin, &addr, "w@h", "1", (&out, &err), outgoing("c@h", "go?"), &db);
 
     let status = wait_for_exit(&mut asker.child, 10).await;
     assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
@@ -135,7 +142,7 @@ async fn ask_ignores_messages_that_are_not_the_reply() {
     wait_for_server(&addr).await;
     let out = dir.path().join("ask.out");
     let err = dir.path().join("ask.err");
-    let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+    let mut asker = start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
     let question = wait_for_question(&addr, "c@h").await;
     let noise = client::publish(&endpoint(&addr, "x@h"), outgoing("w@h", "noise")).await.unwrap();
@@ -167,7 +174,7 @@ async fn ask_survives_broker_restart() {
     wait_for_server(&addr).await;
     let out = dir.path().join("ask.out");
     let err = dir.path().join("ask.err");
-    let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "30", (&out, &err), "go?", None);
+    let mut asker = start_ask(&bin, &addr, "w@h", "30", (&out, &err), outgoing("c@h", "go?"), &db);
 
     let question = wait_for_question(&addr, "c@h").await;
     server.stop();
@@ -200,7 +207,7 @@ async fn ask_prints_unread_before_sending_and_then_the_reply() {
     client::publish(&endpoint(&addr, "x@h"), outgoing("w@h", "noise")).await.unwrap();
     let out = dir.path().join("ask.out");
     let err = dir.path().join("ask.err");
-    let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+    let mut asker = start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
     let question = wait_for_question(&addr, "c@h").await;
     client::reply(&endpoint(&addr, "c@h"), question.id, "yes", None).await.unwrap();

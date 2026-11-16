@@ -46,7 +46,7 @@ async fn watch_acks_what_it_prints() {
     let _server = start_server(&bin, &addr, &db);
     wait_for_server(&addr).await;
     let out = dir.path().join("watch.out");
-    let _watcher = start_watch(&bin, &addr, "b@h", &out);
+    let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
     let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
     let lines = wait_for_lines(&out, 1).await;
@@ -65,7 +65,7 @@ async fn watch_reconnects_after_broker_restart() {
     let mut server = start_server(&bin, &addr, &db);
     wait_for_server(&addr).await;
     let out = dir.path().join("watch.out");
-    let _watcher = start_watch(&bin, &addr, "b@h", &out);
+    let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
     let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "one")).await.unwrap();
     let lines = wait_for_lines(&out, 1).await;
@@ -94,7 +94,7 @@ async fn watch_stdout_is_json_lines_only() {
     let _server = start_server(&bin, &addr, &db);
     wait_for_server(&addr).await;
     let out = dir.path().join("watch.out");
-    let _watcher = start_watch(&bin, &addr, "b@h", &out);
+    let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
     let first = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "plain")).await.unwrap();
     let second = client::publish(
@@ -133,7 +133,7 @@ async fn watch_has_no_preamble() {
     wait_for_server(&addr).await;
     client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "old")).await.unwrap();
     let out = dir.path().join("watch.out");
-    let _watcher = start_watch(&bin, &addr, "b@h", &out);
+    let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
     let lines = wait_for_lines(&out, 1).await;
     let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
@@ -160,7 +160,7 @@ async fn watch_lines_carry_untrusted_true() {
     let _server = start_server(&bin, &addr, &db);
     wait_for_server(&addr).await;
     let out = dir.path().join("watch.out");
-    let _watcher = start_watch(&bin, &addr, "b@h", &out);
+    let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
     let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
     let lines = wait_for_lines(&out, 1).await;
@@ -180,7 +180,7 @@ async fn watch_acks_on_its_own_connection() {
     let _server = start_server(&bin, &addr, &db);
     wait_for_server(&addr).await;
     let out = dir.path().join("watch.out");
-    let _watcher = start_watch(&bin, &addr, "b@h", &out);
+    let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
     let start = tokio::time::Instant::now();
     let before = loop {

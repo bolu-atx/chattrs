@@ -219,8 +219,9 @@ pub(crate) fn start_watch(
     addr: &str,
     who: &str,
     out: &std::path::Path,
+    db: &std::path::Path,
 ) -> ProcChild {
-    start_topic_watch(bin, addr, who, &[], out)
+    start_topic_watch(bin, addr, who, &[], out, db)
 }
 
 pub(crate) fn start_topic_watch(
@@ -229,6 +230,7 @@ pub(crate) fn start_topic_watch(
     who: &str,
     topics: &[&str],
     out: &std::path::Path,
+    db: &std::path::Path,
 ) -> ProcChild {
     let file = std::fs::File::create(out).expect("watch output file");
     let mut command = std::process::Command::new(bin);
@@ -236,15 +238,19 @@ pub(crate) fn start_topic_watch(
     for topic in topics {
         command.arg("--topic").arg(topic);
     }
-    let child =
-        command.stdout(file).stderr(std::process::Stdio::null()).spawn().expect("spawn watch");
+    let child = command
+        .env("CHATTRS_DB", db)
+        .stdout(file)
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn watch");
     ProcChild { child }
 }
 
 pub(crate) async fn wait_for_server(addr: &str) {
     let start = tokio::time::Instant::now();
     loop {
-        if client::fetch_inbox(&endpoint(addr, "probe@h")).await.is_ok() {
+        if TokioTcpStream::connect(addr).await.is_ok() {
             return;
         }
         assert!(
@@ -295,11 +301,11 @@ pub(crate) async fn wait_until_inbox_empty(addr: &str, who: &str) {
 pub(crate) fn start_ask(
     bin: &std::path::Path,
     addr: &str,
-    asker: (&str, &str),
+    from: &str,
     timeout_secs: &str,
     files: (&std::path::Path, &std::path::Path),
-    body: &str,
-    topic: Option<&str>,
+    question: client::Outgoing,
+    db: &std::path::Path,
 ) -> ProcChild {
     let out_file = std::fs::File::create(files.0).expect("ask output file");
     let err_file = std::fs::File::create(files.1).expect("ask error file");
@@ -309,15 +315,21 @@ pub(crate) fn start_ask(
         .arg("--server")
         .arg(addr)
         .arg("--address")
-        .arg(asker.0)
+        .arg(from)
         .arg("--to")
-        .arg(asker.1)
+        .arg(question.to.expect("ask needs a recipient"))
         .arg("--timeout")
         .arg(timeout_secs);
-    if let Some(topic) = topic {
+    if let Some(topic) = question.topic {
         command.arg("--topic").arg(topic);
     }
-    let child = command.arg(body).stdout(out_file).stderr(err_file).spawn().expect("spawn ask");
+    let child = command
+        .arg(question.body)
+        .env("CHATTRS_DB", db)
+        .stdout(out_file)
+        .stderr(err_file)
+        .spawn()
+        .expect("spawn ask");
     ProcChild { child }
 }
 
@@ -353,6 +365,7 @@ pub(crate) fn run_chattrs(
     addr: &str,
     who: &str,
     extra: &[&str],
+    db: &std::path::Path,
 ) -> std::process::Output {
     std::process::Command::new(bin)
         .arg(subcommand)
@@ -361,6 +374,7 @@ pub(crate) fn run_chattrs(
         .arg("--address")
         .arg(who)
         .args(extra)
+        .env("CHATTRS_DB", db)
         .output()
         .expect("run chattrs")
 }

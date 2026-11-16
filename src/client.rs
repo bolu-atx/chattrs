@@ -7,7 +7,9 @@
 //! its caller, which prints it and then acks it.
 
 use std::fmt;
+use std::io::ErrorKind;
 
+use crate::autostart;
 use crate::model::{self, Agent, Inbound, LoggedMessage, Message, Outbound};
 use crate::protocol;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -70,12 +72,66 @@ pub struct Client {
     writer: OwnedWriteHalf,
 }
 
+/// How long one TCP connect may take before it counts as failed.
+/// Dropped packets to an unreachable address would otherwise hang a
+/// one-shot command for the full OS TCP timeout.
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A failed connect: the message plus whether the port refused the
+/// connection, which is the only failure that starts a broker.
+struct ConnectError {
+    message: String,
+    refused: bool,
+}
+
+async fn connect_stream(server: &str) -> Result<TcpStream, ConnectError> {
+    match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(server)).await {
+        Ok(Ok(stream)) => Ok(stream),
+        Ok(Err(e)) => Err(ConnectError {
+            refused: e.kind() == ErrorKind::ConnectionRefused,
+            message: format!("connect {server}: {e}"),
+        }),
+        Err(_) => Err(ConnectError {
+            refused: false,
+            message: format!("connect {server}: timed out after {}s", CONNECT_TIMEOUT.as_secs()),
+        }),
+    }
+}
+
 impl Client {
-    /// Connect to `endpoint` and say `hello`.
+    /// Connect to `endpoint` and say `hello`. When the first connect
+    /// fails with connection refused on a loopback server, start a
+    /// broker on demand and retry once on a fresh connection. Any
+    /// other failure returns the original connect error.
     pub async fn connect(endpoint: &Endpoint) -> Result<Client, ClientError> {
-        let stream = TcpStream::connect(&endpoint.server)
-            .await
-            .map_err(|e| ClientError::Io(format!("connect {}: {e}", endpoint.server)))?;
+        Client::open(endpoint, true).await
+    }
+
+    /// Connect again after a drop. A reconnect never starts a broker:
+    /// only a command's first connect does (CLI-11). A broker that died
+    /// under a waiting `ask` or `watch` is not replaced behind the
+    /// operator's back, possibly on another database.
+    pub async fn reconnect(endpoint: &Endpoint) -> Result<Client, ClientError> {
+        Client::open(endpoint, false).await
+    }
+
+    async fn open(endpoint: &Endpoint, may_start: bool) -> Result<Client, ClientError> {
+        let stream = match connect_stream(&endpoint.server).await {
+            Ok(stream) => stream,
+            Err(error)
+                if may_start
+                    && error.refused
+                    && autostart::is_loopback_server(&endpoint.server) =>
+            {
+                autostart::ensure_started(&endpoint.server, endpoint.token.as_deref())
+                    .await
+                    .map_err(ClientError::Io)?;
+                connect_stream(&endpoint.server)
+                    .await
+                    .map_err(|error| ClientError::Io(error.message))?
+            }
+            Err(error) => return Err(ClientError::Io(error.message)),
+        };
         let (read_half, write_half) = stream.into_split();
         let mut client = Client { reader: BufReader::new(read_half), writer: write_half };
         let frame = client
@@ -311,7 +367,7 @@ pub async fn wait_for_reply(
     loop {
         let mut conn = match current.take() {
             Some(conn) => conn,
-            None => match Client::connect(endpoint).await {
+            None => match Client::reconnect(endpoint).await {
                 Ok(conn) => conn,
                 Err(error) => {
                     eprintln!("chattrs: ask cannot connect: {error}, retrying in {backoff_secs}s");
@@ -379,13 +435,16 @@ pub struct Watcher {
     topics: Vec<String>,
     client: Option<Client>,
     backoff_secs: u64,
+    /// True after the first successful connect. Later connects are
+    /// reconnects and never start a broker.
+    connected_once: bool,
 }
 
 impl Watcher {
     /// A stream for `endpoint` over `topics`; an empty list watches the
     /// own inbox.
     pub fn new(endpoint: Endpoint, topics: Vec<String>) -> Watcher {
-        Watcher { endpoint, topics, client: None, backoff_secs: 1 }
+        Watcher { endpoint, topics, client: None, backoff_secs: 1, connected_once: false }
     }
 
     /// Drop the current connection, so the next message reconnects and
@@ -406,7 +465,12 @@ impl Watcher {
     /// Connect and send the `watch` frame. An I/O failure is returned for
     /// the caller to retry; any other failure ends the stream.
     async fn connect(&mut self) -> Result<(), ClientError> {
-        let mut client = Client::connect(&self.endpoint).await?;
+        let mut client = if self.connected_once {
+            Client::reconnect(&self.endpoint).await?
+        } else {
+            Client::connect(&self.endpoint).await?
+        };
+        self.connected_once = true;
         client.send_frame(&Inbound::Watch { topics: self.topics.clone() }).await?;
         self.client = Some(client);
         self.backoff_secs = 1;

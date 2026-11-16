@@ -18,6 +18,8 @@ pub struct Args {
 pub enum Command {
     /// Run the message broker.
     Serve(ServeArgs),
+    /// Stop the auto-started broker named by the pidfile next to the DB.
+    Stop,
     /// Post a message to an address and print its id.
     Send(SendArgs),
     /// Answer the message with an id and print the new id.

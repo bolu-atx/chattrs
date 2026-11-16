@@ -3,6 +3,7 @@
 
 mod ask;
 mod auth;
+mod autostart;
 mod helpers;
 mod log;
 mod mailbox;

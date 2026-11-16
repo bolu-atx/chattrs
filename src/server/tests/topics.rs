@@ -91,8 +91,15 @@ async fn ask_reply_shows_the_asks_topic() {
     wait_for_server(&addr).await;
     let out = dir.path().join("ask.out");
     let err = dir.path().join("ask.err");
-    let mut asker =
-        start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", Some("release-26"));
+    let mut asker = start_ask(
+        &bin,
+        &addr,
+        "w@h",
+        "15",
+        (&out, &err),
+        client::Outgoing { topic: Some("release-26".into()), ..outgoing("c@h", "go?") },
+        &db,
+    );
 
     let question = wait_for_question(&addr, "c@h").await;
     assert_eq!(question.body, "go?");
@@ -334,7 +341,7 @@ async fn announcement_appears_in_no_inbox() {
         assert!(messages.is_empty(), "{who} has no announcement: {messages:?}");
     }
 
-    let out = run_chattrs(&bin, "send", &addr, "ops@h", &["--to", "w@h", "hi"]);
+    let out = run_chattrs(&bin, "send", &addr, "ops@h", &["--to", "w@h", "hi"], &db);
     assert!(out.status.success(), "send exits zero: {out:?}");
     let lines = stdout_lines(&out);
     assert_eq!(lines.len(), 1, "no preamble before the new id: {lines:?}");
@@ -446,7 +453,7 @@ async fn topic_watch_cli_prints_announcement_as_json() {
     let _server = start_server(&bin, &addr, &db);
     wait_for_server(&addr).await;
     let out = dir.path().join("topic-watch.out");
-    let _watcher = start_topic_watch(&bin, &addr, "ops@h", &["release-26"], &out);
+    let _watcher = start_topic_watch(&bin, &addr, "ops@h", &["release-26"], &out, &db);
 
     let id = client::publish(&endpoint(&addr, "w@h"), announce("release-26", "build 421 is red"))
         .await
