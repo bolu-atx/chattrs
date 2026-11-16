@@ -43,6 +43,7 @@ mod tests {
             Inbound::Inbox,
             Inbound::Ack { ids: vec![12, 13] },
             Inbound::Watch,
+            Inbound::Wait { reply_to: 12 },
             Inbound::Agents,
         ];
         for frame in frames {
@@ -94,6 +95,7 @@ mod tests {
             })
             .unwrap(),
             serde_json::to_value(Inbound::Watch).unwrap(),
+            serde_json::to_value(Inbound::Wait { reply_to: 12 }).unwrap(),
             serde_json::to_value(Outbound::Welcome {
                 server: "chattrs".into(),
                 v: 1,

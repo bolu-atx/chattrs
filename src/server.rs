@@ -1,11 +1,13 @@
-//! chattrs — the broker: hello, send, reply, inbox, ack, watch, and agents.
+//! chattrs — the broker: hello, send, reply, inbox, ack, watch, wait,
+//! and agents.
 //!
-//! One `Broker` owns a `Store` and the `watch` registry. Each connection runs
-//! its own task with a reader loop: the first frame must be `hello`, then the
-//! peer may `send`, `inbox`, `ack`, or `watch`. An error before `hello`
-//! closes the connection; after `hello` it does not. Every accepted send is
-//! committed to SQLite before the broker writes `sent`, and each send also
-//! reaches the live `watch` connections of its recipient.
+//! One `Broker` owns a `Store` and the `watch`/`wait` registries. Each
+//! connection runs its own task with a reader loop: the first frame must be
+//! `hello`, then the peer may `send`, `inbox`, `ack`, `watch`, or `wait`.
+//! An error before `hello` closes the connection; after `hello` it does
+//! not. Every accepted send is committed to SQLite before the broker writes
+//! `sent`, and each send also reaches the live `watch` connections and the
+//! matching `wait` connections of its recipient.
 
 use crate::model::{self, Inbound, Message, Outbound};
 use crate::protocol;
@@ -21,12 +23,25 @@ use tokio::sync::mpsc;
 pub struct Broker {
     store: Store,
     watchers: Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Message>>>>,
+    waiters: Mutex<HashMap<String, Vec<Waiter>>>,
     token: Option<String>,
+}
+
+/// One parked `wait`: the reply id it blocks on and the channel that
+/// wakes its connection when the reply arrives.
+struct Waiter {
+    reply_to: u64,
+    sender: mpsc::UnboundedSender<Message>,
 }
 
 impl Broker {
     pub fn new(store: Store, token: Option<String>) -> Broker {
-        Broker { store, watchers: Mutex::new(HashMap::new()), token }
+        Broker {
+            store,
+            watchers: Mutex::new(HashMap::new()),
+            waiters: Mutex::new(HashMap::new()),
+            token,
+        }
     }
 
     /// Compare a presented token against the expected one without
@@ -79,6 +94,48 @@ impl Broker {
         list.retain(|sender| !sender.is_closed());
         for sender in list.iter() {
             let _ = sender.send(message.clone());
+        }
+    }
+
+    /// Wake every parked `wait` on `recipient` whose `reply_to` matches
+    /// this message. One `wait` gets one message, so matching entries are
+    /// removed. A message wakes every waiter on its id, not just the first.
+    fn notify_waiters(&self, recipient: &str, message: &Message) {
+        let Some(wanted) = message.reply_to else {
+            return;
+        };
+        let Ok(mut waiters) = self.waiters.lock() else {
+            return;
+        };
+        let Some(list) = waiters.get_mut(recipient) else {
+            return;
+        };
+        for waiter in list.iter() {
+            if waiter.reply_to == wanted {
+                let _ = waiter.sender.send(message.clone());
+            }
+        }
+        list.retain(|waiter| waiter.reply_to != wanted);
+        if list.is_empty() {
+            waiters.remove(recipient);
+        }
+    }
+
+    /// Drop one parked `wait` for this address and id. Registration pushes
+    /// last, so the last match is the caller's own entry.
+    fn remove_one_waiter(&self, address: &str, reply_to: u64) {
+        let Ok(mut waiters) = self.waiters.lock() else {
+            return;
+        };
+        let remove_list = match waiters.get_mut(address) {
+            Some(list) => list,
+            None => return,
+        };
+        if let Some(pos) = remove_list.iter().rposition(|waiter| waiter.reply_to == reply_to) {
+            remove_list.remove(pos);
+        }
+        if remove_list.is_empty() {
+            waiters.remove(address);
         }
     }
 
@@ -171,6 +228,7 @@ impl Broker {
                     | Inbound::Inbox
                     | Inbound::Ack { .. }
                     | Inbound::Watch
+                    | Inbound::Wait { .. }
                     | Inbound::Agents => {
                         write_error(
                             &mut write_half,
@@ -325,7 +383,8 @@ impl Broker {
                         {
                             Ok(id) => {
                                 if let Ok(Some(message)) = self.store.get(id).await {
-                                    self.notify(&recipient, message);
+                                    self.notify(&recipient, message.clone());
+                                    self.notify_waiters(&recipient, &message);
                                 }
                                 write_frame(&mut write_half, &Outbound::Sent { id }).await;
                             }
@@ -366,6 +425,72 @@ impl Broker {
                             continue;
                         }
                     },
+                    Inbound::Wait { reply_to } => {
+                        match self.store.find_reply(from.clone(), reply_to).await {
+                            Ok(Some(message)) => {
+                                write_frame(&mut write_half, &Outbound::Message(message))
+                                    .await;
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                write_error(&mut write_half, Outbound::error("internal", e))
+                                    .await;
+                                continue;
+                            }
+                        }
+                        let (sender, mut live) = mpsc::unbounded_channel();
+                        if let Ok(mut waiters) = self.waiters.lock() {
+                            waiters.entry(from.clone()).or_default().push(Waiter {
+                                reply_to,
+                                sender,
+                            });
+                        }
+                        match self.store.find_reply(from.clone(), reply_to).await {
+                            Ok(Some(message)) => {
+                                self.remove_one_waiter(&from, reply_to);
+                                write_frame(&mut write_half, &Outbound::Message(message))
+                                    .await;
+                                continue;
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                self.remove_one_waiter(&from, reply_to);
+                                write_error(&mut write_half, Outbound::error("internal", e))
+                                    .await;
+                                continue;
+                            }
+                        }
+                        let mut delivered = false;
+                        loop {
+                            tokio::select! {
+                                result = reader.read_line(&mut line) => {
+                                    match result {
+                                        Ok(0) | Err(_) => break,
+                                        Ok(_) => {}
+                                    }
+                                    line.clear();
+                                }
+                                received = live.recv() => {
+                                    match received {
+                                        Some(message) => {
+                                            write_frame(
+                                                &mut write_half,
+                                                &Outbound::Message(message),
+                                            )
+                                            .await;
+                                            delivered = true;
+                                            break;
+                                        }
+                                        None => break,
+                                    }
+                                }
+                            }
+                        }
+                        if !delivered {
+                            self.remove_one_waiter(&from, reply_to);
+                        }
+                    }
                     Inbound::Watch => {
                         let (sender, mut live) = mpsc::unbounded_channel();
                         if let Ok(mut watchers) = self.watchers.lock() {
@@ -1028,15 +1153,13 @@ mod tests {
         static BUILD_ONCE: std::sync::Once = std::sync::Once::new();
         let path = test_bin_path();
         BUILD_ONCE.call_once(|| {
-            if !path.exists() {
-                let status = std::process::Command::new("cargo")
-                    .arg("build")
-                    .arg("--bin")
-                    .arg("chattrs")
-                    .status()
-                    .expect("run cargo build");
-                assert!(status.success(), "cargo build failed");
-            }
+            let status = std::process::Command::new("cargo")
+                .arg("build")
+                .arg("--bin")
+                .arg("chattrs")
+                .status()
+                .expect("run cargo build");
+            assert!(status.success(), "cargo build failed");
         });
         assert!(path.exists(), "chattrs binary missing at {}", path.display());
         path
@@ -1235,5 +1358,232 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         let lines = read_out_lines(&out);
         assert_eq!(lines.len(), 2, "watch prints nothing else: {lines:?}");
+    }
+
+    fn start_ask(
+        bin: &std::path::Path,
+        addr: &str,
+        asker: (&str, &str),
+        timeout_secs: &str,
+        files: (&std::path::Path, &std::path::Path),
+        body: &str,
+    ) -> ProcChild {
+        let out_file = std::fs::File::create(files.0).expect("ask output file");
+        let err_file = std::fs::File::create(files.1).expect("ask error file");
+        let child = std::process::Command::new(bin)
+            .arg("ask")
+            .arg("--server")
+            .arg(addr)
+            .arg("--address")
+            .arg(asker.0)
+            .arg("--to")
+            .arg(asker.1)
+            .arg("--timeout")
+            .arg(timeout_secs)
+            .arg(body)
+            .stdout(out_file)
+            .stderr(err_file)
+            .spawn()
+            .expect("spawn ask");
+        ProcChild { child }
+    }
+
+    async fn wait_for_exit(
+        child: &mut std::process::Child,
+        secs: u64,
+    ) -> std::process::ExitStatus {
+        let start = tokio::time::Instant::now();
+        loop {
+            if let Some(status) = child.try_wait().expect("poll ask child") {
+                return status;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(secs),
+                "ask did not exit in time"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn wait_for_question(addr: &str, who: &str) -> Message {
+        let start = tokio::time::Instant::now();
+        loop {
+            let messages = client::fetch_inbox(addr, who, None).await.expect("fetch inbox");
+            if let Some(question) = messages.into_iter().next() {
+                return question;
+            }
+            assert!(
+                start.elapsed() < std::time::Duration::from_secs(10),
+                "question never arrived"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn ask_returns_reply_and_exits_zero() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let out = dir.path().join("ask.out");
+        let err = dir.path().join("ask.err");
+        let mut asker =
+            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?");
+
+        let question = wait_for_question(&addr, "c@h").await;
+        assert_eq!(question.from, "w@h");
+        assert_eq!(question.body, "go?");
+        client::reply(&addr, "c@h", None, question.id, "yes").await.unwrap();
+
+        let status = wait_for_exit(&mut asker.child, 15).await;
+        assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
+        let lines = read_out_lines(&out);
+        assert_eq!(lines.len(), 1, "ask prints one line: {lines:?}");
+        assert!(lines[0].contains("c@h"), "reply names the replier: {}", lines[0]);
+        assert!(lines[0].contains("yes"), "reply carries the body: {}", lines[0]);
+        let wanted = format!("(re {})", question.id);
+        assert!(lines[0].contains(&wanted), "reply cites the question: {}", lines[0]);
+    }
+
+    #[tokio::test]
+    async fn ask_times_out_with_exit_code_two() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let out = dir.path().join("ask.out");
+        let err = dir.path().join("ask.err");
+        let mut asker =
+            start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?");
+
+        let status = wait_for_exit(&mut asker.child, 10).await;
+        assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
+        let lines = read_out_lines(&out);
+        assert!(lines.is_empty(), "no reply means no stdout: {lines:?}");
+        let question = wait_for_question(&addr, "c@h").await;
+        let stderr = std::fs::read_to_string(&err).unwrap_or_default();
+        let wanted = format!("timeout: no reply to {}", question.id);
+        assert!(stderr.contains(&wanted), "stderr names the id, got: {stderr}");
+    }
+
+    #[tokio::test]
+    async fn ask_acks_its_reply() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let out = dir.path().join("ask.out");
+        let err = dir.path().join("ask.err");
+        let mut asker =
+            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?");
+
+        let question = wait_for_question(&addr, "c@h").await;
+        client::reply(&addr, "c@h", None, question.id, "yes").await.unwrap();
+        let status = wait_for_exit(&mut asker.child, 15).await;
+        assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
+
+        let pending = client::fetch_inbox(&addr, "w@h", None).await.unwrap();
+        assert!(pending.is_empty(), "the reply stays acked: {pending:?}");
+    }
+
+    #[tokio::test]
+    async fn late_reply_stays_unread_after_timeout() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let out = dir.path().join("ask.out");
+        let err = dir.path().join("ask.err");
+        let mut asker =
+            start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?");
+
+        let status = wait_for_exit(&mut asker.child, 10).await;
+        assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
+        let question = wait_for_question(&addr, "c@h").await;
+        let reply_id =
+            client::reply(&addr, "c@h", None, question.id, "late").await.unwrap();
+
+        let pending = client::fetch_inbox(&addr, "w@h", None).await.unwrap();
+        assert_eq!(pending.len(), 1, "the late reply stays unread: {pending:?}");
+        assert_eq!(pending[0].id, reply_id);
+        assert_eq!(pending[0].reply_to, Some(question.id));
+        assert_eq!(pending[0].body, "late");
+    }
+
+    #[tokio::test]
+    async fn ask_ignores_messages_that_are_not_the_reply() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let out = dir.path().join("ask.out");
+        let err = dir.path().join("ask.err");
+        let mut asker =
+            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?");
+
+        let question = wait_for_question(&addr, "c@h").await;
+        let noise = client::send(&addr, "x@h", None, "w@h", "noise", None).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert!(
+            asker.child.try_wait().expect("poll ask child").is_none(),
+            "noise does not end the wait"
+        );
+        client::reply(&addr, "c@h", None, question.id, "yes").await.unwrap();
+
+        let status = wait_for_exit(&mut asker.child, 15).await;
+        assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
+        let lines = read_out_lines(&out);
+        assert_eq!(lines.len(), 1, "ask prints only the reply: {lines:?}");
+        assert!(lines[0].contains("yes"), "ask prints the reply: {}", lines[0]);
+        let pending = client::fetch_inbox(&addr, "w@h", None).await.unwrap();
+        assert_eq!(pending.len(), 1, "noise stays unread: {pending:?}");
+        assert_eq!(pending[0].id, noise);
+        assert_eq!(pending[0].body, "noise");
+    }
+
+    #[tokio::test]
+    async fn ask_survives_broker_restart() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let mut server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let out = dir.path().join("ask.out");
+        let err = dir.path().join("ask.err");
+        let mut asker =
+            start_ask(&bin, &addr, ("w@h", "c@h"), "30", (&out, &err), "go?");
+
+        let question = wait_for_question(&addr, "c@h").await;
+        server.stop();
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let mut server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        client::reply(&addr, "c@h", None, question.id, "yes").await.unwrap();
+
+        let status = wait_for_exit(&mut asker.child, 30).await;
+        assert_eq!(status.code(), Some(0), "ask exits zero after a restart");
+        let lines = read_out_lines(&out);
+        assert_eq!(lines.len(), 1, "ask prints one line: {lines:?}");
+        assert!(lines[0].contains("yes"), "ask prints the reply: {}", lines[0]);
+        let count: i64 = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM messages WHERE body = 'go?'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1, "the question exists once in the DB");
+        server.stop();
     }
 }

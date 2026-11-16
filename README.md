@@ -41,6 +41,9 @@ line with `"type":"message"` added.
 stdin). `watch` prints each new message as one JSON line and acks it,
 reconnecting with backoff when the broker drops. It prints nothing else
 to stdout, so it works under a watcher like Claude Code's Monitor tool.
+`ask --to ADDR [--timeout SECS] [TEXT...]` posts a question, blocks for
+the reply, prints it, acks it, and exits 0. On a timeout it exits 2 and
+the late reply stays unread. `--timeout 0` waits with no limit.
 
 ## Commands
 
@@ -51,6 +54,7 @@ to stdout, so it works under a watcher like Claude Code's Monitor tool.
 | `reply` | Answer message `ID` (text args, else stdin) and print the new id. |
 | `inbox` | Print every unread message for `--address`, then ack what was printed. |
 | `watch` | Stream new messages as JSON lines forever, acking what is printed. |
+| `ask` | Post to `--to ADDR` and block for the reply (`--timeout SECS`, default 600, `0` means no limit). |
 | `agents` | List known agent addresses and when each was last seen. |
 
 Common flags:
@@ -102,6 +106,7 @@ Client → broker:
 {"type":"inbox"}
 {"type":"ack",   "ids":[12, 13]}
 {"type":"watch"}
+{"type":"wait",  "reply_to":12}
 {"type":"agents"}
 ```
 
@@ -154,6 +159,18 @@ every message. The `watch` command prints each message as one JSON line,
 flushes stdout, then acks it — always JSON, nothing else on stdout — and
 never exits by itself. When the connection drops it reconnects with
 backoff from 1 s to 30 s, logging to stderr only.
+
+On `wait`, the broker sends the lowest-id message to the `hello` address
+with that `reply_to`, whether it is acked or not — at once when one
+exists, else when one arrives. One `wait` gets one message. The reply
+also reaches live `watch` connections, so an agent running both sees it
+twice. The `ask` command sends its question, parks a `wait`, and on the
+reply prints it (`render_message`, or one JSON `message` line with
+`--json`), flushes stdout, acks it, and exits 0. On a timeout it closes
+the connection, writes `timeout: no reply to <id>` to stderr, exits 2
+(and prints `{"type":"timeout","id":12}` with `--json`); the late reply
+stays unread. A dropped connection reconnects with the `watch` backoff
+and resends only the `wait`, never the question.
 
 Error codes: `bad_frame`, `hello_required`, `bad_version` (v ≠ 1),
 `bad_address`, `bad_token`, `empty_body`, `too_large`, `unknown_message`,
