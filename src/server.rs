@@ -275,7 +275,17 @@ impl Broker {
                         )
                         .await;
                     }
-                    Inbound::Send { to, body, reply_to } => {
+                    Inbound::Send { to, body, reply_to, topic } => {
+                        if let Some(topic) = topic.as_deref() {
+                            if !model::is_valid_topic(topic) {
+                                write_error(
+                                    &mut write_half,
+                                    Outbound::error("bad_topic", "topic is invalid"),
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
                         if let Some(to) = to.as_deref() {
                             if !model::is_valid_address(to) {
                                 write_error(
@@ -303,11 +313,14 @@ impl Broker {
                             continue;
                         }
                         let saved_reply_to = reply_to;
+                        let mut parent_topic: Option<String> = None;
                         let recipient = match (to, reply_to) {
                             (Some(to), reply_to) => {
                                 if let Some(id) = reply_to {
                                     match self.store.get(id).await {
-                                        Ok(Some(_)) => {}
+                                        Ok(Some(original)) => {
+                                            parent_topic = original.topic.clone();
+                                        }
                                         Ok(None) => {
                                             write_error(
                                                 &mut write_half,
@@ -334,6 +347,7 @@ impl Broker {
                             (None, Some(id)) => {
                                 match self.store.get(id).await {
                                     Ok(Some(original)) => {
+                                        parent_topic = original.topic.clone();
                                         if original.to != from {
                                             write_error(
                                                 &mut write_half,
@@ -377,9 +391,16 @@ impl Broker {
                                 continue;
                             }
                         };
+                        let stored_topic = topic.or(parent_topic);
                         match self
                             .store
-                            .insert(from.clone(), recipient.clone(), body, saved_reply_to)
+                            .insert(
+                                from.clone(),
+                                recipient.clone(),
+                                body,
+                                saved_reply_to,
+                                stored_topic,
+                            )
                             .await
                         {
                             Ok(id) => {
@@ -690,11 +711,23 @@ mod tests {
         }
     }
 
+    /// One message to `to` with `body` and no reply id or topic: the
+    /// general chat. Tests that need a reply id or a topic use struct
+    /// update syntax on the result.
+    fn outgoing(to: &str, body: &str) -> client::Outgoing {
+        client::Outgoing {
+            to: Some(to.to_string()),
+            body: body.to_string(),
+            reply_to: None,
+            topic: None,
+        }
+    }
+
     #[tokio::test]
     async fn message_survives_broker_restart() {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
@@ -711,7 +744,7 @@ mod tests {
         assert_eq!(recipient, "b@h");
         assert_eq!(body, "hi");
 
-        let next = client::send(&addr, "a@h", None, "b@h", "again", None, false).await.unwrap();
+        let next = client::send(&addr, "a@h", None, outgoing("b@h", "again"), false).await.unwrap();
         assert_eq!(next, id + 1);
         handle.abort();
     }
@@ -722,7 +755,7 @@ mod tests {
         let mut last = 0;
         for i in 0..5 {
             let id =
-                client::send(&addr, "a@h", None, "b@h", &format!("msg {i}"), None, false)
+                client::send(&addr, "a@h", None, outgoing("b@h", &format!("msg {i}")), false)
                     .await
                     .unwrap();
             assert!(id > last, "ids increase with send order");
@@ -796,7 +829,7 @@ mod tests {
     async fn loopback_bind_without_token_starts() {
         assert!(check_listen("127.0.0.1:0", None).is_ok());
         let (addr, _dir, handle) = spawn().await;
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
@@ -825,7 +858,7 @@ mod tests {
             raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\"}\n").await;
         assert_eq!(error_code(&frame), "bad_token");
         assert!(raw_recv(&mut raw).await.is_err(), "connection closes after bad_token");
-        let err = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap_err();
+        let err = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap_err();
         assert!(err.contains("bad_token"), "got: {err}");
         assert!(!err.contains("s3"), "token never appears: {err}");
         handle.abort();
@@ -835,7 +868,7 @@ mod tests {
     async fn hello_with_right_token_is_welcomed() {
         let (addr, _dir, handle) = spawn_with_token("s3").await;
         let id =
-            client::send(&addr, "a@h", Some("s3"), "b@h", "hi", None, false).await.unwrap();
+            client::send(&addr, "a@h", Some("s3"), outgoing("b@h", "hi"), false).await.unwrap();
         let messages = client::fetch_inbox(&addr, "b@h", Some("s3")).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
@@ -846,7 +879,7 @@ mod tests {
     #[tokio::test]
     async fn send_rejects_empty_body() {
         let (addr, _dir, handle) = spawn().await;
-        let err = client::send(&addr, "a@h", None, "b@h", "", None, false).await.unwrap_err();
+        let err = client::send(&addr, "a@h", None, outgoing("b@h", ""), false).await.unwrap_err();
         assert!(err.contains("empty_body"), "got: {err}");
         handle.abort();
     }
@@ -855,7 +888,9 @@ mod tests {
     async fn send_rejects_oversize_body() {
         let (addr, _dir, handle) = spawn().await;
         let body = "x".repeat(model::MAX_BODY_BYTES + 1);
-        let err = client::send(&addr, "a@h", None, "b@h", &body, None, false).await.unwrap_err();
+        let err = client::send(&addr, "a@h", None, outgoing("b@h", &body), false)
+            .await
+            .unwrap_err();
         assert!(err.contains("too_large"), "got: {err}");
         handle.abort();
     }
@@ -863,8 +898,8 @@ mod tests {
     #[tokio::test]
     async fn inbox_returns_only_messages_for_own_address() {
         let (addr, _dir, handle) = spawn().await;
-        let to_b = client::send(&addr, "a@h", None, "b@h", "for b", None, false).await.unwrap();
-        let to_c = client::send(&addr, "a@h", None, "c@h", "for c", None, false).await.unwrap();
+        let to_b = client::send(&addr, "a@h", None, outgoing("b@h", "for b"), false).await.unwrap();
+        let to_c = client::send(&addr, "a@h", None, outgoing("c@h", "for c"), false).await.unwrap();
 
         let b_messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
         assert_eq!(b_messages.len(), 1);
@@ -887,7 +922,7 @@ mod tests {
         let mut expected = Vec::new();
         for i in 0..3 {
             let id =
-                client::send(&addr, "a@h", None, "b@h", &format!("msg {i}"), None, false)
+                client::send(&addr, "a@h", None, outgoing("b@h", &format!("msg {i}")), false)
                     .await
                     .unwrap();
             expected.push(id);
@@ -902,7 +937,7 @@ mod tests {
     #[tokio::test]
     async fn unacked_message_is_redelivered_after_disconnect() {
         let (addr, _dir, handle) = spawn().await;
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
 
         let mut raw = raw_connect(&addr).await;
         raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"b@h\"}\n").await;
@@ -926,7 +961,7 @@ mod tests {
     #[tokio::test]
     async fn acked_message_is_not_redelivered() {
         let (addr, _dir, handle) = spawn().await;
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
 
         let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
         assert_eq!(messages.len(), 1);
@@ -941,8 +976,8 @@ mod tests {
     #[tokio::test]
     async fn ack_ignores_ids_of_other_addresses() {
         let (addr, _dir, handle) = spawn().await;
-        let to_b = client::send(&addr, "a@h", None, "b@h", "for b", None, false).await.unwrap();
-        let to_c = client::send(&addr, "a@h", None, "c@h", "for c", None, false).await.unwrap();
+        let to_b = client::send(&addr, "a@h", None, outgoing("b@h", "for b"), false).await.unwrap();
+        let to_c = client::send(&addr, "a@h", None, outgoing("c@h", "for c"), false).await.unwrap();
 
         let acked = client::ack(&addr, "b@h", None, &[to_b, to_c]).await.unwrap();
         assert_eq!(acked, vec![to_b], "only the own id changes");
@@ -956,8 +991,10 @@ mod tests {
     #[tokio::test]
     async fn reply_goes_to_sender_of_original() {
         let (addr, _dir, handle) = spawn().await;
-        let original = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
-        let id = client::reply(&addr, "b@h", None, original, "yo").await.unwrap();
+        let original = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false)
+            .await
+            .unwrap();
+        let id = client::reply(&addr, "b@h", None, original, "yo", None).await.unwrap();
         assert!(id > original, "reply gets a fresh id");
 
         let messages = client::fetch_inbox(&addr, "a@h", None).await.unwrap();
@@ -972,8 +1009,10 @@ mod tests {
     #[tokio::test]
     async fn reply_carries_reply_to_id() {
         let (addr, _dir, handle) = spawn().await;
-        let original = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
-        let id = client::reply(&addr, "b@h", None, original, "yo").await.unwrap();
+        let original = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false)
+            .await
+            .unwrap();
+        let id = client::reply(&addr, "b@h", None, original, "yo", None).await.unwrap();
 
         let messages = client::fetch_inbox(&addr, "a@h", None).await.unwrap();
         assert_eq!(messages.len(), 1);
@@ -985,10 +1024,17 @@ mod tests {
     #[tokio::test]
     async fn reply_to_unknown_id_is_rejected() {
         let (addr, _dir, handle) = spawn().await;
-        let err = client::reply(&addr, "b@h", None, 9999, "yo").await.unwrap_err();
+        let err = client::reply(&addr, "b@h", None, 9999, "yo", None).await.unwrap_err();
         assert!(err.contains("unknown_message"), "got: {err}");
-        let err =
-            client::send(&addr, "a@h", None, "b@h", "hi", Some(9999), false).await.unwrap_err();
+        let err = client::send(
+            &addr,
+            "a@h",
+            None,
+            client::Outgoing { reply_to: Some(9999), ..outgoing("b@h", "hi") },
+            false,
+        )
+        .await
+        .unwrap_err();
         assert!(err.contains("unknown_message"), "got: {err}");
 
         let mut raw = raw_connect(&addr).await;
@@ -1002,13 +1048,21 @@ mod tests {
     #[tokio::test]
     async fn reply_by_non_recipient_is_rejected() {
         let (addr, _dir, handle) = spawn().await;
-        let original = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
-        let err = client::reply(&addr, "c@h", None, original, "intrude").await.unwrap_err();
-        assert!(err.contains("not_recipient"), "got: {err}");
-
-        let id = client::send(&addr, "c@h", None, "d@h", "ref", Some(original), false)
+        let original = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false)
             .await
             .unwrap();
+        let err = client::reply(&addr, "c@h", None, original, "intrude", None).await.unwrap_err();
+        assert!(err.contains("not_recipient"), "got: {err}");
+
+        let id = client::send(
+            &addr,
+            "c@h",
+            None,
+            client::Outgoing { reply_to: Some(original), ..outgoing("d@h", "ref") },
+            false,
+        )
+        .await
+        .unwrap();
         let messages = client::fetch_inbox(&addr, "d@h", None).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
@@ -1017,10 +1071,312 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn topic_is_stored_and_shown_in_inbox() {
+        let (addr, _dir, handle) = spawn().await;
+        let id = client::send(
+            &addr,
+            "a@h",
+            None,
+            client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "hi") },
+            false,
+        )
+        .await
+        .unwrap();
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, id);
+        assert_eq!(messages[0].topic.as_deref(), Some("release-26"));
+        let value = serde_json::to_value(&messages[0]).unwrap();
+        assert_eq!(value["topic"].as_str(), Some("release-26"));
+        let text = model::render_message(&messages[0]);
+        assert!(text.contains("topic=\"release-26\""), "wrapper shows the topic: {text}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn message_without_topic_is_general_chat() {
+        let (addr, _dir, handle) = spawn().await;
+        let id =
+            client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, id);
+        assert_eq!(messages[0].topic, None);
+        let value = serde_json::to_value(&messages[0]).unwrap();
+        assert!(value["topic"].is_null(), "general chat wires topic null");
+        let text = model::render_message(&messages[0]);
+        assert!(!text.contains("topic="), "wrapper omits the topic: {text}");
+        let history = client::fetch_log(&addr, "reader@h", None, None, false).await.unwrap();
+        assert_eq!(history.len(), 1);
+        let line = model::render_log_line(&history[0]);
+        assert!(!line.contains("(topic"), "log line omits the topic: {line}");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn reply_inherits_topic() {
+        let (addr, _dir, handle) = spawn().await;
+        let original = client::send(
+            &addr,
+            "a@h",
+            None,
+            client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "hi") },
+            false,
+        )
+        .await
+        .unwrap();
+        let id = client::reply(&addr, "b@h", None, original, "yo", None).await.unwrap();
+        let messages = client::fetch_inbox(&addr, "a@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, id);
+        assert_eq!(messages[0].reply_to, Some(original));
+        assert_eq!(messages[0].topic.as_deref(), Some("release-26"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn explicit_topic_overrides_inherited() {
+        let (addr, _dir, handle) = spawn().await;
+        let original = client::send(
+            &addr,
+            "a@h",
+            None,
+            client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "hi") },
+            false,
+        )
+        .await
+        .unwrap();
+        let id = client::reply(&addr, "b@h", None, original, "yo", Some("other-topic"))
+            .await
+            .unwrap();
+        let messages = client::fetch_inbox(&addr, "a@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, id);
+        assert_eq!(messages[0].reply_to, Some(original));
+        assert_eq!(messages[0].topic.as_deref(), Some("other-topic"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn ask_reply_shows_the_asks_topic() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let out = dir.path().join("ask.out");
+        let err = dir.path().join("ask.err");
+        let mut asker = start_ask(
+            &bin,
+            &addr,
+            ("w@h", "c@h"),
+            "15",
+            (&out, &err),
+            "go?",
+            Some("release-26"),
+        );
+
+        let question = wait_for_question(&addr, "c@h").await;
+        assert_eq!(question.body, "go?");
+        assert_eq!(question.topic.as_deref(), Some("release-26"));
+        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
+
+        let status = wait_for_exit(&mut asker.child, 15).await;
+        assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
+        let lines = read_out_lines(&out);
+        assert_eq!(lines.len(), 4, "ask prints one wrapped reply: {lines:?}");
+        assert!(
+            lines[0].contains("topic=\"release-26\""),
+            "wrapper shows the topic: {}",
+            lines[0]
+        );
+        assert!(lines[2].contains("yes"), "reply carries the body: {}", lines[2]);
+    }
+
+    #[tokio::test]
+    async fn send_rejects_bad_topic() {
+        let (addr, _dir, handle) = spawn().await;
+        let mut raw = raw_connect(&addr).await;
+        raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\"}\n").await;
+        let long = "a".repeat(65);
+        let cases = vec![
+            "Release 26".to_string(),
+            "-lead".to_string(),
+            "trail-".to_string(),
+            String::new(),
+            long,
+        ];
+        for topic in &cases {
+            let line = format!(
+                "{{\"type\":\"send\",\"to\":\"b@h\",\"body\":\"hi\",\"topic\":{}}}\n",
+                serde_json::to_string(topic).unwrap()
+            );
+            raw_send(&mut raw, &line).await;
+            let frame = raw_recv(&mut raw).await.unwrap();
+            assert_eq!(error_code(&frame), "bad_topic", "topic {topic:?} is rejected");
+        }
+        let bad =
+            client::Outgoing { topic: Some("Release 26".into()), ..outgoing("b@h", "hi") };
+        let err = client::send(&addr, "a@h", None, bad, false).await.unwrap_err();
+        assert!(err.contains("bad_topic"), "got: {err}");
+        raw_send(&mut raw, "{\"type\":\"send\",\"to\":\"b@h\",\"body\":\"hi\"}\n").await;
+        match raw_recv(&mut raw).await.unwrap() {
+            Outbound::Sent { .. } => {}
+            other => panic!("connection stays open after bad_topic, got {other:?}"),
+        }
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn topic_survives_broker_restart() {
+        let (addr, dir, handle) = spawn().await;
+        let db = dir.path().join("chattrs.db");
+        let id = client::send(
+            &addr,
+            "a@h",
+            None,
+            client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "hi") },
+            false,
+        )
+        .await
+        .unwrap();
+        handle.abort();
+
+        let (addr, handle) = spawn_at(&db).await;
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].id, id);
+        assert_eq!(messages[0].topic.as_deref(), Some("release-26"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn existing_db_without_topic_column_is_migrated() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE messages (
+                   id        INTEGER PRIMARY KEY AUTOINCREMENT,
+                   sender    TEXT NOT NULL,
+                   recipient TEXT NOT NULL,
+                   body      TEXT NOT NULL,
+                   ts        INTEGER NOT NULL,
+                   reply_to  INTEGER,
+                   acked_at  INTEGER
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO messages (sender, recipient, body, ts, reply_to)
+                 VALUES ('a@h', 'b@h', 'old', 1763200000000, NULL)",
+                [],
+            )
+            .unwrap();
+        }
+        let (addr, handle) = spawn_at(&db).await;
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].body, "old");
+        assert_eq!(messages[0].topic, None, "old rows read back with topic null");
+
+        let id = client::send(
+            &addr,
+            "a@h",
+            None,
+            client::Outgoing { topic: Some("release-26".into()), ..outgoing("b@h", "new") },
+            false,
+        )
+        .await
+        .unwrap();
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        let fresh = messages.iter().find(|message| message.id == id).unwrap();
+        assert_eq!(fresh.topic.as_deref(), Some("release-26"));
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn topic_shows_in_log() {
+        let (addr, _dir, handle) = spawn().await;
+        let first =
+            client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
+        let second = client::send(
+            &addr,
+            "a@h",
+            None,
+            client::Outgoing {
+                topic: Some("release-26".into()),
+                reply_to: Some(first),
+                ..outgoing("b@h", "two")
+            },
+            false,
+        )
+        .await
+        .unwrap();
+        let history = client::fetch_log(&addr, "reader@h", None, None, false).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].id, first);
+        assert_eq!(history[0].topic, None);
+        assert_eq!(history[1].id, second);
+        assert_eq!(history[1].topic.as_deref(), Some("release-26"));
+        let plain = model::render_log_line(&history[0]);
+        assert!(!plain.contains("(topic"), "general chat shows no topic: {plain}");
+        let lined = model::render_log_line(&history[1]);
+        let wanted = format!("(topic release-26) (re {first})");
+        assert!(lined.contains(&wanted), "topic comes before the reply id: {lined}");
+        let logged = client::format_log_json(&history[1]).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&logged).unwrap();
+        assert_eq!(value["topic"].as_str(), Some("release-26"));
+        let logged = client::format_log_json(&history[0]).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&logged).unwrap();
+        assert!(value["topic"].is_null(), "general chat logs null topic");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn ask_topic_cli_run_shows_topic_in_reply() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let out = dir.path().join("ask.out");
+        let err = dir.path().join("ask.err");
+        let mut asker = start_ask(
+            &bin,
+            &addr,
+            ("w@h", "c@h"),
+            "15",
+            (&out, &err),
+            "go?",
+            Some("release-26"),
+        );
+
+        let question = wait_for_question(&addr, "c@h").await;
+        assert_eq!(question.topic.as_deref(), Some("release-26"));
+        let id_arg = question.id.to_string();
+        let reply_out = run_chattrs(&bin, "reply", &addr, "c@h", &[&id_arg, "yes"]);
+        assert!(reply_out.status.success(), "reply exits zero: {reply_out:?}");
+
+        let status = wait_for_exit(&mut asker.child, 15).await;
+        assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
+        let lines = read_out_lines(&out);
+        assert_eq!(lines.len(), 4, "ask prints one wrapped reply: {lines:?}");
+        assert!(
+            lines[0].contains("topic=\"release-26\""),
+            "wrapper shows the topic: {}",
+            lines[0]
+        );
+    }
+
+    #[tokio::test]
     async fn message_to_offline_address_survives_restart_and_arrives_once() {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
@@ -1041,7 +1397,7 @@ mod tests {
     #[tokio::test]
     async fn agents_lists_addresses_that_said_hello() {
         let (addr, _dir, handle) = spawn().await;
-        client::send(&addr, "b@h", None, "a@h", "hi", None, false).await.unwrap();
+        client::send(&addr, "b@h", None, outgoing("a@h", "hi"), false).await.unwrap();
         client::fetch_inbox(&addr, "a@h", None).await.unwrap();
 
         let agents = client::fetch_agents(&addr, "a@h", None, false).await.unwrap();
@@ -1055,7 +1411,7 @@ mod tests {
     #[tokio::test]
     async fn agents_omits_addresses_that_only_received() {
         let (addr, _dir, handle) = spawn().await;
-        client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
 
         let agents = client::fetch_agents(&addr, "a@h", None, false).await.unwrap();
         let names: Vec<&str> =
@@ -1104,7 +1460,7 @@ mod tests {
     async fn agents_survive_broker_restart() {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
-        client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
@@ -1120,10 +1476,10 @@ mod tests {
     async fn log_returns_all_messages_oldest_first() {
         let (addr, _dir, handle) = spawn().await;
         let first =
-            client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
-        let second = client::reply(&addr, "b@h", None, first, "two").await.unwrap();
+            client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
+        let second = client::reply(&addr, "b@h", None, first, "two", None).await.unwrap();
         let third =
-            client::send(&addr, "c@h", None, "a@h", "three", None, false).await.unwrap();
+            client::send(&addr, "c@h", None, outgoing("a@h", "three"), false).await.unwrap();
 
         let history =
             client::fetch_log(&addr, "reader@h", None, None, false).await.unwrap();
@@ -1144,13 +1500,13 @@ mod tests {
     async fn log_filters_by_sender_or_recipient() {
         let (addr, _dir, handle) = spawn().await;
         let ab =
-            client::send(&addr, "a@h", None, "b@h", "a to b", None, false).await.unwrap();
+            client::send(&addr, "a@h", None, outgoing("b@h", "a to b"), false).await.unwrap();
         let ba =
-            client::send(&addr, "b@h", None, "a@h", "b to a", None, false).await.unwrap();
+            client::send(&addr, "b@h", None, outgoing("a@h", "b to a"), false).await.unwrap();
         let ac =
-            client::send(&addr, "a@h", None, "c@h", "a to c", None, false).await.unwrap();
+            client::send(&addr, "a@h", None, outgoing("c@h", "a to c"), false).await.unwrap();
         let xy =
-            client::send(&addr, "x@h", None, "y@h", "x to y", None, false).await.unwrap();
+            client::send(&addr, "x@h", None, outgoing("y@h", "x to y"), false).await.unwrap();
 
         async fn filtered(addr: &str, who: &str) -> Vec<u64> {
             client::fetch_log(addr, "reader@h", None, Some(who.to_string()), false)
@@ -1173,9 +1529,9 @@ mod tests {
     async fn log_includes_acked_and_unread_messages() {
         let (addr, _dir, handle) = spawn().await;
         let first =
-            client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+            client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
         let second =
-            client::send(&addr, "a@h", None, "b@h", "two", None, false).await.unwrap();
+            client::send(&addr, "a@h", None, outgoing("b@h", "two"), false).await.unwrap();
         client::ack(&addr, "b@h", None, &[first]).await.unwrap();
 
         let history = client::fetch_log(&addr, "a@h", None, None, false).await.unwrap();
@@ -1193,7 +1549,7 @@ mod tests {
     #[tokio::test]
     async fn log_does_not_ack() {
         let (addr, _dir, handle) = spawn().await;
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
 
         let history = client::fetch_log(&addr, "a@h", None, None, false).await.unwrap();
         assert_eq!(history.len(), 1);
@@ -1210,7 +1566,7 @@ mod tests {
         let (addr, _dir, handle) = spawn().await;
         let mut expected = Vec::new();
         for i in 0..1200 {
-            let id = client::send(&addr, "a@h", None, "b@h", &format!("msg {i}"), None, false)
+            let id = client::send(&addr, "a@h", None, outgoing("b@h", &format!("msg {i}")), false)
                 .await
                 .unwrap();
             expected.push(id);
@@ -1238,8 +1594,8 @@ mod tests {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
         let first =
-            client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
-        let second = client::reply(&addr, "b@h", None, first, "two").await.unwrap();
+            client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
+        let second = client::reply(&addr, "b@h", None, first, "two", None).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
@@ -1272,8 +1628,8 @@ mod tests {
     #[tokio::test]
     async fn watch_delivers_unread_then_live_messages_in_order() {
         let (addr, _dir, handle) = spawn().await;
-        let first = client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
-        let second = client::send(&addr, "a@h", None, "b@h", "two", None, false).await.unwrap();
+        let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
+        let second = client::send(&addr, "a@h", None, outgoing("b@h", "two"), false).await.unwrap();
 
         let mut first_watcher = raw_connect(&addr).await;
         raw_watch(&mut first_watcher, "b@h").await;
@@ -1291,7 +1647,9 @@ mod tests {
         assert_eq!(again_first.id, first);
         assert_eq!(again_second.id, second);
 
-        let third = client::send(&addr, "a@h", None, "b@h", "three", None, false).await.unwrap();
+        let third = client::send(&addr, "a@h", None, outgoing("b@h", "three"), false)
+            .await
+            .unwrap();
         let live_first = read_watched_message(&mut first_watcher).await;
         let live_second = read_watched_message(&mut second_watcher).await;
         assert_eq!(live_first.id, third);
@@ -1454,7 +1812,7 @@ mod tests {
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
         let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
         assert_eq!(value["id"].as_u64(), Some(id));
@@ -1473,7 +1831,7 @@ mod tests {
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
-        let first = client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+        let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
         let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
         assert_eq!(value["id"].as_u64(), Some(first));
@@ -1482,7 +1840,7 @@ mod tests {
         server.stop();
         let mut server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        let second = client::send(&addr, "a@h", None, "b@h", "two", None, false).await.unwrap();
+        let second = client::send(&addr, "a@h", None, outgoing("b@h", "two"), false).await.unwrap();
         let lines = wait_for_lines(&out, 2).await;
         let value: serde_json::Value = serde_json::from_str(&lines[1]).expect("JSON line");
         assert_eq!(value["id"].as_u64(), Some(second));
@@ -1502,9 +1860,18 @@ mod tests {
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
-        let first = client::send(&addr, "a@h", None, "b@h", "plain", None, false).await.unwrap();
-        let second =
-            client::send(&addr, "a@h", None, "b@h", "answer", Some(first), false).await.unwrap();
+        let first = client::send(&addr, "a@h", None, outgoing("b@h", "plain"), false)
+            .await
+            .unwrap();
+        let second = client::send(
+            &addr,
+            "a@h",
+            None,
+            client::Outgoing { reply_to: Some(first), ..outgoing("b@h", "answer") },
+            false,
+        )
+        .await
+        .unwrap();
         let lines = wait_for_lines(&out, 2).await;
         assert_eq!(lines.len(), 2, "watch prints one line per message: {lines:?}");
         let plain: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
@@ -1532,10 +1899,12 @@ mod tests {
         timeout_secs: &str,
         files: (&std::path::Path, &std::path::Path),
         body: &str,
+        topic: Option<&str>,
     ) -> ProcChild {
         let out_file = std::fs::File::create(files.0).expect("ask output file");
         let err_file = std::fs::File::create(files.1).expect("ask error file");
-        let child = std::process::Command::new(bin)
+        let mut command = std::process::Command::new(bin);
+        command
             .arg("ask")
             .arg("--server")
             .arg(addr)
@@ -1544,7 +1913,11 @@ mod tests {
             .arg("--to")
             .arg(asker.1)
             .arg("--timeout")
-            .arg(timeout_secs)
+            .arg(timeout_secs);
+        if let Some(topic) = topic {
+            command.arg("--topic").arg(topic);
+        }
+        let child = command
             .arg(body)
             .stdout(out_file)
             .stderr(err_file)
@@ -1596,12 +1969,12 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?");
+            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
 
         let question = wait_for_question(&addr, "c@h").await;
         assert_eq!(question.from, "w@h");
         assert_eq!(question.body, "go?");
-        client::reply(&addr, "c@h", None, question.id, "yes").await.unwrap();
+        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
@@ -1625,7 +1998,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?");
+            start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?", None);
 
         let status = wait_for_exit(&mut asker.child, 10).await;
         assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
@@ -1648,10 +2021,10 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?");
+            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
 
         let question = wait_for_question(&addr, "c@h").await;
-        client::reply(&addr, "c@h", None, question.id, "yes").await.unwrap();
+        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
 
@@ -1670,13 +2043,13 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?");
+            start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?", None);
 
         let status = wait_for_exit(&mut asker.child, 10).await;
         assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
         let question = wait_for_question(&addr, "c@h").await;
         let reply_id =
-            client::reply(&addr, "c@h", None, question.id, "late").await.unwrap();
+            client::reply(&addr, "c@h", None, question.id, "late", None).await.unwrap();
 
         let pending = client::fetch_inbox(&addr, "w@h", None).await.unwrap();
         assert_eq!(pending.len(), 1, "the late reply stays unread: {pending:?}");
@@ -1696,16 +2069,18 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?");
+            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
 
         let question = wait_for_question(&addr, "c@h").await;
-        let noise = client::send(&addr, "x@h", None, "w@h", "noise", None, false).await.unwrap();
+        let noise = client::send(&addr, "x@h", None, outgoing("w@h", "noise"), false)
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert!(
             asker.child.try_wait().expect("poll ask child").is_none(),
             "noise does not end the wait"
         );
-        client::reply(&addr, "c@h", None, question.id, "yes").await.unwrap();
+        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
@@ -1729,14 +2104,14 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "30", (&out, &err), "go?");
+            start_ask(&bin, &addr, ("w@h", "c@h"), "30", (&out, &err), "go?", None);
 
         let question = wait_for_question(&addr, "c@h").await;
         server.stop();
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         let mut server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        client::reply(&addr, "c@h", None, question.id, "yes").await.unwrap();
+        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 30).await;
         assert_eq!(status.code(), Some(0), "ask exits zero after a restart");
@@ -1787,7 +2162,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        let first = client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+        let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
 
         let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
         assert!(out.status.success(), "send exits zero: {out:?}");
@@ -1809,7 +2184,7 @@ mod tests {
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let original =
-            client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+            client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         let id_arg = original.to_string();
 
         let out = run_chattrs(&bin, "reply", &addr, "b@h", &[&id_arg, "yo"]);
@@ -1835,7 +2210,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
 
         let out = run_chattrs(&bin, "agents", &addr, "b@h", &[]);
         assert!(out.status.success(), "agents exits zero: {out:?}");
@@ -1861,13 +2236,13 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        client::send(&addr, "x@h", None, "w@h", "noise", None, false).await.unwrap();
+        client::send(&addr, "x@h", None, outgoing("w@h", "noise"), false).await.unwrap();
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
-        let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?");
+        let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
 
         let question = wait_for_question(&addr, "c@h").await;
-        client::reply(&addr, "c@h", None, question.id, "yes").await.unwrap();
+        client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
 
         let status = wait_for_exit(&mut asker.child, 15).await;
         assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
@@ -1890,7 +2265,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+        client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
 
         let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
         assert!(out.status.success(), "send exits zero: {out:?}");
@@ -1914,7 +2289,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        client::send(&addr, "a@h", None, "b@h", "old", None, false).await.unwrap();
+        client::send(&addr, "a@h", None, outgoing("b@h", "old"), false).await.unwrap();
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
@@ -1923,7 +2298,7 @@ mod tests {
         assert_eq!(value["type"].as_str(), Some("message"));
         assert_eq!(value["body"].as_str(), Some("old"));
 
-        client::send(&addr, "a@h", None, "b@h", "new", None, false).await.unwrap();
+        client::send(&addr, "a@h", None, outgoing("b@h", "new"), false).await.unwrap();
         let lines = wait_for_lines(&out, 2).await;
         let mut bodies = Vec::new();
         for line in &lines {
@@ -1942,7 +2317,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        let first = client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+        let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
 
         let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "--json", "two"]);
         assert!(out.status.success(), "send exits zero: {out:?}");
@@ -1968,7 +2343,7 @@ mod tests {
         let bin = ensure_bin();
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        let first = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        let first = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
 
         let out = run_chattrs(&bin, "inbox", &addr, "b@h", &["--json"]);
         assert!(out.status.success(), "inbox exits zero: {out:?}");
@@ -1991,7 +2366,7 @@ mod tests {
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
         assert_eq!(lines.len(), 1, "watch prints one line per message: {lines:?}");
         let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");

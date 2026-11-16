@@ -56,30 +56,54 @@ async fn hello(server: &str, address: &str, token: Option<&str>) -> Result<Conn,
     }
 }
 
+/// One message to publish: its recipient, body, reply id, and topic.
+/// A `None` topic is the general chat. `send` and `ask` post to an
+/// address; `reply` leaves `to` empty so the broker answers the sender
+/// of the message it answers.
+#[derive(Debug, Clone)]
+pub struct Outgoing {
+    pub to: Option<String>,
+    pub body: String,
+    pub reply_to: Option<u64>,
+    pub topic: Option<String>,
+}
+
 /// Publish one message and return its id. Prints unread messages first,
 /// as text or as JSON `message` lines when `json` is set.
 pub async fn send(
     server: &str,
     address: &str,
     token: Option<&str>,
-    to: &str,
-    body: &str,
-    reply_to: Option<u64>,
+    outgoing: Outgoing,
     json: bool,
 ) -> Result<u64, String> {
-    publish(server, address, token, Some(to.to_string()), body, reply_to, json).await
+    publish(server, address, token, outgoing, json).await
 }
 
 /// Answer message `reply_to` and return the new id. The broker addresses the
-/// reply to the sender of the original message.
+/// reply to the sender of the original message. Without a `topic`, the
+/// reply inherits the topic of the message it answers.
 pub async fn reply(
     server: &str,
     address: &str,
     token: Option<&str>,
     reply_to: u64,
     body: &str,
+    topic: Option<&str>,
 ) -> Result<u64, String> {
-    publish(server, address, token, None, body, Some(reply_to), false).await
+    publish(
+        server,
+        address,
+        token,
+        Outgoing {
+            to: None,
+            body: body.to_string(),
+            reply_to: Some(reply_to),
+            topic: topic.map(|topic| topic.to_string()),
+        },
+        false,
+    )
+    .await
 }
 
 /// Fetch unread messages on this connection, print them, flush stdout,
@@ -117,14 +141,21 @@ async fn publish(
     server: &str,
     address: &str,
     token: Option<&str>,
-    to: Option<String>,
-    body: &str,
-    reply_to: Option<u64>,
+    outgoing: Outgoing,
     json: bool,
 ) -> Result<u64, String> {
     let mut conn = hello(server, address, token).await?;
     print_unread_preamble(&mut conn, json).await?;
-    send_frame(&mut conn, &Inbound::Send { to, body: body.to_string(), reply_to }).await?;
+    send_frame(
+        &mut conn,
+        &Inbound::Send {
+            to: outgoing.to,
+            body: outgoing.body,
+            reply_to: outgoing.reply_to,
+            topic: outgoing.topic,
+        },
+    )
+    .await?;
     match recv_frame(&mut conn).await? {
         Outbound::Sent { id } => Ok(id),
         Outbound::Error { code, message } => Err(format!("{code}: {message}")),
@@ -171,12 +202,13 @@ impl From<String> for WaitError {
 /// True when the error is a broker `error` frame rather than a dropped
 /// connection. Server errors fail the wait; anything else reconnects.
 fn is_server_error(error: &str) -> bool {
-    const CODES: [&str; 10] = [
+    const CODES: [&str; 11] = [
         "bad_frame",
         "hello_required",
         "bad_version",
         "bad_address",
         "bad_token",
+        "bad_topic",
         "empty_body",
         "too_large",
         "unknown_message",
@@ -314,14 +346,12 @@ pub async fn ask(
     server: &str,
     address: &str,
     token: Option<&str>,
-    to: &str,
-    body: &str,
+    outgoing: Outgoing,
     timeout_secs: u64,
     json: bool,
 ) -> Result<(u64, Message), WaitError> {
-    let id = publish(server, address, token, Some(to.to_string()), body, None, json)
-        .await
-        .map_err(WaitError::Failed)?;
+    let id =
+        publish(server, address, token, outgoing, json).await.map_err(WaitError::Failed)?;
     let reply = wait_for_reply(server, address, token, id, timeout_secs).await?;
     Ok((id, reply))
 }
@@ -523,6 +553,7 @@ mod tests {
             body: "hi".into(),
             ts: 1763200000000,
             reply_to: Some(12),
+            topic: None,
             acked_at: None,
         };
         let line = format_log_json(&message).unwrap();

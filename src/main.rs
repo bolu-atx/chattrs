@@ -44,9 +44,12 @@ async fn run(args: Args) -> Result<(), String> {
                 &c.client.server,
                 &address,
                 c.client.token.as_deref(),
-                &c.to,
-                &c.body(),
-                None,
+                client::Outgoing {
+                    to: Some(c.to.clone()),
+                    body: c.body(),
+                    reply_to: None,
+                    topic: c.topic.clone(),
+                },
                 c.json,
             )
             .await?;
@@ -66,6 +69,7 @@ async fn run(args: Args) -> Result<(), String> {
                 c.client.token.as_deref(),
                 c.id,
                 &c.body(),
+                c.topic.as_deref(),
             )
             .await?;
             println!("{id}");
@@ -83,8 +87,12 @@ async fn run(args: Args) -> Result<(), String> {
                 &c.client.server,
                 &address,
                 c.client.token.as_deref(),
-                &c.to,
-                &c.body(),
+                client::Outgoing {
+                    to: Some(c.to.clone()),
+                    body: c.body(),
+                    reply_to: None,
+                    topic: c.topic.clone(),
+                },
                 timeout,
                 json,
             )

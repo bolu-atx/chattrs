@@ -26,16 +26,18 @@ impl Store {
     }
 
     /// Insert a message and return its id, which grows with send order.
+    /// A `None` topic is the general chat.
     pub async fn insert(
         &self,
         sender: String,
         recipient: String,
         body: String,
         reply_to: Option<u64>,
+        topic: Option<String>,
     ) -> Result<u64, String> {
         let conn = Arc::clone(&self.conn);
         tokio::task::spawn_blocking(move || {
-            insert_blocking(&conn, &sender, &recipient, &body, reply_to)
+            insert_blocking(&conn, &sender, &recipient, &body, reply_to, topic.as_deref())
         })
         .await
         .map_err(|e| format!("db task failed: {e}"))?
@@ -153,6 +155,7 @@ fn open_blocking(path: &Path) -> Result<Store, String> {
            body      TEXT NOT NULL,
            ts        INTEGER NOT NULL,
            reply_to  INTEGER,
+           topic     TEXT,
            acked_at  INTEGER
          );
          CREATE INDEX IF NOT EXISTS messages_unread
@@ -163,7 +166,28 @@ fn open_blocking(path: &Path) -> Result<Store, String> {
          );",
     )
     .map_err(|e| e.to_string())?;
+    if !has_topic_column(&conn)? {
+        conn.execute("ALTER TABLE messages ADD COLUMN topic TEXT", [])
+            .map_err(|e| e.to_string())?;
+    }
     Ok(Store { conn: Arc::new(Mutex::new(conn)) })
+}
+
+/// True when the `messages` table already has a `topic` column.
+/// Databases created before the topic story have no column; the broker
+/// adds it on open so old rows read back with a null topic.
+fn has_topic_column(conn: &Connection) -> Result<bool, String> {
+    let mut stmt =
+        conn.prepare("PRAGMA table_info(messages)").map_err(|e| e.to_string())?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+    for name in names {
+        if name.map_err(|e| e.to_string())? == "topic" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Read an env var, treating a missing or blank value as absent.
@@ -185,12 +209,20 @@ fn insert_blocking(
     recipient: &str,
     body: &str,
     reply_to: Option<u64>,
+    topic: Option<&str>,
 ) -> Result<u64, String> {
     let conn = lock(conn)?;
     conn.execute(
-        "INSERT INTO messages (sender, recipient, body, ts, reply_to)
-         VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![sender, recipient, body, now_ms() as i64, reply_to.map(|id| id as i64)],
+        "INSERT INTO messages (sender, recipient, body, ts, reply_to, topic)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        rusqlite::params![
+            sender,
+            recipient,
+            body,
+            now_ms() as i64,
+            reply_to.map(|id| id as i64),
+            topic
+        ],
     )
     .map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid() as u64)
@@ -203,7 +235,7 @@ fn get_blocking(
     let conn = lock(conn)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, sender, recipient, body, ts, reply_to FROM messages
+            "SELECT id, sender, recipient, body, ts, reply_to, topic FROM messages
              WHERE id = ?1",
         )
         .map_err(|e| e.to_string())?;
@@ -216,6 +248,7 @@ fn get_blocking(
                 body: row.get(3)?,
                 ts: row.get::<_, i64>(4)? as u64,
                 reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
+                topic: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -232,7 +265,7 @@ fn inbox_blocking(
     let conn = lock(conn)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, sender, recipient, body, ts, reply_to FROM messages
+            "SELECT id, sender, recipient, body, ts, reply_to, topic FROM messages
              WHERE recipient = ?1 AND acked_at IS NULL ORDER BY id",
         )
         .map_err(|e| e.to_string())?;
@@ -245,6 +278,7 @@ fn inbox_blocking(
                 body: row.get(3)?,
                 ts: row.get::<_, i64>(4)? as u64,
                 reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
+                topic: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -259,7 +293,7 @@ fn find_reply_blocking(
     let conn = lock(conn)?;
     let mut stmt = conn
         .prepare(
-            "SELECT id, sender, recipient, body, ts, reply_to FROM messages
+            "SELECT id, sender, recipient, body, ts, reply_to, topic FROM messages
              WHERE recipient = ?1 AND reply_to = ?2 ORDER BY id LIMIT 1",
         )
         .map_err(|e| e.to_string())?;
@@ -272,6 +306,7 @@ fn find_reply_blocking(
                 body: row.get(3)?,
                 ts: row.get::<_, i64>(4)? as u64,
                 reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
+                topic: row.get(6)?,
             })
         })
         .map_err(|e| e.to_string())?;
@@ -318,13 +353,15 @@ fn log_blocking(
             body: row.get(3)?,
             ts: row.get::<_, i64>(4)? as u64,
             reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
-            acked_at: row.get::<_, Option<i64>>(6)?.map(|ts| ts as u64),
+            topic: row.get(6)?,
+            acked_at: row.get::<_, Option<i64>>(7)?.map(|ts| ts as u64),
         })
     };
     if let Some(address) = address {
         let mut stmt = conn
             .prepare(
-                "SELECT id, sender, recipient, body, ts, reply_to, acked_at FROM messages
+                "SELECT id, sender, recipient, body, ts, reply_to, topic, acked_at
+                 FROM messages
                  WHERE id > ?1 AND (sender = ?2 OR recipient = ?2)
                  ORDER BY id LIMIT ?3",
             )
@@ -336,7 +373,8 @@ fn log_blocking(
     } else {
         let mut stmt = conn
             .prepare(
-                "SELECT id, sender, recipient, body, ts, reply_to, acked_at FROM messages
+                "SELECT id, sender, recipient, body, ts, reply_to, topic, acked_at
+                 FROM messages
                  WHERE id > ?1 ORDER BY id LIMIT ?2",
             )
             .map_err(|e| e.to_string())?;
@@ -427,9 +465,12 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db = dir.path().join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
-        let first = store.insert("a@h".into(), "b@h".into(), "one".into(), None).await.unwrap();
-        let second = store.insert("a@h".into(), "b@h".into(), "two".into(), None).await.unwrap();
-        let other = store.insert("a@h".into(), "c@h".into(), "other".into(), None).await.unwrap();
+        let first =
+            store.insert("a@h".into(), "b@h".into(), "one".into(), None, None).await.unwrap();
+        let second =
+            store.insert("a@h".into(), "b@h".into(), "two".into(), None, None).await.unwrap();
+        let other =
+            store.insert("a@h".into(), "c@h".into(), "other".into(), None, None).await.unwrap();
 
         let messages = store.inbox("b@h".into()).await.unwrap();
         let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
@@ -453,13 +494,15 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db = dir.path().join("sub").join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
-        let id = store.insert("a@h".into(), "b@h".into(), "hi".into(), None).await.unwrap();
+        let id =
+            store.insert("a@h".into(), "b@h".into(), "hi".into(), None, None).await.unwrap();
         assert_eq!(id, 1);
         assert_eq!(read_row(&db, id), ("a@h".into(), "b@h".into(), "hi".into()));
         drop(store);
 
         let store = Store::open(db.clone()).await.unwrap();
-        let next = store.insert("b@h".into(), "a@h".into(), "yo".into(), Some(id)).await.unwrap();
+        let next =
+            store.insert("b@h".into(), "a@h".into(), "yo".into(), Some(id), None).await.unwrap();
         assert_eq!(next, id + 1);
         assert_eq!(read_row(&db, id), ("a@h".into(), "b@h".into(), "hi".into()));
     }
