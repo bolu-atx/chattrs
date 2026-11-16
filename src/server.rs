@@ -1258,11 +1258,11 @@ mod tests {
         let mut asker = start_ask(
             &bin,
             &addr,
-            ("w@h", "c@h"),
+            "w@h",
             "15",
             (&out, &err),
-            "go?",
-            Some("release-26"),
+            client::Outgoing { topic: Some("release-26".into()), ..outgoing("c@h", "go?") },
+            &db,
         );
 
         let question = wait_for_question(&addr, "c@h").await;
@@ -1524,7 +1524,7 @@ mod tests {
             assert!(messages.is_empty(), "{who} has no announcement: {messages:?}");
         }
 
-        let out = run_chattrs(&bin, "send", &addr, "ops@h", &["--to", "w@h", "hi"]);
+        let out = run_chattrs(&bin, "send", &addr, "ops@h", &["--to", "w@h", "hi"], &db);
         assert!(out.status.success(), "send exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 1, "no preamble before the new id: {lines:?}");
@@ -1648,7 +1648,7 @@ mod tests {
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let out = dir.path().join("topic-watch.out");
-        let _watcher = start_topic_watch(&bin, &addr, "ops@h", &["release-26"], &out);
+        let _watcher = start_topic_watch(&bin, &addr, "ops@h", &["release-26"], &out, &db);
 
         let id = client::send(&addr, "w@h", None, announce("release-26", "build 421 is red"), false)
             .await
@@ -1683,17 +1683,17 @@ mod tests {
         let mut asker = start_ask(
             &bin,
             &addr,
-            ("w@h", "c@h"),
+            "w@h",
             "15",
             (&out, &err),
-            "go?",
-            Some("release-26"),
+            client::Outgoing { topic: Some("release-26".into()), ..outgoing("c@h", "go?") },
+            &db,
         );
 
         let question = wait_for_question(&addr, "c@h").await;
         assert_eq!(question.topic.as_deref(), Some("release-26"));
         let id_arg = question.id.to_string();
-        let reply_out = run_chattrs(&bin, "reply", &addr, "c@h", &[&id_arg, "yes"]);
+        let reply_out = run_chattrs(&bin, "reply", &addr, "c@h", &[&id_arg, "yes"], &db);
         assert!(reply_out.status.success(), "reply exits zero: {reply_out:?}");
 
         let status = wait_for_exit(&mut asker.child, 15).await;
@@ -2093,8 +2093,9 @@ mod tests {
         addr: &str,
         who: &str,
         out: &std::path::Path,
+        db: &std::path::Path,
     ) -> ProcChild {
-        start_topic_watch(bin, addr, who, &[], out)
+        start_topic_watch(bin, addr, who, &[], out, db)
     }
 
     fn start_topic_watch(
@@ -2103,6 +2104,7 @@ mod tests {
         who: &str,
         topics: &[&str],
         out: &std::path::Path,
+        db: &std::path::Path,
     ) -> ProcChild {
         let file = std::fs::File::create(out).expect("watch output file");
         let mut command = std::process::Command::new(bin);
@@ -2116,6 +2118,7 @@ mod tests {
             command.arg("--topic").arg(topic);
         }
         let child = command
+            .env("CHATTRS_DB", db)
             .stdout(file)
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -2188,7 +2191,7 @@ mod tests {
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let out = dir.path().join("watch.out");
-        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+        let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
         let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
@@ -2207,7 +2210,7 @@ mod tests {
         let mut server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let out = dir.path().join("watch.out");
-        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+        let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
@@ -2236,7 +2239,7 @@ mod tests {
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let out = dir.path().join("watch.out");
-        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+        let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "plain"), false)
             .await
@@ -2273,11 +2276,11 @@ mod tests {
     fn start_ask(
         bin: &std::path::Path,
         addr: &str,
-        asker: (&str, &str),
+        from: &str,
         timeout_secs: &str,
         files: (&std::path::Path, &std::path::Path),
-        body: &str,
-        topic: Option<&str>,
+        question: client::Outgoing,
+        db: &std::path::Path,
     ) -> ProcChild {
         let out_file = std::fs::File::create(files.0).expect("ask output file");
         let err_file = std::fs::File::create(files.1).expect("ask error file");
@@ -2287,16 +2290,17 @@ mod tests {
             .arg("--server")
             .arg(addr)
             .arg("--address")
-            .arg(asker.0)
+            .arg(from)
             .arg("--to")
-            .arg(asker.1)
+            .arg(question.to.expect("ask needs a recipient"))
             .arg("--timeout")
             .arg(timeout_secs);
-        if let Some(topic) = topic {
+        if let Some(topic) = question.topic {
             command.arg("--topic").arg(topic);
         }
         let child = command
-            .arg(body)
+            .arg(question.body)
+            .env("CHATTRS_DB", db)
             .stdout(out_file)
             .stderr(err_file)
             .spawn()
@@ -2347,7 +2351,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let question = wait_for_question(&addr, "c@h").await;
         assert_eq!(question.from, "w@h");
@@ -2376,7 +2380,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "1", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let status = wait_for_exit(&mut asker.child, 10).await;
         assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
@@ -2399,7 +2403,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let question = wait_for_question(&addr, "c@h").await;
         client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
@@ -2421,7 +2425,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "1", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "1", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let status = wait_for_exit(&mut asker.child, 10).await;
         assert_eq!(status.code(), Some(2), "ask exits 2 on a timeout");
@@ -2447,7 +2451,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let question = wait_for_question(&addr, "c@h").await;
         let noise = client::send(&addr, "x@h", None, outgoing("w@h", "noise"), false)
@@ -2482,7 +2486,7 @@ mod tests {
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
         let mut asker =
-            start_ask(&bin, &addr, ("w@h", "c@h"), "30", (&out, &err), "go?", None);
+            start_ask(&bin, &addr, "w@h", "30", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let question = wait_for_question(&addr, "c@h").await;
         server.stop();
@@ -2512,6 +2516,7 @@ mod tests {
         addr: &str,
         who: &str,
         extra: &[&str],
+        db: &std::path::Path,
     ) -> std::process::Output {
         std::process::Command::new(bin)
             .arg(subcommand)
@@ -2520,6 +2525,7 @@ mod tests {
             .arg("--address")
             .arg(who)
             .args(extra)
+            .env("CHATTRS_DB", db)
             .output()
             .expect("run chattrs")
     }
@@ -2542,7 +2548,7 @@ mod tests {
         wait_for_server(&addr).await;
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
 
-        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
+        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"], &db);
         assert!(out.status.success(), "send exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
@@ -2565,7 +2571,7 @@ mod tests {
             client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         let id_arg = original.to_string();
 
-        let out = run_chattrs(&bin, "reply", &addr, "b@h", &[&id_arg, "yo"]);
+        let out = run_chattrs(&bin, "reply", &addr, "b@h", &[&id_arg, "yo"], &db);
         assert!(out.status.success(), "reply exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
@@ -2590,7 +2596,7 @@ mod tests {
         wait_for_server(&addr).await;
         client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
 
-        let out = run_chattrs(&bin, "agents", &addr, "b@h", &[]);
+        let out = run_chattrs(&bin, "agents", &addr, "b@h", &[], &db);
         assert!(out.status.success(), "agents exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert!(lines.len() >= 5, "wrapped preamble plus agent lines: {lines:?}");
@@ -2617,7 +2623,7 @@ mod tests {
         client::send(&addr, "x@h", None, outgoing("w@h", "noise"), false).await.unwrap();
         let out = dir.path().join("ask.out");
         let err = dir.path().join("ask.err");
-        let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?", None);
+        let mut asker = start_ask(&bin, &addr, "w@h", "15", (&out, &err), outgoing("c@h", "go?"), &db);
 
         let question = wait_for_question(&addr, "c@h").await;
         client::reply(&addr, "c@h", None, question.id, "yes", None).await.unwrap();
@@ -2645,14 +2651,14 @@ mod tests {
         wait_for_server(&addr).await;
         client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
 
-        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
+        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"], &db);
         assert!(out.status.success(), "send exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 5, "wrapped preamble plus the new id: {lines:?}");
         let preamble = lines[..4].join("\n");
         assert!(preamble.contains("one"), "preamble is the unread message: {preamble}");
 
-        let again = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "three"]);
+        let again = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "three"], &db);
         assert!(again.status.success(), "send exits zero: {again:?}");
         let lines = stdout_lines(&again);
         assert_eq!(lines.len(), 1, "a second command prints only an id: {lines:?}");
@@ -2669,7 +2675,7 @@ mod tests {
         wait_for_server(&addr).await;
         client::send(&addr, "a@h", None, outgoing("b@h", "old"), false).await.unwrap();
         let out = dir.path().join("watch.out");
-        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+        let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
         let lines = wait_for_lines(&out, 1).await;
         let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
@@ -2697,7 +2703,7 @@ mod tests {
         wait_for_server(&addr).await;
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "one"), false).await.unwrap();
 
-        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "--json", "two"]);
+        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "--json", "two"], &db);
         assert!(out.status.success(), "send exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 2, "preamble plus the sent line: {lines:?}");
@@ -2723,7 +2729,7 @@ mod tests {
         wait_for_server(&addr).await;
         let first = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
 
-        let out = run_chattrs(&bin, "inbox", &addr, "b@h", &["--json"]);
+        let out = run_chattrs(&bin, "inbox", &addr, "b@h", &["--json"], &db);
         assert!(out.status.success(), "inbox exits zero: {out:?}");
         let lines = stdout_lines(&out);
         assert_eq!(lines.len(), 1, "one message line: {lines:?}");
@@ -2742,7 +2748,7 @@ mod tests {
         let _server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
         let out = dir.path().join("watch.out");
-        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+        let _watcher = start_watch(&bin, &addr, "b@h", &out, &db);
 
         let id = client::send(&addr, "a@h", None, outgoing("b@h", "hi"), false).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
