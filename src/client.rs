@@ -1,8 +1,7 @@
 //! chattrs — client: one TCP connection per command.
 //!
 //! Every command opens a fresh connection, sends a `hello`, then the command
-//! frame, and reads the response. `watch` keeps its connection open and
-//! streams broadcast messages to the caller.
+//! frame, and reads the response.
 
 use crate::model::{self, Inbound, Outbound};
 use crate::protocol;
@@ -36,78 +35,35 @@ async fn recv_frame(conn: &mut Conn) -> Result<Outbound, String> {
     protocol::decode(&line)
 }
 
-async fn open(server: &str, agent: &str, session: &str) -> Result<Conn, String> {
-    let mut conn = connect(server).await?;
-    send_frame(&mut conn, &Inbound::Hello { agent: agent.to_string(), session: session.to_string() })
-        .await?;
-    match recv_frame(&mut conn).await? {
-        Outbound::Welcome { .. } => Ok(conn),
-        Outbound::Error { message } => Err(message),
-        _ => Err("server sent an unexpected frame instead of welcome".to_string()),
-    }
-}
-
 /// Publish one message and return its id.
 pub async fn send(
     server: &str,
-    session: &str,
-    agent: &str,
+    address: &str,
+    token: Option<&str>,
+    to: &str,
     body: &str,
     reply_to: Option<u64>,
 ) -> Result<u64, String> {
-    let mut conn = open(server, agent, session).await?;
-    send_frame(&mut conn, &Inbound::Send { body: body.to_string(), reply_to }).await?;
-    match recv_frame(&mut conn).await? {
-        Outbound::Ack { id } => Ok(id),
-        Outbound::Error { message } => Err(message),
-        _ => Err("server sent an unexpected frame instead of an ack".to_string()),
-    }
-}
-
-/// Fetch recent messages from a session, newest last.
-pub async fn list(
-    server: &str,
-    session: &str,
-    agent: &str,
-    limit: Option<usize>,
-    after: Option<u64>,
-) -> Result<Vec<model::Message>, String> {
-    let mut conn = open(server, agent, session).await?;
-    send_frame(&mut conn, &Inbound::List { limit, after }).await?;
-    match recv_frame(&mut conn).await? {
-        Outbound::History { messages } => Ok(messages),
-        Outbound::Error { message } => Err(message),
-        _ => Err("server sent an unexpected frame instead of history".to_string()),
-    }
-}
-
-/// Stream new messages, calling `on_message` for each.
-pub async fn watch(
-    server: &str,
-    session: &str,
-    agent: &str,
-    mut on_message: impl FnMut(&model::Message),
-) -> Result<(), String> {
-    let mut conn = open(server, agent, session).await?;
-    send_frame(&mut conn, &Inbound::Watch).await?;
-    loop {
-        match recv_frame(&mut conn).await? {
-            Outbound::Message { id, session, agent, body, ts, reply_to } => {
-                on_message(&model::Message { id, session, agent, body, ts, reply_to });
-            }
-            Outbound::Error { message } => eprintln!("chattrs: {message}"),
-            _ => {}
-        }
-    }
-}
-
-/// List active sessions and their connected agents.
-pub async fn sessions(server: &str) -> Result<Vec<model::SessionInfo>, String> {
     let mut conn = connect(server).await?;
-    send_frame(&mut conn, &Inbound::Sessions).await?;
+    send_frame(
+        &mut conn,
+        &Inbound::Hello {
+            v: model::PROTOCOL_VERSION,
+            address: address.to_string(),
+            token: token.map(|token| token.to_string()),
+        },
+    )
+    .await?;
     match recv_frame(&mut conn).await? {
-        Outbound::Sessions { sessions } => Ok(sessions),
-        Outbound::Error { message } => Err(message),
-        _ => Err("server sent an unexpected frame instead of sessions".to_string()),
+        Outbound::Welcome { .. } => {}
+        Outbound::Error { code, message } => return Err(format!("{code}: {message}")),
+        _ => return Err("server sent an unexpected frame instead of welcome".to_string()),
+    }
+    send_frame(&mut conn, &Inbound::Send { to: to.to_string(), body: body.to_string(), reply_to })
+        .await?;
+    match recv_frame(&mut conn).await? {
+        Outbound::Sent { id } => Ok(id),
+        Outbound::Error { code, message } => Err(format!("{code}: {message}")),
+        _ => Err("server sent an unexpected frame instead of sent".to_string()),
     }
 }

@@ -2,8 +2,8 @@
 
 A small, distributed client/server messaging system for cross-agent
 coordination. One broker, any number of agents — `claude`, `muse`, `codex`,
-a shell script, a Python worker — joining named sessions, exchanging
-messages, and replying to each other.
+a shell script, a Python worker — each with an `agent@host` address, sending
+messages to each other through the broker.
 
 It is a plain Rust CLI. The wire protocol is line-delimited JSON over TCP,
 so any language with a socket and a JSON library can participate.
@@ -22,58 +22,45 @@ first use.
 
 ```bash
 # terminal 1 — run the broker
-chattrs serve
+chattrs serve --db /tmp/c.db
 
 # terminal 2 — claude sends a message
-export CHATTRS_AGENT=claude
-chattrs send "anyone know the coverage numbers?"
-
-# terminal 3 — muse listens and replies
-export CHATTRS_AGENT=muse
-chattrs watch                          # streams new messages as they land
-chattrs send --reply-to 1 "coverage is 87%"
-
-# anywhere — read the history
-chattrs list
-chattrs list --json                    # machine-readable
-chattrs sessions                       # who is connected, and where
+export CHATTRS_ADDRESS=claude@box1
+chattrs send --to muse@mac "anyone know the coverage numbers?"
 ```
 
-`send` prints the assigned message id; pass it to another agent's
-`send --reply-to <id>` to thread the conversation.
+`send` prints the assigned message id. `send --json` prints the `sent`
+frame instead: `{"type":"sent","id":12}`.
 
 ## Commands
 
 | Command | What it does |
 | ------- | ------------ |
-| `serve` | Run the broker on `--listen` (default `127.0.0.1:4646`). |
-| `send`  | Publish a message (positional text, or stdin when no text is given) and print its id. |
-| `list`  | Print recent messages in a session, newest last. `--json` for machines. |
-| `watch` | Stream new messages live. |
-| `sessions` | List active sessions, connected agents, and message counts. |
+| `serve` | Run the broker on `--listen` (default `127.0.0.1:4646`), storing to `--db`. |
+| `send`  | Post to `--to ADDR` and print the id (text args, else stdin). |
 
 Common flags:
 
-- `--server ADDR` — broker address (default `127.0.0.1:4646`).
-- `--session NAME` — session name (default `default`).
-- `--agent NAME` — sender identity, overridable with the `CHATTRS_AGENT`
-  environment variable (default `agent`).
-- `send --reply-to ID` — reply to a previous message.
-- `list --limit N --after ID` — window the history.
-- `serve --history N` — messages retained per session (default `500`).
+- `--server ADDR` — broker address (default `127.0.0.1:4646`,
+  `CHATTRS_SERVER`).
+- `--address ADDR` — own address, required until a default lands
+  (`CHATTRS_ADDRESS`).
+- `--token TOKEN` — token for the broker (`CHATTRS_TOKEN`).
+- `--json` — print JSON lines; every line carries a `type`.
+- `serve --db PATH` — SQLite path (`CHATTRS_DB`, default
+  `$XDG_DATA_HOME/chattrs/chattrs.db`).
 
 A message body that starts with `-` needs `--`:
-`chattrs send -- "- this starts with a dash"`.
+`chattrs send --to b@h -- "- this starts with a dash"`.
 
 ## Agents talking to each other
 
-Each agent runs the same binary and just passes `--agent`. The broker does
-not care which agent is which:
+Each agent runs the same binary and just passes `--address`. The broker
+does not care which agent is which:
 
 ```bash
-chattrs send --agent claude --session planning "proposal ready"
-chattrs send --agent muse  --session planning --reply-to 1 "reviewing now"
-chattrs send --agent codex --session planning --reply-to 2 "lgtm, ship it"
+CHATTRS_ADDRESS=claude@box1 chattrs send --to muse@mac "proposal ready"
+CHATTRS_ADDRESS=muse@mac chattrs send --to codex@box2 "reviewing now"
 ```
 
 Because the protocol is line-JSON over TCP, agents can also talk to the
@@ -84,43 +71,43 @@ or quick Python/Node integrations.
 
 One JSON object per line, `\n`-terminated. The `type` field disambiguates.
 
-Client → server:
+Client → broker:
 
 ```json
-{"type":"hello",    "agent":"claude", "session":"default"}
-{"type":"send",     "body":"hi", "reply_to":3}
-{"type":"list",     "limit":50, "after":3}
-{"type":"watch"}
-{"type":"sessions"}
+{"type":"hello", "v":1, "address":"codex@box1", "token":"…"}
+{"type":"send",  "to":"opus@mac", "body":"hi", "reply_to":null}
 ```
 
-Server → client:
+Broker → client:
 
 ```json
-{"type":"welcome",  "server":"chattrs", "session":"default"}
-{"type":"ack",      "id":12}
-{"type":"message",  "id":12, "session":"default", "agent":"claude", "body":"hi", "ts":1794763538737, "reply_to":3}
-{"type":"history",  "messages":[ ... ]}
-{"type":"sessions", "sessions":[{"name":"default","agents":["claude"],"message_count":2}]}
-{"type":"error",    "message":"message body is empty"}
+{"type":"welcome", "server":"chattrs", "v":1, "address":"codex@box1"}
+{"type":"sent",    "id":12}
+{"type":"error",   "code":"empty_body", "message":"body is empty"}
 ```
 
-Timestamps are milliseconds since the Unix epoch, stamped by the broker.
-`reply_to` is omitted when `null`. `send` is acknowledged with `ack` and the
-message id; `list` with `history`; `sessions` with `sessions`; `watch` keeps
-the connection open and streams `message` frames.
+`hello` (the token is optional) must be the first frame; anything else first
+gets `hello_required` and a closed connection. The broker sets the sender
+from the `hello` address; `send` carries no sender. A send to an unknown
+address succeeds — the inbox exists by name.
+
+Error codes: `bad_frame`, `hello_required`, `bad_version` (v ≠ 1),
+`bad_address`, `empty_body`, `too_large`. After `hello`, an error does not
+close the connection.
+
+Limits: an address is `user@host` (`[A-Za-z0-9._-]` each side, 128 bytes
+max). A body is 1 byte to 64 KiB. An inbound line over 128 KiB is rejected
+with `too_large`.
 
 ## Design
 
-- **One broker, many sessions.** A session is a named message log plus the
-  set of currently connected agents. Sessions with no history and no agents
-  are dropped.
-- **Presence, not accounts.** There is no authentication; an agent is
-  whoever its `hello` says it is. Run the broker on a trusted network or
-  loopback. Auth is tracked as future work in `docs/planning.md`.
-- **Broadcast for live, history for catch-up.** `watch` subscribes to new
-  messages; `list` reads the retained ring buffer.
-- **Small and boring.** No database, no framework. State lives in memory.
+- **Durable before anything else.** The broker commits each message to
+  SQLite before it confirms the send, so a restart loses nothing. The broker
+  never deletes a message.
+- **Addresses, not accounts.** An agent is whoever its `hello` says it is.
+  Run the broker on a trusted network or loopback. Token checks land in a
+  later story.
+- **Small and boring.** One SQLite file, line-JSON over TCP, no framework.
 
 ## Repository
 
@@ -128,6 +115,7 @@ the connection open and streams `message` frames.
 - `src/cli.rs` — argument parsing only.
 - `src/model.rs` — wire types and their serde shapes.
 - `src/protocol.rs` — line-JSON framing.
+- `src/store.rs` — SQLite storage.
 - `src/server.rs` — the broker.
 - `src/client.rs` — one connection per command.
 

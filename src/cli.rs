@@ -1,10 +1,10 @@
 //! CLI surface: argument parsing only. No networking, no state.
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 
 /// Broker address clients connect to and the server listens on by default.
 pub const DEFAULT_SERVER: &str = "127.0.0.1:4646";
-pub const DEFAULT_SESSION: &str = "default";
 
 /// Distributed messaging for cross-agent coordination.
 #[derive(Parser, Debug)]
@@ -18,14 +18,8 @@ pub struct Args {
 pub enum Command {
     /// Run the message broker.
     Serve(ServeArgs),
-    /// Publish a message and print its id.
+    /// Post a message to an address and print its id.
     Send(SendArgs),
-    /// List recent messages in a session.
-    List(ListArgs),
-    /// Stream new messages as they arrive.
-    Watch(WatchArgs),
-    /// List active sessions and their connected agents.
-    Sessions(SessionsArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -34,39 +28,43 @@ pub struct ServeArgs {
     #[arg(long, default_value = DEFAULT_SERVER)]
     pub listen: String,
 
-    /// Messages to retain per session once the ring buffer fills.
-    #[arg(long, default_value = "500")]
-    pub history: usize,
+    /// SQLite database path (created with parent directories as needed).
+    #[arg(long, env = "CHATTRS_DB")]
+    pub db: Option<PathBuf>,
 }
 
-/// Connection flags shared by the per-session client commands.
+/// Connection flags shared by the client commands.
 #[derive(clap::Args, Debug)]
-pub struct EndpointArgs {
+pub struct ClientArgs {
     /// Broker address to connect to.
-    #[arg(long, default_value = DEFAULT_SERVER)]
+    #[arg(long, default_value = DEFAULT_SERVER, env = "CHATTRS_SERVER")]
     pub server: String,
 
-    /// Session name.
-    #[arg(long, default_value = DEFAULT_SESSION)]
-    pub session: String,
+    /// Own address, as `user@host`.
+    #[arg(long, env = "CHATTRS_ADDRESS")]
+    pub address: String,
 
-    /// Sender identity (claude, muse, codex, …).
-    #[arg(long, default_value = "agent", env = "CHATTRS_AGENT")]
-    pub agent: String,
+    /// Token for the broker (checked once multi-host binds need it).
+    #[arg(long, env = "CHATTRS_TOKEN")]
+    pub token: Option<String>,
 }
 
 #[derive(clap::Args, Debug)]
 pub struct SendArgs {
     #[command(flatten)]
-    pub endpoint: EndpointArgs,
+    pub client: ClientArgs,
 
-    /// Reply to a previous message id.
+    /// Recipient address, as `user@host`.
     #[arg(long)]
-    pub reply_to: Option<u64>,
+    pub to: String,
 
     /// Message text. With no text, the body is read from stdin.
     #[arg(value_name = "MESSAGE")]
     pub message: Vec<String>,
+
+    /// Print the `sent` frame as JSON instead of the bare id.
+    #[arg(long)]
+    pub json: bool,
 }
 
 impl SendArgs {
@@ -82,63 +80,31 @@ impl SendArgs {
     }
 }
 
-#[derive(clap::Args, Debug)]
-pub struct ListArgs {
-    #[command(flatten)]
-    pub endpoint: EndpointArgs,
-
-    /// Maximum number of messages to return.
-    #[arg(long, default_value = "50")]
-    pub limit: usize,
-
-    /// Only return messages after this id.
-    #[arg(long)]
-    pub after: Option<u64>,
-
-    /// Print as JSON instead of a human-readable listing.
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(clap::Args, Debug)]
-pub struct WatchArgs {
-    #[command(flatten)]
-    pub endpoint: EndpointArgs,
-}
-
-#[derive(clap::Args, Debug)]
-pub struct SessionsArgs {
-    /// Broker address to connect to.
-    #[arg(long, default_value = DEFAULT_SERVER)]
-    pub server: String,
-
-    /// Print as JSON instead of a human-readable table.
-    #[arg(long)]
-    pub json: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn send_args(message: Vec<&str>) -> SendArgs {
+        SendArgs {
+            client: ClientArgs {
+                server: "x".into(),
+                address: "a@h".into(),
+                token: None,
+            },
+            to: "b@h".into(),
+            message: message.into_iter().map(|m| m.to_string()).collect(),
+            json: false,
+        }
+    }
+
     #[test]
     fn body_joins_positional_args() {
-        let args = SendArgs {
-            endpoint: EndpointArgs { server: "x".into(), session: "default".into(), agent: "claude".into() },
-            reply_to: None,
-            message: vec!["hello".into(), "world".into()],
-        };
-        assert_eq!(args.body(), "hello world");
+        assert_eq!(send_args(vec!["hello", "world"]).body(), "hello world");
     }
 
     #[test]
     fn body_returns_empty_when_no_args_and_empty_stdin() {
-        let args = SendArgs {
-            endpoint: EndpointArgs { server: "x".into(), session: "default".into(), agent: "claude".into() },
-            reply_to: None,
-            message: vec![],
-        };
         // A non-interactive test process has an empty stdin.
-        assert_eq!(args.body(), "");
+        assert_eq!(send_args(vec![]).body(), "");
     }
 }
