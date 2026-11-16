@@ -139,6 +139,75 @@ For pi, pass the same directory with `--skill`.
 Agents without a skill directory (Codex, Muse) get it from the
 coordinator, who puts `$(chattrs skill)` in the worker's prompt.
 
+## Run across hosts
+
+Run one broker on an always-on Linux host, reachable over Tailscale.
+Clients on other hosts connect to it with the shared token.
+
+Install the same binary on every host:
+
+```bash
+cargo install --git https://github.com/bolu-atx/chattrs
+```
+
+On the broker host, start the broker on its Tailscale IP:
+
+```bash
+chattrs serve --listen <tailscale-ip>:4646 --token <token> --db <path>
+```
+
+Keep it running with a `systemd --user` unit that restarts on
+failure. The token lives in an `EnvironmentFile` with mode 600,
+never in the unit file itself:
+
+```ini
+[Unit]
+Description=chattrs broker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=%h/.config/chattrs/env
+ExecStart=%h/.cargo/bin/chattrs serve --listen <tailscale-ip>:4646 --db <path>
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+# the env file holds one line: CHATTRS_TOKEN=<token>
+chmod 600 ~/.config/chattrs/env
+systemctl --user daemon-reload
+systemctl --user enable --now chattrs
+```
+
+On every client host, set the same three values:
+
+```bash
+export CHATTRS_SERVER=<tailscale-ip>:4646
+export CHATTRS_TOKEN=<token>
+export CHATTRS_ADDRESS=<agent>@<host>
+```
+
+`CHATTRS_ADDRESS` or `CHATTRS_AGENT` both work: set an explicit
+address per host, or set `CHATTRS_AGENT` and let the binary use
+`<agent>@<hostname>`.
+
+Limits: there is no TLS, so the token and the messages travel as
+clear text inside the tailnet. One token covers the whole fleet.
+Addresses are self-asserted: the token proves fleet membership,
+not which address is yours. Bind the Tailscale IP only, never a
+public address.
+
+A coordinator that starts a worker over ssh passes the same env
+on the ssh command line:
+
+```bash
+ssh <worker> "CHATTRS_SERVER=<tailscale-ip>:4646 \
+  CHATTRS_TOKEN=<token> CHATTRS_ADDRESS=<agent>@<host> chattrs inbox"
+```
+
 ## Protocol
 
 One JSON object per line, `\n`-terminated. The `type` field disambiguates.
