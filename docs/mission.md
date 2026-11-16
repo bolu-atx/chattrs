@@ -34,6 +34,7 @@ Operator
 Any agent
 - **N9** Find which agents exist and can be reached.
 - **N10** Receive messages mid-task without asking for them.
+- **N11** Never mistake an agent message for a user instruction.
 
 A one-shot worker that has exited cannot be woken. Its messages wait until
 it runs again.
