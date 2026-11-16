@@ -56,7 +56,8 @@ async fn hello(server: &str, address: &str, token: Option<&str>) -> Result<Conn,
     }
 }
 
-/// Publish one message and return its id.
+/// Publish one message and return its id. Prints unread messages first,
+/// as text or as JSON `message` lines when `json` is set.
 pub async fn send(
     server: &str,
     address: &str,
@@ -64,8 +65,9 @@ pub async fn send(
     to: &str,
     body: &str,
     reply_to: Option<u64>,
+    json: bool,
 ) -> Result<u64, String> {
-    publish(server, address, token, Some(to.to_string()), body, reply_to).await
+    publish(server, address, token, Some(to.to_string()), body, reply_to, json).await
 }
 
 /// Answer message `reply_to` and return the new id. The broker addresses the
@@ -77,7 +79,38 @@ pub async fn reply(
     reply_to: u64,
     body: &str,
 ) -> Result<u64, String> {
-    publish(server, address, token, None, body, Some(reply_to)).await
+    publish(server, address, token, None, body, Some(reply_to), false).await
+}
+
+/// Fetch unread messages on this connection, print them, flush stdout,
+/// then ack what was printed. Runs right after `hello`, before the
+/// command's own frame, so every command delivers what is waiting.
+async fn print_unread_preamble(conn: &mut Conn, json: bool) -> Result<(), String> {
+    send_frame(conn, &Inbound::Inbox).await?;
+    let messages = match recv_frame(conn).await? {
+        Outbound::Inbox { messages } => messages,
+        Outbound::Error { code, message } => return Err(format!("{code}: {message}")),
+        _ => return Err("server sent an unexpected frame instead of inbox".to_string()),
+    };
+    if messages.is_empty() {
+        return Ok(());
+    }
+    for message in &messages {
+        if json {
+            print!("{}", format_watch_line(message)?);
+        } else {
+            println!("{}", model::render_message(message));
+        }
+    }
+    use std::io::Write;
+    std::io::stdout().flush().map_err(|e| format!("flush stdout: {e}"))?;
+    let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
+    send_frame(conn, &Inbound::Ack { ids }).await?;
+    match recv_frame(conn).await? {
+        Outbound::Acked { .. } => Ok(()),
+        Outbound::Error { code, message } => Err(format!("{code}: {message}")),
+        _ => Err("server sent an unexpected frame instead of acked".to_string()),
+    }
 }
 
 async fn publish(
@@ -87,8 +120,10 @@ async fn publish(
     to: Option<String>,
     body: &str,
     reply_to: Option<u64>,
+    json: bool,
 ) -> Result<u64, String> {
     let mut conn = hello(server, address, token).await?;
+    print_unread_preamble(&mut conn, json).await?;
     send_frame(&mut conn, &Inbound::Send { to, body: body.to_string(), reply_to }).await?;
     match recv_frame(&mut conn).await? {
         Outbound::Sent { id } => Ok(id),
@@ -273,6 +308,8 @@ pub async fn wait_for_reply(
 
 /// Post a question and wait for its reply. The question is sent once;
 /// reconnects resend only the `wait`. Returns the question id and reply.
+/// Unread messages print before the question is sent, so the preamble
+/// never contains the reply to this `ask`.
 pub async fn ask(
     server: &str,
     address: &str,
@@ -280,19 +317,25 @@ pub async fn ask(
     to: &str,
     body: &str,
     timeout_secs: u64,
+    json: bool,
 ) -> Result<(u64, Message), WaitError> {
-    let id = send(server, address, token, to, body, None).await.map_err(WaitError::Failed)?;
+    let id = publish(server, address, token, Some(to.to_string()), body, None, json)
+        .await
+        .map_err(WaitError::Failed)?;
     let reply = wait_for_reply(server, address, token, id, timeout_secs).await?;
     Ok((id, reply))
 }
 
 /// List every address that ever said `hello`, sorted by address.
+/// Prints unread messages first, as text or as JSON `message` lines.
 pub async fn fetch_agents(
     server: &str,
     address: &str,
     token: Option<&str>,
+    json: bool,
 ) -> Result<Vec<Agent>, String> {
     let mut conn = hello(server, address, token).await?;
+    print_unread_preamble(&mut conn, json).await?;
     send_frame(&mut conn, &Inbound::Agents).await?;
     match recv_frame(&mut conn).await? {
         Outbound::Agents { agents } => Ok(agents),

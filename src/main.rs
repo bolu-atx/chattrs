@@ -46,6 +46,7 @@ async fn run(args: Args) -> Result<(), String> {
                 &c.to,
                 &c.body(),
                 None,
+                c.json,
             )
             .await?;
             if c.json {
@@ -84,6 +85,7 @@ async fn run(args: Args) -> Result<(), String> {
                 &c.to,
                 &c.body(),
                 timeout,
+                json,
             )
             .await
             {
@@ -137,8 +139,13 @@ async fn run(args: Args) -> Result<(), String> {
         }
         Command::Agents(c) => {
             let address = c.client.resolve_address()?;
-            let agents =
-                client::fetch_agents(&c.client.server, &address, c.client.token.as_deref()).await?;
+            let agents = client::fetch_agents(
+                &c.client.server,
+                &address,
+                c.client.token.as_deref(),
+                c.json,
+            )
+            .await?;
             for agent in &agents {
                 if c.json {
                     let mut value = serde_json::to_value(agent).map_err(|e| e.to_string())?;

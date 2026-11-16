@@ -671,7 +671,7 @@ mod tests {
     async fn message_survives_broker_restart() {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
@@ -688,7 +688,7 @@ mod tests {
         assert_eq!(recipient, "b@h");
         assert_eq!(body, "hi");
 
-        let next = client::send(&addr, "a@h", None, "b@h", "again", None).await.unwrap();
+        let next = client::send(&addr, "a@h", None, "b@h", "again", None, false).await.unwrap();
         assert_eq!(next, id + 1);
         handle.abort();
     }
@@ -699,7 +699,9 @@ mod tests {
         let mut last = 0;
         for i in 0..5 {
             let id =
-                client::send(&addr, "a@h", None, "b@h", &format!("msg {i}"), None).await.unwrap();
+                client::send(&addr, "a@h", None, "b@h", &format!("msg {i}"), None, false)
+                    .await
+                    .unwrap();
             assert!(id > last, "ids increase with send order");
             last = id;
         }
@@ -771,7 +773,7 @@ mod tests {
     async fn loopback_bind_without_token_starts() {
         assert!(check_listen("127.0.0.1:0", None).is_ok());
         let (addr, _dir, handle) = spawn().await;
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
         let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
@@ -800,7 +802,7 @@ mod tests {
             raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\"}\n").await;
         assert_eq!(error_code(&frame), "bad_token");
         assert!(raw_recv(&mut raw).await.is_err(), "connection closes after bad_token");
-        let err = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap_err();
+        let err = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap_err();
         assert!(err.contains("bad_token"), "got: {err}");
         assert!(!err.contains("s3"), "token never appears: {err}");
         handle.abort();
@@ -810,7 +812,7 @@ mod tests {
     async fn hello_with_right_token_is_welcomed() {
         let (addr, _dir, handle) = spawn_with_token("s3").await;
         let id =
-            client::send(&addr, "a@h", Some("s3"), "b@h", "hi", None).await.unwrap();
+            client::send(&addr, "a@h", Some("s3"), "b@h", "hi", None, false).await.unwrap();
         let messages = client::fetch_inbox(&addr, "b@h", Some("s3")).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
@@ -821,7 +823,7 @@ mod tests {
     #[tokio::test]
     async fn send_rejects_empty_body() {
         let (addr, _dir, handle) = spawn().await;
-        let err = client::send(&addr, "a@h", None, "b@h", "", None).await.unwrap_err();
+        let err = client::send(&addr, "a@h", None, "b@h", "", None, false).await.unwrap_err();
         assert!(err.contains("empty_body"), "got: {err}");
         handle.abort();
     }
@@ -830,7 +832,7 @@ mod tests {
     async fn send_rejects_oversize_body() {
         let (addr, _dir, handle) = spawn().await;
         let body = "x".repeat(model::MAX_BODY_BYTES + 1);
-        let err = client::send(&addr, "a@h", None, "b@h", &body, None).await.unwrap_err();
+        let err = client::send(&addr, "a@h", None, "b@h", &body, None, false).await.unwrap_err();
         assert!(err.contains("too_large"), "got: {err}");
         handle.abort();
     }
@@ -838,8 +840,8 @@ mod tests {
     #[tokio::test]
     async fn inbox_returns_only_messages_for_own_address() {
         let (addr, _dir, handle) = spawn().await;
-        let to_b = client::send(&addr, "a@h", None, "b@h", "for b", None).await.unwrap();
-        let to_c = client::send(&addr, "a@h", None, "c@h", "for c", None).await.unwrap();
+        let to_b = client::send(&addr, "a@h", None, "b@h", "for b", None, false).await.unwrap();
+        let to_c = client::send(&addr, "a@h", None, "c@h", "for c", None, false).await.unwrap();
 
         let b_messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
         assert_eq!(b_messages.len(), 1);
@@ -862,7 +864,9 @@ mod tests {
         let mut expected = Vec::new();
         for i in 0..3 {
             let id =
-                client::send(&addr, "a@h", None, "b@h", &format!("msg {i}"), None).await.unwrap();
+                client::send(&addr, "a@h", None, "b@h", &format!("msg {i}"), None, false)
+                    .await
+                    .unwrap();
             expected.push(id);
         }
         let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
@@ -875,7 +879,7 @@ mod tests {
     #[tokio::test]
     async fn unacked_message_is_redelivered_after_disconnect() {
         let (addr, _dir, handle) = spawn().await;
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
 
         let mut raw = raw_connect(&addr).await;
         raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"b@h\"}\n").await;
@@ -899,7 +903,7 @@ mod tests {
     #[tokio::test]
     async fn acked_message_is_not_redelivered() {
         let (addr, _dir, handle) = spawn().await;
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
 
         let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
         assert_eq!(messages.len(), 1);
@@ -914,8 +918,8 @@ mod tests {
     #[tokio::test]
     async fn ack_ignores_ids_of_other_addresses() {
         let (addr, _dir, handle) = spawn().await;
-        let to_b = client::send(&addr, "a@h", None, "b@h", "for b", None).await.unwrap();
-        let to_c = client::send(&addr, "a@h", None, "c@h", "for c", None).await.unwrap();
+        let to_b = client::send(&addr, "a@h", None, "b@h", "for b", None, false).await.unwrap();
+        let to_c = client::send(&addr, "a@h", None, "c@h", "for c", None, false).await.unwrap();
 
         let acked = client::ack(&addr, "b@h", None, &[to_b, to_c]).await.unwrap();
         assert_eq!(acked, vec![to_b], "only the own id changes");
@@ -929,7 +933,7 @@ mod tests {
     #[tokio::test]
     async fn reply_goes_to_sender_of_original() {
         let (addr, _dir, handle) = spawn().await;
-        let original = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        let original = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
         let id = client::reply(&addr, "b@h", None, original, "yo").await.unwrap();
         assert!(id > original, "reply gets a fresh id");
 
@@ -945,7 +949,7 @@ mod tests {
     #[tokio::test]
     async fn reply_carries_reply_to_id() {
         let (addr, _dir, handle) = spawn().await;
-        let original = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        let original = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
         let id = client::reply(&addr, "b@h", None, original, "yo").await.unwrap();
 
         let messages = client::fetch_inbox(&addr, "a@h", None).await.unwrap();
@@ -961,7 +965,7 @@ mod tests {
         let err = client::reply(&addr, "b@h", None, 9999, "yo").await.unwrap_err();
         assert!(err.contains("unknown_message"), "got: {err}");
         let err =
-            client::send(&addr, "a@h", None, "b@h", "hi", Some(9999)).await.unwrap_err();
+            client::send(&addr, "a@h", None, "b@h", "hi", Some(9999), false).await.unwrap_err();
         assert!(err.contains("unknown_message"), "got: {err}");
 
         let mut raw = raw_connect(&addr).await;
@@ -975,11 +979,13 @@ mod tests {
     #[tokio::test]
     async fn reply_by_non_recipient_is_rejected() {
         let (addr, _dir, handle) = spawn().await;
-        let original = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        let original = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
         let err = client::reply(&addr, "c@h", None, original, "intrude").await.unwrap_err();
         assert!(err.contains("not_recipient"), "got: {err}");
 
-        let id = client::send(&addr, "c@h", None, "d@h", "ref", Some(original)).await.unwrap();
+        let id = client::send(&addr, "c@h", None, "d@h", "ref", Some(original), false)
+            .await
+            .unwrap();
         let messages = client::fetch_inbox(&addr, "d@h", None).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, id);
@@ -991,7 +997,7 @@ mod tests {
     async fn message_to_offline_address_survives_restart_and_arrives_once() {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
@@ -1012,10 +1018,10 @@ mod tests {
     #[tokio::test]
     async fn agents_lists_addresses_that_said_hello() {
         let (addr, _dir, handle) = spawn().await;
-        client::send(&addr, "b@h", None, "a@h", "hi", None).await.unwrap();
+        client::send(&addr, "b@h", None, "a@h", "hi", None, false).await.unwrap();
         client::fetch_inbox(&addr, "a@h", None).await.unwrap();
 
-        let agents = client::fetch_agents(&addr, "a@h", None).await.unwrap();
+        let agents = client::fetch_agents(&addr, "a@h", None, false).await.unwrap();
         let names: Vec<&str> =
             agents.iter().map(|agent| agent.address.as_str()).collect();
         assert_eq!(names, vec!["a@h", "b@h"]);
@@ -1026,9 +1032,9 @@ mod tests {
     #[tokio::test]
     async fn agents_omits_addresses_that_only_received() {
         let (addr, _dir, handle) = spawn().await;
-        client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
 
-        let agents = client::fetch_agents(&addr, "a@h", None).await.unwrap();
+        let agents = client::fetch_agents(&addr, "a@h", None, false).await.unwrap();
         let names: Vec<&str> =
             agents.iter().map(|agent| agent.address.as_str()).collect();
         assert_eq!(names, vec!["a@h"]);
@@ -1062,7 +1068,7 @@ mod tests {
     }
 
     async fn seen(server: &str, address: &str) -> u64 {
-        client::fetch_agents(server, "observer@h", None)
+        client::fetch_agents(server, "observer@h", None, false)
             .await
             .unwrap()
             .into_iter()
@@ -1075,11 +1081,11 @@ mod tests {
     async fn agents_survive_broker_restart() {
         let (addr, dir, handle) = spawn().await;
         let db = dir.path().join("chattrs.db");
-        client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
         handle.abort();
 
         let (addr, handle) = spawn_at(&db).await;
-        let agents = client::fetch_agents(&addr, "a@h", None).await.unwrap();
+        let agents = client::fetch_agents(&addr, "a@h", None, false).await.unwrap();
         assert!(
             agents.iter().any(|agent| agent.address == "a@h"),
             "agents survive: {agents:?}"
@@ -1107,8 +1113,8 @@ mod tests {
     #[tokio::test]
     async fn watch_delivers_unread_then_live_messages_in_order() {
         let (addr, _dir, handle) = spawn().await;
-        let first = client::send(&addr, "a@h", None, "b@h", "one", None).await.unwrap();
-        let second = client::send(&addr, "a@h", None, "b@h", "two", None).await.unwrap();
+        let first = client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+        let second = client::send(&addr, "a@h", None, "b@h", "two", None, false).await.unwrap();
 
         let mut first_watcher = raw_connect(&addr).await;
         raw_watch(&mut first_watcher, "b@h").await;
@@ -1126,7 +1132,7 @@ mod tests {
         assert_eq!(again_first.id, first);
         assert_eq!(again_second.id, second);
 
-        let third = client::send(&addr, "a@h", None, "b@h", "three", None).await.unwrap();
+        let third = client::send(&addr, "a@h", None, "b@h", "three", None, false).await.unwrap();
         let live_first = read_watched_message(&mut first_watcher).await;
         let live_second = read_watched_message(&mut second_watcher).await;
         assert_eq!(live_first.id, third);
@@ -1289,7 +1295,7 @@ mod tests {
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
-        let id = client::send(&addr, "a@h", None, "b@h", "hi", None).await.unwrap();
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
         let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
         assert_eq!(value["id"].as_u64(), Some(id));
@@ -1308,7 +1314,7 @@ mod tests {
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
-        let first = client::send(&addr, "a@h", None, "b@h", "one", None).await.unwrap();
+        let first = client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
         let lines = wait_for_lines(&out, 1).await;
         let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
         assert_eq!(value["id"].as_u64(), Some(first));
@@ -1317,7 +1323,7 @@ mod tests {
         server.stop();
         let mut server = start_server(&bin, &addr, &db);
         wait_for_server(&addr).await;
-        let second = client::send(&addr, "a@h", None, "b@h", "two", None).await.unwrap();
+        let second = client::send(&addr, "a@h", None, "b@h", "two", None, false).await.unwrap();
         let lines = wait_for_lines(&out, 2).await;
         let value: serde_json::Value = serde_json::from_str(&lines[1]).expect("JSON line");
         assert_eq!(value["id"].as_u64(), Some(second));
@@ -1337,9 +1343,9 @@ mod tests {
         let out = dir.path().join("watch.out");
         let _watcher = start_watch(&bin, &addr, "b@h", &out);
 
-        let first = client::send(&addr, "a@h", None, "b@h", "plain", None).await.unwrap();
+        let first = client::send(&addr, "a@h", None, "b@h", "plain", None, false).await.unwrap();
         let second =
-            client::send(&addr, "a@h", None, "b@h", "answer", Some(first)).await.unwrap();
+            client::send(&addr, "a@h", None, "b@h", "answer", Some(first), false).await.unwrap();
         let lines = wait_for_lines(&out, 2).await;
         assert_eq!(lines.len(), 2, "watch prints one line per message: {lines:?}");
         let plain: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
@@ -1533,7 +1539,7 @@ mod tests {
             start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?");
 
         let question = wait_for_question(&addr, "c@h").await;
-        let noise = client::send(&addr, "x@h", None, "w@h", "noise", None).await.unwrap();
+        let noise = client::send(&addr, "x@h", None, "w@h", "noise", None, false).await.unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         assert!(
             asker.child.try_wait().expect("poll ask child").is_none(),
@@ -1585,5 +1591,205 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1, "the question exists once in the DB");
         server.stop();
+    }
+
+    fn run_chattrs(
+        bin: &std::path::Path,
+        subcommand: &str,
+        addr: &str,
+        who: &str,
+        extra: &[&str],
+    ) -> std::process::Output {
+        std::process::Command::new(bin)
+            .arg(subcommand)
+            .arg("--server")
+            .arg(addr)
+            .arg("--address")
+            .arg(who)
+            .args(extra)
+            .output()
+            .expect("run chattrs")
+    }
+
+    fn stdout_lines(out: &std::process::Output) -> Vec<String> {
+        String::from_utf8(out.stdout.clone())
+            .expect("stdout is utf8")
+            .lines()
+            .map(|line| line.to_string())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn send_prints_unread_messages_before_its_id() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let first = client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+
+        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
+        assert!(out.status.success(), "send exits zero: {out:?}");
+        let lines = stdout_lines(&out);
+        assert_eq!(lines.len(), 2, "preamble plus the new id: {lines:?}");
+        assert!(lines[0].contains("one"), "first line is the unread message: {}", lines[0]);
+        assert!(lines[0].contains("a@h"), "preamble names the sender: {}", lines[0]);
+        let second: u64 = lines[1].parse().expect("second line is the new id");
+        assert!(second > first, "the id comes after the preamble: {lines:?}");
+    }
+
+    #[tokio::test]
+    async fn reply_prints_unread_messages_first() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let original =
+            client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+        let id_arg = original.to_string();
+
+        let out = run_chattrs(&bin, "reply", &addr, "b@h", &[&id_arg, "yo"]);
+        assert!(out.status.success(), "reply exits zero: {out:?}");
+        let lines = stdout_lines(&out);
+        assert_eq!(lines.len(), 2, "preamble plus the new id: {lines:?}");
+        assert!(lines[0].contains("hi"), "first line is the unread message: {}", lines[0]);
+        let second: u64 = lines[1].parse().expect("second line is the new id");
+        assert!(second > original, "the reply id comes after the preamble: {lines:?}");
+
+        let messages = client::fetch_inbox(&addr, "a@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1, "the reply reaches the asker: {messages:?}");
+        assert_eq!(messages[0].id, second);
+        assert_eq!(messages[0].body, "yo");
+    }
+
+    #[tokio::test]
+    async fn agents_prints_unread_messages_first() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+
+        let out = run_chattrs(&bin, "agents", &addr, "b@h", &[]);
+        assert!(out.status.success(), "agents exits zero: {out:?}");
+        let lines = stdout_lines(&out);
+        assert!(lines.len() >= 2, "preamble plus agent lines: {lines:?}");
+        assert!(lines[0].contains("hi"), "first line is the unread message: {}", lines[0]);
+        assert!(
+            lines[1..].iter().any(|line| line.contains("a@h")),
+            "agents still lists a@h: {lines:?}"
+        );
+        assert!(
+            lines[1..].iter().any(|line| line.contains("b@h")),
+            "agents still lists b@h: {lines:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_prints_unread_before_sending_and_then_the_reply() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        client::send(&addr, "x@h", None, "w@h", "noise", None, false).await.unwrap();
+        let out = dir.path().join("ask.out");
+        let err = dir.path().join("ask.err");
+        let mut asker = start_ask(&bin, &addr, ("w@h", "c@h"), "15", (&out, &err), "go?");
+
+        let question = wait_for_question(&addr, "c@h").await;
+        client::reply(&addr, "c@h", None, question.id, "yes").await.unwrap();
+
+        let status = wait_for_exit(&mut asker.child, 15).await;
+        assert_eq!(status.code(), Some(0), "ask exits zero on a reply");
+        let lines = read_out_lines(&out);
+        assert_eq!(lines.len(), 2, "preamble plus the reply: {lines:?}");
+        assert!(lines[0].contains("noise"), "preamble prints what waited: {}", lines[0]);
+        assert!(!lines[0].contains("yes"), "preamble never contains the reply: {}", lines[0]);
+        assert!(lines[1].contains("yes"), "ask prints the reply: {}", lines[1]);
+        let wanted = format!("(re {})", question.id);
+        assert!(lines[1].contains(&wanted), "reply cites the question: {}", lines[1]);
+    }
+
+    #[tokio::test]
+    async fn preamble_acks_what_it_prints() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+
+        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "two"]);
+        assert!(out.status.success(), "send exits zero: {out:?}");
+        let lines = stdout_lines(&out);
+        assert_eq!(lines.len(), 2, "preamble plus the new id: {lines:?}");
+        assert!(lines[0].contains("one"), "first line is the unread message: {}", lines[0]);
+
+        let again = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "three"]);
+        assert!(again.status.success(), "send exits zero: {again:?}");
+        let lines = stdout_lines(&again);
+        assert_eq!(lines.len(), 1, "a second command prints only an id: {lines:?}");
+        lines[0].parse::<u64>().expect("the only line is the new id");
+    }
+
+    #[tokio::test]
+    async fn watch_has_no_preamble() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        client::send(&addr, "a@h", None, "b@h", "old", None, false).await.unwrap();
+        let out = dir.path().join("watch.out");
+        let _watcher = start_watch(&bin, &addr, "b@h", &out);
+
+        let lines = wait_for_lines(&out, 1).await;
+        let value: serde_json::Value = serde_json::from_str(&lines[0]).expect("JSON line");
+        assert_eq!(value["type"].as_str(), Some("message"));
+        assert_eq!(value["body"].as_str(), Some("old"));
+
+        client::send(&addr, "a@h", None, "b@h", "new", None, false).await.unwrap();
+        let lines = wait_for_lines(&out, 2).await;
+        let mut bodies = Vec::new();
+        for line in &lines {
+            let value: serde_json::Value = serde_json::from_str(line).expect("JSON line");
+            assert_eq!(value["type"].as_str(), Some("message"), "watch prints JSON: {line}");
+            bodies.push(value["body"].as_str().expect("message carries a body").to_string());
+        }
+        assert_eq!(bodies, vec!["old", "new"], "each message prints once: {lines:?}");
+    }
+
+    #[tokio::test]
+    async fn json_preamble_lines_have_type_message() {
+        let dir = TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        let addr = free_addr();
+        let bin = ensure_bin();
+        let _server = start_server(&bin, &addr, &db);
+        wait_for_server(&addr).await;
+        let first = client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+
+        let out = run_chattrs(&bin, "send", &addr, "b@h", &["--to", "a@h", "--json", "two"]);
+        assert!(out.status.success(), "send exits zero: {out:?}");
+        let lines = stdout_lines(&out);
+        assert_eq!(lines.len(), 2, "preamble plus the sent line: {lines:?}");
+        let preamble: serde_json::Value =
+            serde_json::from_str(&lines[0]).expect("preamble is JSON");
+        assert_eq!(preamble["type"].as_str(), Some("message"), "preamble line: {}", lines[0]);
+        assert_eq!(preamble["body"].as_str(), Some("one"));
+        assert_eq!(preamble["id"].as_u64(), Some(first));
+        let sent: serde_json::Value = serde_json::from_str(&lines[1]).expect("sent is JSON");
+        assert_eq!(sent["type"].as_str(), Some("sent"), "own line: {}", lines[1]);
+        let id = sent["id"].as_u64().expect("sent carries an id");
+        assert!(id > first, "the new id follows the preamble");
     }
 }

@@ -45,6 +45,11 @@ to stdout, so it works under a watcher like Claude Code's Monitor tool.
 the reply, prints it, acks it, and exits 0. On a timeout it exits 2 and
 the late reply stays unread. `--timeout 0` waits with no limit.
 
+`send`, `reply`, `ask`, and `agents` print unread messages first, then
+their own output. With `--json` the preamble lines are `message` objects;
+a reader tells them from the command's own line by `type`. `watch` and
+`serve` print no preamble.
+
 ## Commands
 
 | Command | What it does |
