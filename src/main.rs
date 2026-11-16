@@ -168,14 +168,14 @@ async fn cmd_watch(c: cli::WatchArgs) -> Result<(), RunError> {
         return Err(RunError::Message(format!("topic is invalid: {bad}")));
     }
     let announcing = !c.topic.is_empty();
-    let mut watcher = client::Watcher::new(endpoint.clone(), c.topic.clone());
+    let mut watcher = client::Watcher::new(endpoint, c.topic.clone());
     loop {
         let message = watcher.next_message().await?;
         write(&output::message_json(&message))?;
         if announcing {
             continue;
         }
-        match client::ack(&endpoint, &[message.id]).await {
+        match watcher.ack(message.id).await {
             Ok(_) => {}
             Err(error @ client::ClientError::Server { .. }) => return Err(error.into()),
             Err(error @ client::ClientError::Protocol(_)) => return Err(error.into()),
@@ -201,15 +201,14 @@ async fn cmd_ask(c: cli::AskArgs) -> Result<(), RunError> {
             topic: c.topic.clone(),
         })
         .await?;
-    drop(conn);
-    match client::wait_for_reply(&endpoint, id, c.timeout).await {
-        Ok(reply) => {
+    match client::wait_for_reply(&endpoint, conn, id, c.timeout).await {
+        Ok((mut conn, reply)) => {
             if c.json {
                 write(&output::message_json(&reply))?;
             } else {
                 write(&output::message_text(&reply))?;
             }
-            client::ack(&endpoint, &[reply.id]).await?;
+            conn.ack(&[reply.id]).await?;
             Ok(())
         }
         Err(client::ClientError::Timeout { id }) => {

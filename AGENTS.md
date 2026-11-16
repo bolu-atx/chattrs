@@ -37,8 +37,8 @@ CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to
 | `src/output.rs` | Every line the CLI writes to stdout: text rendering, JSON lines, timestamps, the stdout writer |
 | `src/protocol.rs` | Line-JSON framing: `encode`/`decode` |
 | `src/store.rs` | SQLite storage: one `Connection` in `Arc<Mutex<_>>`, blocking calls |
-| `src/server.rs` | The broker: `hello`, `send`/`reply`, `inbox`/`ack`, `watch` fan-out, `wait`, `agents`, `log` |
-| `src/client.rs` | One connection per command, returns data and prints nothing; `watch` streams through a `Watcher`, `ask` holds a `wait` open, `log` pages history |
+| `src/server.rs` | The broker: one dispatch per frame, one broadcast push, `watch`/`wait` as connection state; tests in `src/server/tests/` |
+| `src/client.rs` | One connection per command, returns data and prints nothing; `watch` streams and acks through a `Watcher` on its own connection, `ask` sends, waits, and acks on one connection, `log` pages history |
 | `src/skill.rs` | Embedded agent skill text printed by `chattrs skill` |
 | `skills/chattrs/SKILL.md` | Agent skill: `send`, `ask`, `reply`, no polling |
 
@@ -46,8 +46,12 @@ Key patterns:
 
 - **Data first.** Types live in `model.rs` and carry the wire shape; behavior
   follows. `model`/`protocol` stay pure — no sockets, no IO.
-- **Never block the broker.** Each connection runs its own tokio task with a
-  reader loop; storage calls run in `spawn_blocking`.
+- **Never block the broker.** Each connection runs its own tokio task. A
+  reader task owns the bounded line read and forwards lines over a channel;
+  the connection loop selects between those lines and pushed messages, and
+  storage calls run in `spawn_blocking`.
+- **One push path.** The broker broadcasts each stored message once. Each
+  connection filters pushes by its own watch and wait state.
 - **Commit before confirm.** A send is written to SQLite before the broker
   replies `sent`. The broker never deletes a message.
 
@@ -61,8 +65,8 @@ module layout, naming, comments, state, and the networking conventions.
 - End of work, before every push: `make ci`, clean. CI runs the same
   commands.
 - `cargo test` after every behavior change. Integration tests in
-  `src/server.rs` bind an ephemeral `127.0.0.1:0` and drive the real client
-  over TCP — no mocks.
+  `src/server/tests/` bind an ephemeral `127.0.0.1:0` and drive the real
+  client over TCP — no mocks.
 
 ## Planning
 

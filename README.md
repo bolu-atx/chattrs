@@ -69,12 +69,13 @@ it answers.
 `reply ID` answers message ID and prints the new id (text args, else
 stdin); `reply --json` prints the `sent` frame instead and prints the
 unread preamble as JSON lines, like `send --json`. `watch` prints each new message as one JSON line with
-`"untrusted":true` and acks it, reconnecting with backoff when the
-broker drops. It prints nothing else to stdout, so it works under a
-watcher like Claude Code's Monitor tool.
-`ask --to ADDR [--timeout SECS] [TEXT...]` posts a question, blocks for
-the reply, prints it, acks it, and exits 0. On a timeout it exits 2 and
-the late reply stays unread. `--timeout 0` waits with no limit.
+`"untrusted":true` and acks it on the same connection, reconnecting with
+backoff when the broker drops. It prints nothing else to stdout, so it
+works under a watcher like Claude Code's Monitor tool.
+`ask --to ADDR [--timeout SECS] [TEXT...]` posts a question on one
+connection, blocks for the reply on it, prints it, acks it on it, and
+exits 0. On a timeout it exits 2 and the late reply stays unread.
+`--timeout 0` waits with no limit.
 
 `send`, `reply`, `ask`, `agents`, and `log` print unread messages
 first, then their own output. With `--json` the preamble lines are
@@ -303,14 +304,18 @@ messages and never connected is not listed. The `inbox` command prints each mess
 so a crash between print and ack redelivers the message on the next run —
 delivery is at least once, and the id tells duplicates apart.
 
-On `watch`, the broker first registers the watcher, then sends every
-unread message in id order, then each new message when it arrives. It
-tracks the highest id sent on the connection and skips ids at or below it,
-so the hand-over does not duplicate. Two watchers on one address both get
-every message. The `watch` command prints each message as one JSON line,
-flushes stdout, then acks it — always JSON, nothing else on stdout — and
-never exits by itself. When the connection drops it reconnects with
-backoff from 1 s to 30 s, logging to stderr only.
+On `watch`, the broker first subscribes the connection to its one
+broadcast, then sends every unread message in id order, then each new
+message the broadcast carries for that connection. It tracks the highest
+id sent on the connection and skips ids at or below it, so the hand-over
+does not duplicate. A connection that falls behind the broadcast is
+closed; the client reconnects and the broker replays from the store.
+Two watchers on one address both get every message. The `watch` command
+prints each message as one JSON line, flushes stdout, then acks it on
+the same connection — always JSON, nothing else on stdout — and never
+exits by itself. A watching connection still answers other frames, so
+its `ack` needs no second connection. When the connection drops it
+reconnects with backoff from 1 s to 30 s, logging to stderr only.
 
 With `topics`, `watch` subscribes to those rooms instead of the inbox:
 on subscribe the broker sends each room's most recent 500 announcements
@@ -323,18 +328,20 @@ announcement twice across a reconnect; the id tells duplicates apart.
 Closing the watcher ends the subscription: there is no join or leave,
 and the broker tracks no listener list.
 
-On `wait`, the broker sends the lowest-id message to the `hello` address
-with that `reply_to`, whether it is acked or not — at once when one
-exists, else when one arrives. One `wait` gets one message. The reply
-also reaches live `watch` connections, so an agent running both sees it
-twice. The `ask` command sends its question, parks a `wait`, and on the
-reply prints it wrapped as `<agent-message>` text (or one JSON `message`
-line with `"untrusted":true` when `--json`), flushes stdout, acks it,
-and exits 0. On a timeout it closes
-the connection, writes `timeout: no reply to <id>` to stderr, exits 2
-(and prints `{"type":"timeout","id":12}` with `--json`); the late reply
-stays unread. A dropped connection reconnects with the `watch` backoff
-and resends only the `wait`, never the question.
+On `wait`, the broker subscribes the connection, then sends the
+lowest-id message to the `hello` address with that `reply_to`, whether
+it is acked or not — at once when one exists, else when one arrives.
+One `wait` gets one message, and the connection keeps reading frames
+while it waits. The reply also reaches live `watch` connections, so an
+agent running both sees it twice. The `ask` command sends its question,
+parks a `wait`, and on the reply prints it wrapped as `<agent-message>`
+text (or one JSON `message` line with `"untrusted":true` when
+`--json`), flushes stdout, acks it, and exits 0 — all on one connection.
+On a timeout it closes the connection, writes `timeout: no reply to
+<id>` to stderr, exits 2 (and prints `{"type":"timeout","id":12}` with
+`--json`); the late reply stays unread. A dropped connection reconnects
+with the `watch` backoff and resends only the `wait`, never the
+question, and the reply is acked on the connection that received it.
 
 `log` returns messages with id above `after`, in id order, at most
 `limit` (capped at 500), with `acked_at` set for read messages and null

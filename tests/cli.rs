@@ -36,14 +36,30 @@ impl Broker {
     fn start() -> Broker {
         let dir = tempfile::TempDir::new().expect("make a temp dir");
         let db = dir.path().join("c.db");
-        let addr = format!("127.0.0.1:{}", free_port());
-        let child = Command::new(binary())
-            .args(["serve", "--listen", addr.as_str(), "--db", db.to_str().expect("db path")])
+        let mut child = Command::new(binary())
+            .args(["serve", "--listen", "127.0.0.1:0", "--db", db.to_str().expect("db path")])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .expect("spawn the broker");
+        let mut stderr = child.stderr.take().expect("broker stderr");
+        let (sender, receiver) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let mut sent = false;
+            for line in BufReader::new(&mut stderr).lines() {
+                let Ok(line) = line else { break };
+                if !sent {
+                    if let Some(addr) = line.strip_prefix("chattrs: serving on ") {
+                        let _ = sender.send(addr.trim().to_string());
+                        sent = true;
+                    }
+                }
+            }
+        });
+        let addr = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("broker prints its serving address");
         let mut broker = Broker { child, _dir: dir, addr };
         broker.wait_until_ready();
         broker

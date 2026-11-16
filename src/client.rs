@@ -119,6 +119,19 @@ impl Client {
         }
     }
 
+    /// Send a `wait` for `reply_to` on this connection and wait for the
+    /// reply message on it.
+    pub async fn wait_reply(&mut self, reply_to: u64) -> Result<Message, ClientError> {
+        self.send_frame(&Inbound::Wait { reply_to }).await?;
+        self.next_message().await
+    }
+
+    /// Send an `ack` without waiting for its answer. The next
+    /// `next_message` skips the `acked` frame.
+    pub async fn ack_sent(&mut self, id: u64) -> Result<(), ClientError> {
+        self.send_frame(&Inbound::Ack { ids: vec![id] }).await
+    }
+
     /// Wait for the next streamed message, skipping other frames.
     pub async fn next_message(&mut self) -> Result<Message, ClientError> {
         loop {
@@ -249,79 +262,84 @@ pub fn next_backoff_secs(current: u64) -> u64 {
     (current * 2).min(30)
 }
 
-/// Wait for the reply to `reply_to`, reconnecting with backoff when the
-/// connection drops and resending only the `wait`. Only an I/O failure
-/// reconnects; a broker error or a bad frame fails the wait. The question
-/// is sent once by the caller and never here. `timeout_secs` of zero
-/// waits with no limit; otherwise the whole wait, reconnects included,
-/// is bounded.
+/// Sleep for one backoff step, bounded by `deadline`. A passed deadline
+/// is the `ask` timeout for `reply_to`.
+async fn pause_backoff(
+    deadline: Option<tokio::time::Instant>,
+    backoff_secs: u64,
+    reply_to: u64,
+) -> Result<(), ClientError> {
+    match deadline {
+        Some(end) => {
+            let now = tokio::time::Instant::now();
+            if now >= end {
+                return Err(ClientError::Timeout { id: reply_to });
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs).min(end - now)).await;
+            if tokio::time::Instant::now() >= end {
+                return Err(ClientError::Timeout { id: reply_to });
+            }
+            Ok(())
+        }
+        None => {
+            tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+            Ok(())
+        }
+    }
+}
+
+/// Wait for the reply to `reply_to` on `client`, reconnecting with
+/// backoff when the connection drops and resending only the `wait` on a
+/// new connection. Only an I/O failure reconnects; a broker error or a
+/// bad frame fails the wait. The question is sent once by the caller and
+/// never here. `timeout_secs` of zero waits with no limit; otherwise the
+/// whole wait, reconnects included, is bounded. On success the live
+/// connection comes back with the reply, so the caller acks on it.
 pub async fn wait_for_reply(
     endpoint: &Endpoint,
+    client: Client,
     reply_to: u64,
     timeout_secs: u64,
-) -> Result<Message, ClientError> {
+) -> Result<(Client, Message), ClientError> {
     let deadline = if timeout_secs == 0 {
         None
     } else {
         Some(tokio::time::Instant::now() + std::time::Duration::from_secs(timeout_secs))
     };
     let mut backoff_secs: u64 = 1;
+    let mut current = Some(client);
     loop {
-        let attempt = async {
-            let mut client = match Client::connect(endpoint).await {
-                Ok(client) => client,
-                Err(error) => return (false, Err(error)),
-            };
-            if let Err(error) = client.send_frame(&Inbound::Wait { reply_to }).await {
-                return (true, Err(error));
-            }
-            (true, client.next_message().await)
+        let mut conn = match current.take() {
+            Some(conn) => conn,
+            None => match Client::connect(endpoint).await {
+                Ok(conn) => conn,
+                Err(error) => {
+                    eprintln!("chattrs: ask cannot connect: {error}, retrying in {backoff_secs}s");
+                    pause_backoff(deadline, backoff_secs, reply_to).await?;
+                    backoff_secs = next_backoff_secs(backoff_secs);
+                    continue;
+                }
+            },
         };
-        let (connected, result) = match deadline {
-            Some(end) => match tokio::time::timeout_at(end, attempt).await {
-                Ok(outcome) => outcome,
+        backoff_secs = 1;
+        let waited = match deadline {
+            Some(end) => match tokio::time::timeout_at(end, conn.wait_reply(reply_to)).await {
+                Ok(result) => result,
                 Err(_) => return Err(ClientError::Timeout { id: reply_to }),
             },
-            None => attempt.await,
+            None => conn.wait_reply(reply_to).await,
         };
-        if connected {
-            backoff_secs = 1;
-        }
-        match result {
-            Ok(message) => return Ok(message),
+        match waited {
+            Ok(message) => return Ok((conn, message)),
             Err(error @ ClientError::Server { .. }) => return Err(error),
             Err(error @ ClientError::Protocol(_)) => return Err(error),
             Err(error @ ClientError::Timeout { .. }) => return Err(error),
             Err(error) => {
-                if let Some(end) = deadline {
-                    if tokio::time::Instant::now() >= end {
-                        return Err(ClientError::Timeout { id: reply_to });
-                    }
-                }
-                if connected {
-                    eprintln!("chattrs: ask disconnected: {error}, retrying in {backoff_secs}s");
-                } else {
-                    eprintln!("chattrs: ask cannot connect: {error}, retrying in {backoff_secs}s");
-                }
+                eprintln!("chattrs: ask disconnected: {error}, retrying in {backoff_secs}s");
+                pause_backoff(deadline, backoff_secs, reply_to).await?;
+                backoff_secs = next_backoff_secs(backoff_secs);
             }
         }
-        match deadline {
-            Some(end) => {
-                let now = tokio::time::Instant::now();
-                if now >= end {
-                    return Err(ClientError::Timeout { id: reply_to });
-                }
-                let pause = std::time::Duration::from_secs(backoff_secs).min(end - now);
-                tokio::time::sleep(pause).await;
-                if tokio::time::Instant::now() >= end {
-                    return Err(ClientError::Timeout { id: reply_to });
-                }
-            }
-            None => {
-                tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-            }
-        }
-        backoff_secs = next_backoff_secs(backoff_secs);
     }
 }
 
@@ -346,6 +364,7 @@ pub async fn fetch_agents(endpoint: &Endpoint) -> Result<Vec<Agent>, ClientError
 }
 
 /// Ack message ids and return the ids that changed to read.
+#[cfg(test)]
 pub async fn ack(endpoint: &Endpoint, ids: &[u64]) -> Result<Vec<u64>, ClientError> {
     Client::connect(endpoint).await?.ack(ids).await
 }
@@ -373,6 +392,15 @@ impl Watcher {
     /// the broker replays what is still unread.
     pub fn reset(&mut self) {
         self.client = None;
+    }
+
+    /// Ack one printed message on the watch connection itself. The
+    /// `acked` answer is skipped by the next `next_message` call.
+    pub async fn ack(&mut self, id: u64) -> Result<(), ClientError> {
+        match self.client.as_mut() {
+            Some(client) => client.ack_sent(id).await,
+            None => Err(ClientError::Io("watch is not connected".to_string())),
+        }
     }
 
     /// Connect and send the `watch` frame. An I/O failure is returned for
