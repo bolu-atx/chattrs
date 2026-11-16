@@ -1,9 +1,9 @@
 //! chattrs — distributed messaging for cross-agent coordination.
 //!
-//! A thin entry point: parse `cli`, then dispatch to `server` (the broker) or
-//! `client` (`send`, `reply`, `inbox`, `watch`, `ask`, `skill`). `model` owns
-//! the wire types, `protocol` the line-JSON framing, and `store` the SQLite
-//! storage.
+//! A thin entry point: parse `cli`, then dispatch to `server` (the broker),
+//! `client` (`send`, `reply`, `inbox`, `watch`, `ask`, `skill`), or
+//! `autostart` (`stop`). `model` owns the wire types, `protocol` the
+//! line-JSON framing, and `store` the SQLite storage.
 //!
 //! Quick start:
 //! ```text
@@ -11,6 +11,7 @@
 //! CHATTRS_ADDRESS=a@h chattrs send --to b@h "anyone there?"
 //! ```
 
+mod autostart;
 mod cli;
 mod client;
 mod model;
@@ -37,6 +38,10 @@ async fn run(args: Args) -> Result<(), String> {
         Command::Serve(c) => {
             let db = c.db.clone().unwrap_or_else(Store::default_path);
             server::serve(&c.listen, &db, c.token.clone()).await
+        }
+        Command::Stop => {
+            let db = autostart::client_db_path();
+            autostart::stop_auto_started(&db)
         }
         Command::Send(c) => {
             let address = c.client.resolve_address()?;

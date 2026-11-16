@@ -27,6 +27,7 @@ Address = `agent@host`.
 - **CLI-8** `agents` lists known addresses with last-seen time. *(N9)*
 - **CLI-9** Own address defaults to `<agent>@<hostname>`. *(N9)*
 - **CLI-10** `inbox` prints unread messages and acks them. *(N6)*
+- **CLI-11** On a loopback server, a client command starts the broker if none is running, then runs against it. A remote server is never auto-started.
 
 ## Distribution
 

@@ -38,6 +38,7 @@ CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to
 | `src/store.rs` | SQLite storage: one `Connection` in `Arc<Mutex<_>>`, blocking calls |
 | `src/server.rs` | The broker: `hello`, `send`/`reply`, `inbox`/`ack`, `watch` fan-out, `wait`, `agents`, `log` |
 | `src/client.rs` | One connection per command; `watch` holds one open and streams, `ask` holds a `wait` open, `log` pages history |
+| `src/autostart.rs` | On-demand broker: loopback check, detached spawn, pidfile, `stop` |
 | `src/skill.rs` | Embedded agent skill text printed by `chattrs skill` |
 | `skills/chattrs/SKILL.md` | Agent skill: `send`, `ask`, `reply`, no polling |
 
