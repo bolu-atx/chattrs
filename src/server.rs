@@ -1,5 +1,5 @@
 //! chattrs — the broker: hello, send, reply, inbox, ack, watch, wait,
-//! and agents.
+//! agents, and log.
 //!
 //! One `Broker` owns a `Store` and the `watch`/`wait` registries. Each
 //! connection runs its own task with a reader loop: the first frame must be
@@ -229,7 +229,8 @@ impl Broker {
                     | Inbound::Ack { .. }
                     | Inbound::Watch
                     | Inbound::Wait { .. }
-                    | Inbound::Agents => {
+                    | Inbound::Agents
+                    | Inbound::Log { .. } => {
                         write_error(
                             &mut write_half,
                             Outbound::error("hello_required", "hello must be the first frame"),
@@ -425,6 +426,28 @@ impl Broker {
                             continue;
                         }
                     },
+                    Inbound::Log { address, after, limit } => {
+                        if let Some(wanted) = address.as_deref() {
+                            if !model::is_valid_address(wanted) {
+                                write_error(
+                                    &mut write_half,
+                                    Outbound::error("bad_address", "address is invalid"),
+                                )
+                                .await;
+                                continue;
+                            }
+                        }
+                        let limit = limit.min(model::MAX_LOG_LIMIT);
+                        match self.store.log(address.clone(), after, limit).await {
+                            Ok(messages) => {
+                                write_frame(&mut write_half, &Outbound::Log { messages }).await;
+                            }
+                            Err(e) => {
+                                write_error(&mut write_half, Outbound::error("internal", e)).await;
+                                continue;
+                            }
+                        }
+                    }
                     Inbound::Wait { reply_to } => {
                         match self.store.find_reply(from.clone(), reply_to).await {
                             Ok(Some(message)) => {
@@ -1090,6 +1113,142 @@ mod tests {
             agents.iter().any(|agent| agent.address == "a@h"),
             "agents survive: {agents:?}"
         );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn log_returns_all_messages_oldest_first() {
+        let (addr, _dir, handle) = spawn().await;
+        let first =
+            client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+        let second = client::reply(&addr, "b@h", None, first, "two").await.unwrap();
+        let third =
+            client::send(&addr, "c@h", None, "a@h", "three", None, false).await.unwrap();
+
+        let history =
+            client::fetch_log(&addr, "reader@h", None, None, false).await.unwrap();
+        let ids: Vec<u64> = history.iter().map(|message| message.id).collect();
+        assert_eq!(ids, vec![first, second, third]);
+        assert_eq!(history[0].from, "a@h");
+        assert_eq!(history[0].to, "b@h");
+        assert_eq!(history[0].body, "one");
+        assert_eq!(history[0].reply_to, None);
+        assert_eq!(history[1].from, "b@h");
+        assert_eq!(history[1].to, "a@h");
+        assert_eq!(history[1].reply_to, Some(first));
+        assert_eq!(history[2].from, "c@h");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn log_filters_by_sender_or_recipient() {
+        let (addr, _dir, handle) = spawn().await;
+        let ab =
+            client::send(&addr, "a@h", None, "b@h", "a to b", None, false).await.unwrap();
+        let ba =
+            client::send(&addr, "b@h", None, "a@h", "b to a", None, false).await.unwrap();
+        let ac =
+            client::send(&addr, "a@h", None, "c@h", "a to c", None, false).await.unwrap();
+        let xy =
+            client::send(&addr, "x@h", None, "y@h", "x to y", None, false).await.unwrap();
+
+        async fn filtered(addr: &str, who: &str) -> Vec<u64> {
+            client::fetch_log(addr, "reader@h", None, Some(who.to_string()), false)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|message| message.id)
+                .collect()
+        }
+        assert_eq!(filtered(&addr, "a@h").await, vec![ab, ba, ac]);
+        assert_eq!(filtered(&addr, "b@h").await, vec![ab, ba]);
+        assert_eq!(filtered(&addr, "y@h").await, vec![xy]);
+
+        let all = client::fetch_log(&addr, "reader@h", None, None, false).await.unwrap();
+        assert_eq!(all.len(), 4);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn log_includes_acked_and_unread_messages() {
+        let (addr, _dir, handle) = spawn().await;
+        let first =
+            client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+        let second =
+            client::send(&addr, "a@h", None, "b@h", "two", None, false).await.unwrap();
+        client::ack(&addr, "b@h", None, &[first]).await.unwrap();
+
+        let history = client::fetch_log(&addr, "a@h", None, None, false).await.unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].id, first);
+        assert!(
+            history[0].acked_at.is_some_and(|ts| ts > 0),
+            "acked message carries acked_at"
+        );
+        assert_eq!(history[1].id, second);
+        assert_eq!(history[1].acked_at, None, "unread message has null acked_at");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn log_does_not_ack() {
+        let (addr, _dir, handle) = spawn().await;
+        let id = client::send(&addr, "a@h", None, "b@h", "hi", None, false).await.unwrap();
+
+        let history = client::fetch_log(&addr, "a@h", None, None, false).await.unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].id, id);
+
+        let messages = client::fetch_inbox(&addr, "b@h", None).await.unwrap();
+        assert_eq!(messages.len(), 1, "log leaves the message unread: {messages:?}");
+        assert_eq!(messages[0].id, id);
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn log_pages_past_500_messages() {
+        let (addr, _dir, handle) = spawn().await;
+        let mut expected = Vec::new();
+        for i in 0..1200 {
+            let id = client::send(&addr, "a@h", None, "b@h", &format!("msg {i}"), None, false)
+                .await
+                .unwrap();
+            expected.push(id);
+        }
+
+        let mut raw = raw_connect(&addr).await;
+        raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\"}\n").await;
+        raw_send(&mut raw, "{\"type\":\"log\",\"after\":0,\"limit\":5000}\n").await;
+        match raw_recv(&mut raw).await.unwrap() {
+            Outbound::Log { messages } => {
+                assert_eq!(messages.len(), 500, "broker caps one page at 500");
+            }
+            other => panic!("expected a log frame, got {other:?}"),
+        }
+        drop(raw);
+
+        let history = client::fetch_log(&addr, "a@h", None, None, false).await.unwrap();
+        let ids: Vec<u64> = history.iter().map(|message| message.id).collect();
+        assert_eq!(ids, expected, "all 1200 messages return once, in order");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn log_survives_broker_restart() {
+        let (addr, dir, handle) = spawn().await;
+        let db = dir.path().join("chattrs.db");
+        let first =
+            client::send(&addr, "a@h", None, "b@h", "one", None, false).await.unwrap();
+        let second = client::reply(&addr, "b@h", None, first, "two").await.unwrap();
+        handle.abort();
+
+        let (addr, handle) = spawn_at(&db).await;
+        let history = client::fetch_log(&addr, "a@h", None, None, false).await.unwrap();
+        let ids: Vec<u64> = history.iter().map(|message| message.id).collect();
+        assert_eq!(ids, vec![first, second]);
+        assert_eq!(history[0].body, "one");
+        assert_eq!(history[1].body, "two");
+        assert_eq!(history[1].reply_to, Some(first));
         handle.abort();
     }
 

@@ -5,7 +5,7 @@
 //! `message` frames, printing each as JSON; `ask` sends its question on one
 //! connection, then holds a `wait` open until the reply arrives.
 
-use crate::model::{self, Agent, Inbound, Message, Outbound};
+use crate::model::{self, Agent, Inbound, LoggedMessage, Message, Outbound};
 use crate::protocol;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -326,6 +326,58 @@ pub async fn ask(
     Ok((id, reply))
 }
 
+/// One `log` page holds at most this many rows. The client pages with
+/// `after` until a page holds fewer, so the output is the full history.
+pub const LOG_PAGE_SIZE: u64 = model::MAX_LOG_LIMIT;
+
+/// Fetch the full message history, oldest first. With `filter`, only
+/// messages it sent or received. Prints unread messages first, as text or
+/// as JSON `message` lines, on the same connection after `hello`.
+pub async fn fetch_log(
+    server: &str,
+    address: &str,
+    token: Option<&str>,
+    filter: Option<String>,
+    json: bool,
+) -> Result<Vec<LoggedMessage>, String> {
+    let mut conn = hello(server, address, token).await?;
+    print_unread_preamble(&mut conn, json).await?;
+    let mut history = Vec::new();
+    let mut after = 0;
+    loop {
+        send_frame(
+            &mut conn,
+            &Inbound::Log { address: filter.clone(), after, limit: LOG_PAGE_SIZE },
+        )
+        .await?;
+        let page = match recv_frame(&mut conn).await? {
+            Outbound::Log { messages } => messages,
+            Outbound::Error { code, message } => return Err(format!("{code}: {message}")),
+            _ => return Err("server sent an unexpected frame instead of log".to_string()),
+        };
+        let count = page.len();
+        if let Some(last) = page.last() {
+            after = last.id;
+        }
+        history.extend(page);
+        if count < LOG_PAGE_SIZE as usize {
+            return Ok(history);
+        }
+    }
+}
+
+/// Format one history row exactly as `log --json` prints it: the logged
+/// message with `type` `log` and `untrusted`, so a reader tells log rows
+/// from the preamble `message` lines.
+pub fn format_log_json(message: &LoggedMessage) -> Result<String, String> {
+    let mut value = serde_json::to_value(message).map_err(|e| e.to_string())?;
+    value["type"] = serde_json::Value::String("log".to_string());
+    value["untrusted"] = serde_json::Value::Bool(true);
+    serde_json::to_string(&value)
+        .map(|json| format!("{json}\n"))
+        .map_err(|e| e.to_string())
+}
+
 /// List every address that ever said `hello`, sorted by address.
 /// Prints unread messages first, as text or as JSON `message` lines.
 pub async fn fetch_agents(
@@ -455,5 +507,31 @@ pub async fn ack(
         Outbound::Acked { ids } => Ok(ids),
         Outbound::Error { code, message } => Err(format!("{code}: {message}")),
         _ => Err("server sent an unexpected frame instead of acked".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_json_line_carries_type_log_and_untrusted() {
+        let message = LoggedMessage {
+            id: 13,
+            from: "codex@box1".into(),
+            to: "opus@mac".into(),
+            body: "hi".into(),
+            ts: 1763200000000,
+            reply_to: Some(12),
+            acked_at: None,
+        };
+        let line = format_log_json(&message).unwrap();
+        assert!(line.ends_with('\n'));
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap();
+        assert_eq!(value["type"].as_str(), Some("log"));
+        assert_eq!(value["untrusted"].as_bool(), Some(true));
+        assert_eq!(value["id"].as_u64(), Some(13));
+        assert_eq!(value["reply_to"].as_u64(), Some(12));
+        assert!(value["acked_at"].is_null(), "unread row has null acked_at");
     }
 }
