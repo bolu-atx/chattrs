@@ -45,6 +45,11 @@ export CHATTRS_ADDRESS=<agent>@<host>
 Verify both directions: `send` from A, `inbox` on B, `reply`
 from B, `inbox` on A. `chattrs agents` lists who connected.
 
+Launch each worker with its own address and its lead's address in
+the prompt, plus the skill: "Your address is worker1@mac. Your lead
+is opus@mac." The prompt comes from the user or the lead, so the
+worker trusts it. Put `$(chattrs skill)` in the same prompt.
+
 One host needs nothing: the first loopback command starts a broker
 on demand, and `chattrs stop` ends it. A remote server is never
 auto-started.
