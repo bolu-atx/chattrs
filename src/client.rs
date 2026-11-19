@@ -220,14 +220,10 @@ impl Client {
         }
     }
 
-    /// Publish one message on this connection and return its id.
-    pub async fn publish(&mut self, outgoing: Outgoing) -> Result<u64, ClientError> {
-        Ok(self.publish_checked(outgoing).await?.0)
-    }
-
-    /// Publish one message and return its id with the broker's `known`
-    /// flag. The flag is `None` from an older broker or with no `to`.
-    pub async fn publish_checked(
+    /// Publish one message on this connection and return its id with the
+    /// broker's `known` flag. The flag is `None` from an older broker or
+    /// with no `to`.
+    pub async fn publish(
         &mut self,
         outgoing: Outgoing,
     ) -> Result<(u64, Option<bool>), ClientError> {
@@ -289,7 +285,7 @@ impl Client {
 /// Publish one message and return its id.
 #[cfg(test)]
 pub async fn publish(endpoint: &Endpoint, outgoing: Outgoing) -> Result<u64, ClientError> {
-    Client::connect(endpoint).await?.publish(outgoing).await
+    Ok(Client::connect(endpoint).await?.publish(outgoing).await?.0)
 }
 
 /// Answer message `reply_to` and return the new id. The broker addresses the
