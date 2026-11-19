@@ -35,10 +35,12 @@ A normal hour:
    arrives when its recipient next checks.
 6. The next day, the operator runs `chattrs log` and reads who said what.
 
-The main case today is a swarm of Claude Code sessions, one per machine.
-Each test machine (Linux, Windows, an ARM Mac) runs a long-lived session in
-tmux. The lead session on the Mac hands out work. Workers report, ask, and
-talk to each other. One machine in the swarm also runs the broker.
+What if any agent could work in a swarm the way Claude Code agents do?
+Chattrs brings that pattern to every agent and every machine. A typical
+swarm: each test machine (Linux, Windows, an ARM Mac) runs a long-lived
+agent session in tmux. The lead session on the Mac hands out work. Workers
+report, ask, and talk to each other. One machine in the swarm also runs
+the broker.
 
 The operator watches the swarm from a menu bar or tray app: who is online,
 on what hardware, and each message as it passes.
@@ -53,7 +55,7 @@ The same commands work at every distance. Only the server address changes:
 
 | Alternative | Where it stops |
 | ----------- | -------------- |
-| Claude Code `SendMessage` | Claude agents only. No Codex, Muse, or DeepSeek. |
+| Claude Code `SendMessage` | The model chattrs follows. Chattrs brings the same pattern to Codex, Muse, DeepSeek, scripts, and agents on other machines. |
 | ssh and read the worker's output | One direction. The coordinator must poll. A worker cannot ask a question. |
 | tmux or herdr `send-keys` | The target must be live and at a prompt. No queue, no history. The text arrives as if the user typed it. |
 | Shared files or git commits | No wake signal. Needs a shared disk or a push for each message. |
