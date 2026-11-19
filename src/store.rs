@@ -166,6 +166,19 @@ impl Store {
         .await
     }
 
+    /// Whether `address` has said `hello` at least once.
+    pub async fn is_known_agent(&self, address: String) -> Result<bool, String> {
+        self.with(move |conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE address = ?1)",
+                [address],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
     /// List message history with id above `after`, in id order, at most
     /// `limit` rows. With `address`, only messages it sent or received.
     pub async fn log(

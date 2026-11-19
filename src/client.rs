@@ -222,6 +222,15 @@ impl Client {
 
     /// Publish one message on this connection and return its id.
     pub async fn publish(&mut self, outgoing: Outgoing) -> Result<u64, ClientError> {
+        Ok(self.publish_checked(outgoing).await?.0)
+    }
+
+    /// Publish one message and return its id with the broker's `known`
+    /// flag. The flag is `None` from an older broker or with no `to`.
+    pub async fn publish_checked(
+        &mut self,
+        outgoing: Outgoing,
+    ) -> Result<(u64, Option<bool>), ClientError> {
         let frame = self
             .request(&Inbound::Send {
                 to: outgoing.to,
@@ -231,7 +240,7 @@ impl Client {
             })
             .await?;
         match frame {
-            Outbound::Sent { id } => Ok(id),
+            Outbound::Sent { id, known } => Ok((id, known)),
             _ => Err(ClientError::Protocol(
                 "server sent an unexpected frame instead of sent".to_string(),
             )),

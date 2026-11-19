@@ -136,14 +136,19 @@ async fn cmd_send(c: cli::SendArgs) -> Result<(), RunError> {
     }
     let mut conn = client::Client::connect(&endpoint).await?;
     deliver_unread(&mut conn, c.json).await?;
-    let id = conn
-        .publish(client::Outgoing {
+    let (id, known) = conn
+        .publish_checked(client::Outgoing {
             to: c.to.clone(),
             body: c.body(),
             reply_to: None,
             topic: c.topic.clone(),
         })
         .await?;
+    if known == Some(false) {
+        if let Some(to) = c.to.as_deref() {
+            eprintln!("chattrs: warning: {to} has never connected; message {id} stored");
+        }
+    }
     if c.json {
         write(&output::sent_json(id))
     } else {

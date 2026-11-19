@@ -136,12 +136,27 @@ fn stderr_text(output: &Output) -> String {
 #[test]
 fn send_prints_only_the_id_on_stdout() {
     let broker = Broker::start();
+    run_client(&broker.addr, "b@h", "inbox", &[]);
     let output = run_client(&broker.addr, "a@h", "send", &["--to", "b@h", "hello"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = stdout_text(&output);
     let id: u64 = stdout.trim().parse().expect("stdout is the id");
     assert_eq!(stdout, format!("{id}\n"));
     assert!(output.stderr.is_empty(), "stderr is empty: {:?}", stderr_text(&output));
+}
+
+#[test]
+fn send_to_an_unknown_address_warns_on_stderr_and_still_succeeds() {
+    let broker = Broker::start();
+    let output = run_client(&broker.addr, "a@h", "send", &["--to", "typo@h", "hello"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = stdout_text(&output);
+    let id: u64 = stdout.trim().parse().expect("stdout is the id");
+    assert_eq!(stdout, format!("{id}\n"));
+    assert_eq!(
+        stderr_text(&output),
+        format!("chattrs: warning: typo@h has never connected; message {id} stored\n")
+    );
 }
 
 #[test]

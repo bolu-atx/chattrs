@@ -170,9 +170,13 @@ pub enum Outbound {
         v: u32,
         address: String,
     },
-    /// Confirms a stored message with its id.
+    /// Confirms a stored message with its id. `known` is `false` when the
+    /// `to` address never said `hello`. It is absent when the send has no
+    /// `to`, and from an older broker.
     Sent {
         id: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        known: Option<bool>,
     },
     /// Every unread message for the `hello` address, in id order.
     Inbox {

@@ -85,7 +85,7 @@ mod tests {
         };
         let frames = vec![
             Outbound::Welcome { server: "chattrs".into(), v: 1, address: "codex@box1".into() },
-            Outbound::Sent { id: 12 },
+            Outbound::Sent { id: 12, known: None },
             Outbound::Inbox { messages: vec![message.clone()] },
             Outbound::Message(message),
             Outbound::Message(crate::model::Message {
@@ -129,7 +129,7 @@ mod tests {
                 address: "a@h".into(),
             })
             .unwrap(),
-            serde_json::to_value(Outbound::Sent { id: 1 }).unwrap(),
+            serde_json::to_value(Outbound::Sent { id: 1, known: None }).unwrap(),
             serde_json::to_value(Inbound::Inbox).unwrap(),
             serde_json::to_value(Inbound::Ack { ids: vec![1] }).unwrap(),
             serde_json::to_value(Outbound::Inbox { messages: vec![] }).unwrap(),
@@ -158,8 +158,16 @@ mod tests {
 
     #[test]
     fn decode_ignores_trailing_newline() {
-        let frame = Outbound::Sent { id: 7 };
+        let frame = Outbound::Sent { id: 7, known: None };
         let line = encode(&frame).unwrap();
         assert_eq!(decode::<Outbound>(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn sent_without_known_decodes_to_none() {
+        let frame: Outbound = decode("{\"type\":\"sent\",\"id\":3}\n").unwrap();
+        assert_eq!(frame, Outbound::Sent { id: 3, known: None });
+        let line = encode(&frame).unwrap();
+        assert_eq!(line.trim_end(), "{\"type\":\"sent\",\"id\":3}");
     }
 }
