@@ -134,7 +134,7 @@ async fn cmd_send(c: cli::SendArgs) -> Result<(), RunError> {
     if c.to.is_none() && c.topic.is_none() {
         return Err(RunError::Message("send needs --to or --topic".to_string()));
     }
-    let mut conn = client::Client::connect(&endpoint).await?;
+    let mut conn = client::connect_for_publish(&endpoint, "send").await?;
     deliver_unread(&mut conn, c.json).await?;
     let (id, known) = conn
         .publish(client::Outgoing {
@@ -158,7 +158,7 @@ async fn cmd_send(c: cli::SendArgs) -> Result<(), RunError> {
 
 async fn cmd_reply(c: cli::ReplyArgs) -> Result<(), RunError> {
     let endpoint = endpoint(&c.client)?;
-    let mut conn = client::Client::connect(&endpoint).await?;
+    let mut conn = client::connect_for_publish(&endpoint, "reply").await?;
     deliver_unread(&mut conn, c.json).await?;
     let (id, _) = conn
         .publish(client::Outgoing {

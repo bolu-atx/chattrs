@@ -234,7 +234,14 @@ impl Client {
                 reply_to: outgoing.reply_to,
                 topic: outgoing.topic,
             })
-            .await?;
+            .await
+            .map_err(|error| match error {
+                ClientError::Io(message) => ClientError::Io(format!(
+                    "connection lost before the broker confirmed the send, \
+                     it may be stored: {message}"
+                )),
+                other => other,
+            })?;
         match frame {
             Outbound::Sent { id, known } => Ok((id, known)),
             _ => Err(ClientError::Protocol(
@@ -315,6 +322,45 @@ pub async fn reply(
 #[cfg(test)]
 pub async fn fetch_inbox(endpoint: &Endpoint) -> Result<Vec<Message>, ClientError> {
     Client::connect(endpoint).await?.unread().await
+}
+
+/// How long `send` and `reply` keep trying to reach the broker (CLI-12).
+const PUBLISH_RETRY_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Connect for `send` or `reply`, retrying until `PUBLISH_RETRY_WINDOW`
+/// passes. Only the connect and `hello` step retries, and only on an I/O
+/// failure. A broker error exits at once. `command` names the caller in
+/// the retry line.
+pub async fn connect_for_publish(
+    endpoint: &Endpoint,
+    command: &str,
+) -> Result<Client, ClientError> {
+    connect_retrying(endpoint, command, PUBLISH_RETRY_WINDOW).await
+}
+
+/// The first attempt may start a loopback broker (CLI-11). Later attempts
+/// never do. Gives up with the last error when `window` ends.
+pub(crate) async fn connect_retrying(
+    endpoint: &Endpoint,
+    command: &str,
+    window: std::time::Duration,
+) -> Result<Client, ClientError> {
+    let deadline = tokio::time::Instant::now() + window;
+    let mut backoff_secs: u64 = 1;
+    let mut attempt = Client::connect(endpoint).await;
+    loop {
+        let error = match attempt {
+            Ok(client) => return Ok(client),
+            Err(error @ ClientError::Io(_)) => error,
+            Err(error) => return Err(error),
+        };
+        eprintln!("chattrs: {command} cannot connect: {error}, retrying in {backoff_secs}s");
+        if pause_backoff(Some(deadline), backoff_secs, 0).await.is_err() {
+            return Err(error);
+        }
+        backoff_secs = next_backoff_secs(backoff_secs);
+        attempt = Client::reconnect(endpoint).await;
+    }
 }
 
 /// Seconds between reconnects, doubling from 1 s to 30 s. Shared by

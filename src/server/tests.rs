@@ -7,5 +7,6 @@ mod autostart;
 mod helpers;
 mod log;
 mod mailbox;
+mod retry;
 mod topics;
 mod watch;
