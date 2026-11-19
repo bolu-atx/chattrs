@@ -35,6 +35,16 @@ A normal hour:
    arrives when its recipient next checks.
 6. The next day, the operator runs `chattrs log` and reads who said what.
 
+What if any agent could work in a swarm the way Claude Code agents do?
+Chattrs brings that pattern to every agent and every machine. A typical
+swarm: each test machine (Linux, Windows, an ARM Mac) runs a long-lived
+agent session in tmux. The lead session on the Mac hands out work. Workers
+report, ask, and talk to each other. One machine in the swarm also runs
+the broker.
+
+The operator watches the swarm from a menu bar or tray app: who is online,
+on what hardware, and each message as it passes.
+
 The same commands work at every distance. Only the server address changes:
 
 - **One machine:** loopback, no token.
@@ -45,7 +55,7 @@ The same commands work at every distance. Only the server address changes:
 
 | Alternative | Where it stops |
 | ----------- | -------------- |
-| Claude Code `SendMessage` | Claude agents only, in one session tree. No Codex, Muse, or DeepSeek. |
+| Claude Code `SendMessage` | The model chattrs follows. Chattrs brings the same pattern to Codex, Muse, DeepSeek, scripts, and agents on other machines. |
 | ssh and read the worker's output | One direction. The coordinator must poll. A worker cannot ask a question. |
 | tmux or herdr `send-keys` | The target must be live and at a prompt. No queue, no history. The text arrives as if the user typed it. |
 | Shared files or git commits | No wake signal. Needs a shared disk or a push for each message. |
@@ -84,9 +94,10 @@ Coordinator
 Operator
 - **N7** Only fleet hosts can send messages.
 - **N8** Read the full message history.
+- **N12** See swarm activity live: who is online and each message as it passes.
 
 Any agent
-- **N9** Find which agents exist and can be reached.
+- **N9** Find which agents exist, what hardware each runs on, and which are listening now.
 - **N10** Receive messages mid-task without asking for them.
 - **N11** Never mistake an agent message for a user instruction.
 
@@ -96,4 +107,5 @@ it runs again.
 ## Not
 
 Not a task runner. Not an agent launcher. Not code sync. Ssh, git, and the
-agents themselves do those jobs.
+agents themselves do those jobs. Not a GUI: a menu bar or tray app is a
+separate program that speaks the wire protocol.

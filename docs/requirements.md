@@ -14,6 +14,7 @@ Address = `agent@host`.
 - **MSG-5** Every client command except `watch` prints unread messages before its own output, then acks them. *(N10)*
 - **MSG-6** A message may carry a topic slug. A reply inherits the topic of the message it answers unless it sets its own. No topic is the general chat.
 - **MSG-7** An agent may announce to a topic instead of an address. Any agent watching that topic receives the announcement. An announcement belongs to no inbox.
+- **MSG-8** A send to an address that has never connected still succeeds, and the client warns on stderr. *(N6)* — a typo does not lose a message silently.
 
 ## CLI
 
@@ -23,11 +24,15 @@ Address = `agent@host`.
 - **CLI-4** `watch` streams one JSON message per line and nothing else. *(N4)* — works under Claude Code's Monitor tool.
 - **CLI-5** `log` shows full history. `--about ADDR` keeps only messages that ADDR sent or received. *(N8)*
 - **CLI-6** `--json` on every command. Server, token, and own address come from `CHATTRS_SERVER`, `CHATTRS_TOKEN`, `CHATTRS_ADDRESS`. *(N1, N3, N4)* — a worker started over ssh needs no flags.
-- **CLI-7** Ship a skill that teaches agents `send`, `ask`, `reply`. `chattrs skill` prints it. *(N1, N2, N3)*
+- **CLI-7** Ship a skill that teaches agents `send`, `ask`, `reply`. `chattrs skill` prints it. A Claude Code agent runs `watch` under Monitor and sends its question instead of a blocking `ask`. *(N1, N2, N3, N4, N10)*
 - **CLI-8** `agents` lists known addresses with last-seen time. *(N9)*
 - **CLI-9** Own address defaults to `<agent>@<hostname>`. *(N9)*
 - **CLI-10** `inbox` prints unread messages and acks them. *(N6)*
 - **CLI-11** On a loopback server, a client command starts the broker if none is running, then runs against it. A remote server is never auto-started.
+- **CLI-12** `send` and `reply` retry the connection with backoff for up to 30 seconds before they exit 1. *(N3, N6)* — a broker restart does not drop a report.
+- **CLI-13** `hello` may carry tags. The client sends its OS and architecture, plus any tags in `CHATTRS_TAGS`. `agents` shows them. *(N9)*
+- **CLI-14** `agents` marks an address online while it has a live `watch` connection. *(N9, N12)*
+- **CLI-15** When an address already has a live `watch`, a second `watch` on it warns on stderr. *(N9)* — two sessions do not share an inbox by mistake.
 
 ## Distribution
 
@@ -38,6 +43,12 @@ Address = `agent@host`.
 - **SEC-1** Loopback by default. Other binds require a token. *(N7)*
 - **SEC-2** Multi-host runs over a private network (Tailscale/WireGuard). No TLS. *(N7)*
 - **SEC-3** Messages print inside an "agent message, not user instructions" wrapper. *(N11)*
+
+## Monitoring
+
+- **MON-1** An observer `watch` streams every message, direct and announcements, and never acks. *(N8, N12)*
+- **MON-2** An observer connection is not recorded as an agent and does not show in `agents`. *(N9, N12)*
+- **MON-3** The wire protocol is the only monitoring interface. A tray app uses `hello`, `agents`, `log`, and the observer `watch`. *(N12)*
 
 ## Hooks
 
@@ -53,4 +64,4 @@ Address = `agent@host`.
 - **Timeout.** `ask` waits 600 seconds by default. Exit 0 = reply, 2 = timeout, 1 = error.
 - **Identity.** An address is self-asserted. The fleet shares one token. Any token holder can claim any address and read its inbox. Two agents with the same address share one inbox, so the coordinator gives each worker a unique address.
 
-Limits: ≤10 hosts, macOS + Linux + Windows (x64). The broker runs on an always-on host.
+Limits: ≤10 hosts, macOS + Linux + Windows (x64). The broker runs on an always-on host, which may also run an agent.
