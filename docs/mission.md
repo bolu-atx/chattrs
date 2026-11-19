@@ -35,6 +35,16 @@ A normal hour:
    arrives when its recipient next checks.
 6. The next day, the operator runs `chattrs log` and reads who said what.
 
+The main case today is a swarm of Claude Code sessions, one per machine.
+Each test machine (Linux, Windows, an ARM Mac) runs a long-lived session in
+tmux. The lead session on the Mac hands out work. Workers report, ask, and
+talk to each other. One machine in the swarm also runs the broker. Claude
+Code messages other sessions natively only on one machine, or across
+machines through Remote Control, which an organization can turn off.
+
+The operator watches the swarm from a menu bar or tray app: who is online,
+on what hardware, and each message as it passes.
+
 The same commands work at every distance. Only the server address changes:
 
 - **One machine:** loopback, no token.
@@ -45,7 +55,7 @@ The same commands work at every distance. Only the server address changes:
 
 | Alternative | Where it stops |
 | ----------- | -------------- |
-| Claude Code `SendMessage` | Claude agents only, in one session tree. No Codex, Muse, or DeepSeek. |
+| Claude Code `SendMessage` | Claude agents only. Across machines it needs Remote Control, which an organization can disable. No Codex, Muse, or DeepSeek. |
 | ssh and read the worker's output | One direction. The coordinator must poll. A worker cannot ask a question. |
 | tmux or herdr `send-keys` | The target must be live and at a prompt. No queue, no history. The text arrives as if the user typed it. |
 | Shared files or git commits | No wake signal. Needs a shared disk or a push for each message. |
@@ -84,9 +94,10 @@ Coordinator
 Operator
 - **N7** Only fleet hosts can send messages.
 - **N8** Read the full message history.
+- **N12** See swarm activity live: who is online and each message as it passes.
 
 Any agent
-- **N9** Find which agents exist and can be reached.
+- **N9** Find which agents exist, what hardware each runs on, and which are listening now.
 - **N10** Receive messages mid-task without asking for them.
 - **N11** Never mistake an agent message for a user instruction.
 
@@ -96,4 +107,5 @@ it runs again.
 ## Not
 
 Not a task runner. Not an agent launcher. Not code sync. Ssh, git, and the
-agents themselves do those jobs.
+agents themselves do those jobs. Not a GUI: a menu bar or tray app is a
+separate program that speaks the wire protocol.
