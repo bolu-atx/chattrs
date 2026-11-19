@@ -7,6 +7,7 @@ license = "MIT"
 repository = "https://github.com/bolu-atx/chattrs"
 keywords = ["agents", "messaging", "cli"]
 categories = ["command-line-utilities"]
+exclude = ["tray"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
