@@ -136,7 +136,7 @@ async fn cmd_send(c: cli::SendArgs) -> Result<(), RunError> {
     }
     let mut conn = client::Client::connect(&endpoint).await?;
     deliver_unread(&mut conn, c.json).await?;
-    let id = conn
+    let (id, known) = conn
         .publish(client::Outgoing {
             to: c.to.clone(),
             body: c.body(),
@@ -144,6 +144,11 @@ async fn cmd_send(c: cli::SendArgs) -> Result<(), RunError> {
             topic: c.topic.clone(),
         })
         .await?;
+    if known == Some(false) {
+        if let Some(to) = c.to.as_deref() {
+            eprintln!("chattrs: warning: {to} has never connected; message {id} stored");
+        }
+    }
     if c.json {
         write(&output::sent_json(id))
     } else {
@@ -155,7 +160,7 @@ async fn cmd_reply(c: cli::ReplyArgs) -> Result<(), RunError> {
     let endpoint = endpoint(&c.client)?;
     let mut conn = client::Client::connect(&endpoint).await?;
     deliver_unread(&mut conn, c.json).await?;
-    let id = conn
+    let (id, _) = conn
         .publish(client::Outgoing {
             to: None,
             body: c.body(),
@@ -201,7 +206,7 @@ async fn cmd_ask(c: cli::AskArgs) -> Result<(), RunError> {
     let endpoint = endpoint(&c.client)?;
     let mut conn = client::Client::connect(&endpoint).await?;
     deliver_unread(&mut conn, c.json).await?;
-    let id = conn
+    let (id, known) = conn
         .publish(client::Outgoing {
             to: Some(c.to.clone()),
             body: c.body(),
@@ -209,6 +214,9 @@ async fn cmd_ask(c: cli::AskArgs) -> Result<(), RunError> {
             topic: c.topic.clone(),
         })
         .await?;
+    if known == Some(false) {
+        eprintln!("chattrs: warning: {} has never connected; message {id} stored", c.to);
+    }
     match client::wait_for_reply(&endpoint, conn, id, c.timeout).await {
         Ok((mut conn, reply)) => {
             if c.json {

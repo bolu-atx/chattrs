@@ -272,7 +272,7 @@ async fn announcement_needs_no_recipient() {
     raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"w@h\"}\n").await;
     raw_send(&mut raw, "{\"type\":\"send\",\"topic\":\"release-26\",\"body\":\"hi\"}\n").await;
     let id = match raw_recv(&mut raw).await.unwrap() {
-        Outbound::Sent { id } => id,
+        Outbound::Sent { id, .. } => id,
         other => panic!("expected a sent frame, got {other:?}"),
     };
 

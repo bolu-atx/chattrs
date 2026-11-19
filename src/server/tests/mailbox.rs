@@ -99,6 +99,26 @@ async fn second_hello_is_rejected() {
 }
 
 #[tokio::test]
+async fn sent_reports_whether_the_recipient_ever_connected() {
+    let (addr, _dir, handle) = spawn().await;
+    client::fetch_inbox(&endpoint(&addr, "b@h")).await.unwrap();
+    let mut raw = raw_connect(&addr).await;
+    raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"a@h\"}\n").await;
+    for (to, want) in [("b@h", true), ("typo@h", false)] {
+        let line = format!("{{\"type\":\"send\",\"to\":\"{to}\",\"body\":\"hi\"}}\n");
+        raw_send(&mut raw, &line).await;
+        match raw_recv(&mut raw).await.unwrap() {
+            Outbound::Sent { known, .. } => assert_eq!(known, Some(want), "{to}"),
+            other => panic!("expected a sent frame, got {other:?}"),
+        }
+    }
+    drop(raw);
+    let messages = client::fetch_inbox(&endpoint(&addr, "typo@h")).await.unwrap();
+    assert_eq!(messages.len(), 1, "the message is stored for the unknown address");
+    handle.abort();
+}
+
+#[tokio::test]
 async fn pipelined_frames_are_all_answered() {
     let (addr, _dir, handle) = spawn().await;
     let mut raw = raw_connect(&addr).await;
@@ -116,7 +136,7 @@ async fn pipelined_frames_are_all_answered() {
     let mut ids = Vec::new();
     for _ in 0..2 {
         match raw_recv(&mut raw).await.unwrap() {
-            Outbound::Sent { id } => ids.push(id),
+            Outbound::Sent { id, .. } => ids.push(id),
             other => panic!("expected a sent frame, got {other:?}"),
         }
     }

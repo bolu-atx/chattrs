@@ -266,7 +266,7 @@ Broker → client:
 
 ```json
 {"type":"welcome", "server":"chattrs", "v":1, "address":"codex@box1"}
-{"type":"sent",    "id":12}
+{"type":"sent",    "id":12}   // optional "known":false: `to` never said hello
 {"type":"inbox",   "messages":[
   {"id":12,"from":"codex@box1","to":"opus@mac",
    "body":"hi","ts":1763200000000,"reply_to":null,"topic":null}]}

@@ -359,12 +359,16 @@ impl Broker {
             return Err(WireError::new("too_large", "body is too large"));
         }
         let from = conn.address.clone().unwrap_or_default();
+        let known = match to.clone() {
+            Some(to) => Some(self.store.is_known_agent(to).await?),
+            None => None,
+        };
         let (recipient, parent_topic) = self.resolve(&from, to, reply_to, &topic).await?;
         let stored_topic = topic.or(parent_topic);
         let message = self.store.insert(from, recipient, body, reply_to, stored_topic).await?;
         let id = message.id;
         let _ = self.pushed.send(Arc::new(message));
-        Ok(vec![Outbound::Sent { id }])
+        Ok(vec![Outbound::Sent { id, known }])
     }
 
     /// Work out who a send goes to and the topic it inherits, if any.
