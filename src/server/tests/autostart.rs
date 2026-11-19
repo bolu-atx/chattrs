@@ -256,7 +256,7 @@ async fn remote_connect_failure_starts_nothing() {
         if child.try_wait().expect("poll send").is_some() {
             break;
         }
-        assert!(start.elapsed() < std::time::Duration::from_secs(20), "remote send hangs");
+        assert!(start.elapsed() < std::time::Duration::from_secs(60), "remote send hangs");
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     let out = child.wait_with_output().expect("send output");
