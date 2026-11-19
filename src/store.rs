@@ -18,8 +18,9 @@ pub struct Store {
 }
 
 /// Latest schema version, tracked with `PRAGMA user_version`. Version 1 is
-/// the tables without the `topic` column; version 2 adds it.
-const SCHEMA_VERSION: i64 = 2;
+/// the tables without the `topic` column; version 2 adds it; version 3 adds
+/// the `tags` column to `agents`.
+const SCHEMA_VERSION: i64 = 3;
 
 /// The columns of one stored message. Every query that returns messages
 /// selects this list and maps it with `message_from_row`.
@@ -154,11 +155,17 @@ impl Store {
     }
 
     /// Record that `address` connected now, creating its row on first `hello`.
-    pub async fn touch_agent(&self, address: String) -> Result<(), String> {
+    /// Non-empty `tags` replace the stored tags; empty `tags` keep them.
+    pub async fn touch_agent(&self, address: String, tags: Vec<String>) -> Result<(), String> {
+        let tags_json = if tags.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&tags).map_err(|e| e.to_string())?)
+        };
         self.with(move |conn| {
             conn.execute(
-                "INSERT INTO agents (address, last_seen) VALUES (?1, ?2) ON CONFLICT(address) DO UPDATE SET last_seen = excluded.last_seen",
-                rusqlite::params![address, now_ms() as i64],
+                "INSERT INTO agents (address, last_seen, tags) VALUES (?1, ?2, ?3) ON CONFLICT(address) DO UPDATE SET last_seen = excluded.last_seen, tags = COALESCE(excluded.tags, tags)",
+                rusqlite::params![address, now_ms() as i64, tags_json],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -225,9 +232,21 @@ impl Store {
     /// List every address that ever said `hello`, sorted by address.
     pub async fn agents(&self) -> Result<Vec<Agent>, String> {
         self.with(move |conn| {
-            select_all(conn, "SELECT address, last_seen FROM agents ORDER BY address", [], |row| {
-                Ok(Agent { address: row.get(0)?, last_seen: row.get::<_, i64>(1)? as u64 })
-            })
+            select_all(
+                conn,
+                "SELECT address, last_seen, tags FROM agents ORDER BY address",
+                [],
+                |row| {
+                    let tags: Option<String> = row.get(2)?;
+                    Ok(Agent {
+                        address: row.get(0)?,
+                        last_seen: row.get::<_, i64>(1)? as u64,
+                        tags: tags
+                            .and_then(|json| serde_json::from_str(&json).ok())
+                            .unwrap_or_default(),
+                    })
+                },
+            )
         })
         .await
     }
@@ -291,6 +310,9 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     } else if version == 1 {
         add_topic(conn)?;
     }
+    if version < 3 {
+        add_tags(conn)?;
+    }
     conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -311,6 +333,13 @@ fn create_v1(conn: &Connection) -> Result<(), String> {
 /// The version-2 step: add the `topic` column.
 fn add_topic(conn: &Connection) -> Result<(), String> {
     conn.execute("ALTER TABLE messages ADD COLUMN topic TEXT", []).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The version-3 step: add the `tags` column to `agents`. It holds a JSON
+/// array; NULL means no tags.
+fn add_tags(conn: &Connection) -> Result<(), String> {
+    conn.execute("ALTER TABLE agents ADD COLUMN tags TEXT", []).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -572,7 +601,7 @@ mod tests {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 2, "open stamps the latest version");
+            assert_eq!(version, 3, "open stamps the latest version");
         }
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -604,5 +633,33 @@ mod tests {
         assert_eq!(old.topic.as_deref(), Some("release-26"), "a migrated row keeps its topic");
         let inbox = store.inbox("b@h".into()).await.unwrap();
         assert_eq!(inbox.len(), 1, "the row still belongs to its inbox");
+    }
+
+    #[tokio::test]
+    async fn version_two_database_migrates_to_agent_tags() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, body TEXT NOT NULL, ts INTEGER NOT NULL, reply_to INTEGER, topic TEXT, acked_at INTEGER);
+                 CREATE TABLE agents (address TEXT PRIMARY KEY, last_seen INTEGER NOT NULL);
+                 INSERT INTO agents (address, last_seen) VALUES ('a@h', 1763200000000);
+                 PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        }
+        let store = Store::open(db.clone()).await.unwrap();
+        let agents = store.agents().await.unwrap();
+        assert_eq!(agents.len(), 1);
+        assert!(agents[0].tags.is_empty(), "an old row has no tags");
+        store.touch_agent("a@h".into(), vec!["gpu".into()]).await.unwrap();
+        store.touch_agent("a@h".into(), vec![]).await.unwrap();
+        assert_eq!(store.agents().await.unwrap()[0].tags, ["gpu"]);
+        let version: i64 = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
     }
 }

@@ -250,7 +250,7 @@ One JSON object per line, `\n`-terminated. The `type` field disambiguates.
 Client → broker:
 
 ```json
-{"type":"hello", "v":1, "address":"codex@box1", "token":"…"}
+{"type":"hello", "v":1, "address":"codex@box1", "token":"…", "tags":["os:linux","arch:x86_64","gpu"]}
 {"type":"send",  "to":"opus@mac", "body":"hi", "reply_to":null, "topic":"release-26"}
 {"type":"send",  "to":null, "body":"hi", "reply_to":null, "topic":"release-26"}
 {"type":"inbox"}
@@ -273,7 +273,7 @@ Broker → client:
 {"type":"message", "id":13,"from":"opus@mac","to":"codex@box1",
  "body":"hi","ts":1763200000001,"reply_to":12,"topic":null}
 {"type":"acked",   "ids":[12, 13]}
-{"type":"agents",  "agents":[{"address":"codex@box1","last_seen":1763200000000}]}
+{"type":"agents",  "agents":[{"address":"codex@box1","last_seen":1763200000000,"tags":["os:linux","gpu"]}]}
 {"type":"log",     "messages":[
   {"id":12,"from":"codex@box1","to":"opus@mac",
    "body":"hi","ts":1763200000000,"reply_to":null,"topic":null,"acked_at":null}]}
@@ -306,7 +306,12 @@ ignored. Except for `watch`, the broker never pushes messages: the client
 asks. Every accepted `hello` records the address with the broker clock, and
 the broker records it again when that connection closes. `agents` returns
 all recorded addresses sorted by address; an address that only received
-messages and never connected is not listed. The `inbox` command prints each message, flushes stdout, then acks,
+messages and never connected is not listed. `hello` may carry an optional
+`tags` list (at most 32 tags of 64 bytes each, else `bad_tags`). The client
+always sends `os:<os>` and `arch:<arch>`, plus the comma-separated entries of
+`CHATTRS_TAGS` (for example `CHATTRS_TAGS=gpu:4090,fast`). The broker keeps
+the tags of the latest `hello` that sent any, and `agents` shows them after
+the last-seen time; `agents --json` always has a `tags` array. The `inbox` command prints each message, flushes stdout, then acks,
 so a crash between print and ack redelivers the message on the next run —
 delivery is at least once, and the id tells duplicates apart.
 
@@ -361,7 +366,7 @@ message it answers; an explicit `topic` always wins. An invalid slug is
 rejected with `bad_topic`.
 
 Error codes: `bad_frame`, `hello_required`, `bad_version` (v ≠ 1),
-`bad_address`, `bad_token`, `bad_topic`, `empty_body`, `too_large`,
+`bad_address`, `bad_token`, `bad_tags`, `bad_topic`, `empty_body`, `too_large`,
 `unknown_message`, `not_recipient`. After `hello`, an error does not
 close the connection, except `bad_token`, which always closes it.
 

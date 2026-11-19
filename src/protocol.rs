@@ -29,8 +29,13 @@ mod tests {
     #[test]
     fn inbound_frames_round_trip() {
         let frames = vec![
-            Inbound::Hello { v: 1, address: "codex@box1".into(), token: None },
-            Inbound::Hello { v: 1, address: "codex@box1".into(), token: Some("s3cret".into()) },
+            Inbound::Hello { v: 1, address: "codex@box1".into(), token: None, tags: vec![] },
+            Inbound::Hello {
+                v: 1,
+                address: "codex@box1".into(),
+                token: Some("s3cret".into()),
+                tags: vec!["os:linux".into(), "gpu".into()],
+            },
             Inbound::Send {
                 to: Some("opus@mac".into()),
                 body: "hi".into(),
@@ -110,10 +115,26 @@ mod tests {
     }
 
     #[test]
+    fn hello_tags_are_optional_on_the_wire() {
+        let old: Inbound =
+            serde_json::from_str(r#"{"type":"hello","v":1,"address":"a@h"}"#).unwrap();
+        assert_eq!(old, Inbound::Hello { v: 1, address: "a@h".into(), token: None, tags: vec![] });
+        let line =
+            encode(&Inbound::Hello { v: 1, address: "a@h".into(), token: None, tags: vec![] })
+                .unwrap();
+        assert!(!line.contains("tags"), "empty tags are omitted: {line}");
+    }
+
+    #[test]
     fn every_line_carries_a_type_tag() {
         let frames = vec![
-            serde_json::to_value(Inbound::Hello { v: 1, address: "a@h".into(), token: None })
-                .unwrap(),
+            serde_json::to_value(Inbound::Hello {
+                v: 1,
+                address: "a@h".into(),
+                token: None,
+                tags: vec![],
+            })
+            .unwrap(),
             serde_json::to_value(Inbound::Send {
                 to: Some("b@h".into()),
                 body: "hi".into(),

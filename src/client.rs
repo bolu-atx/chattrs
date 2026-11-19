@@ -98,6 +98,21 @@ async fn connect_stream(server: &str) -> Result<TcpStream, ConnectError> {
     }
 }
 
+/// The tags every `hello` carries: `os:` and `arch:` from the build target,
+/// then the comma-separated entries of `CHATTRS_TAGS`. Entries are trimmed;
+/// empty ones and repeats are dropped.
+fn hello_tags(custom: Option<&str>) -> Vec<String> {
+    let mut tags =
+        vec![format!("os:{}", std::env::consts::OS), format!("arch:{}", std::env::consts::ARCH)];
+    for tag in custom.unwrap_or_default().split(',') {
+        let tag = tag.trim();
+        if !tag.is_empty() && !tags.iter().any(|seen| seen == tag) {
+            tags.push(tag.to_string());
+        }
+    }
+    tags
+}
+
 impl Client {
     /// Connect to `endpoint` and say `hello`. When the first connect
     /// fails with connection refused on a loopback server, start a
@@ -139,6 +154,7 @@ impl Client {
                 v: model::PROTOCOL_VERSION,
                 address: endpoint.address.clone(),
                 token: endpoint.token.clone(),
+                tags: hello_tags(std::env::var("CHATTRS_TAGS").ok().as_deref()),
             })
             .await?;
         match frame {
@@ -589,5 +605,16 @@ mod tests {
             ClientError::Server { code: "bad_token".into(), message: "token is wrong".into() };
         assert_eq!(error.to_string(), "bad_token: token is wrong");
         assert_eq!(String::from(error), "bad_token: token is wrong");
+    }
+
+    #[test]
+    fn hello_tags_lead_with_os_and_arch_then_normalized_custom_tags() {
+        let tags = hello_tags(Some(" gpu , ,gpu:4090,gpu,os:"));
+        assert_eq!(tags[0], format!("os:{}", std::env::consts::OS));
+        assert_eq!(tags[1], format!("arch:{}", std::env::consts::ARCH));
+        assert_eq!(tags[2..], ["gpu", "gpu:4090", "os:"]);
+        assert_eq!(hello_tags(None).len(), 2);
+        let os = tags[0].clone();
+        assert_eq!(hello_tags(Some(&os)).len(), 2, "a repeat of a built-in tag is dropped");
     }
 }
