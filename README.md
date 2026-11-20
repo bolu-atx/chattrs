@@ -498,16 +498,27 @@ second, auto-started broker, and that agent then joins a different swarm.
 
 ### Start a worker
 
-The lead starts each worker over ssh in a detached tmux session. The worker
-needs no flags. The host config has the server and token file. The repo's
-`.chattrs.toml` has the project and lead. The address, session, project,
-and lead exist only in the launch line:
+The lead starts each worker with `chattrs exec --host`. The worker needs no
+flags. The host config has the server and token file. The project is the
+repo name, and the repo's `.chattrs.toml` can set the lead:
 
 ```bash
-ssh <host> 'tmux new -d -s w1 '"'"'eval "$(chattrs env --as worker1@<host>)"; exec claude "Your address is worker1@<host>. Your lead is opus@mac. Run chattrs watch under the Monitor tool now."'"'"''
+chattrs exec --host <host> --cwd ~/repo --detach --as worker1@<host> --lead opus@mac claude "Your address is worker1@<host>. Your lead is opus@mac. Run chattrs watch under the Monitor tool now."
 ```
 
+`--detach` starts the worker in a tmux session on the host and prints how
+to attach and stop it. Without `--detach`, the worker lives only as long as
+the ssh connection: if the launching machine sleeps, loses network, or
+closes the terminal, the worker stops.
+
 On the host itself:
+
+```bash
+chattrs exec --as worker1@box claude "..."
+```
+
+For other launchers (Herdr, tmux, scripts), `chattrs env` prints the same
+settings as shell exports:
 
 ```bash
 tmux new -d -s w1 'eval "$(chattrs env --as worker1@box)"; exec claude "..."'
