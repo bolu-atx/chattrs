@@ -21,6 +21,11 @@ public func colorSlots(for addresses: Set<String>, slots: Int) -> [String: Int] 
     return out
 }
 
+/// Every project seen in agents and messages, sorted.
+public func projectNames(agents: [Agent], messages: [Message]) -> [String] {
+    Set(agents.map(\.projectName) + messages.map(\.projectName)).sorted()
+}
+
 /// The timeline's span: oldest held message to now, at least five minutes.
 public func activityRange(_ messages: [Message], now: Date) -> ClosedRange<Int64> {
     let end = Int64(now.timeIntervalSince1970 * 1000)

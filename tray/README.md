@@ -52,10 +52,12 @@ echo '{"cmd":"connect","server":"100.64.0.7:4646","token":"…"}' | nc -U "$SOCK
 
 The app uses only the chattrs wire protocol: requirements MON-1, MON-2, and MON-3 in [../docs/requirements.md](../docs/requirements.md). It follows the README's "Monitoring API (observer)" flow:
 
-1. `hello` with `"observer":true`. The broker does not record the app or list it in `agents`.
+1. `hello` with `"observer":true` and `"project":"*"`. The broker does not record the app or list it in `agents`, and the app sees every project (NS-1).
 2. The `welcome` must echo `"observer":true`. If it does not, the broker is too old: the app shows "broker too old: observer unsupported" and stops. It never connects as a normal agent.
 3. `watch` with `"all":true` streams every new message. The app keeps what streams, reads `log` after the last id it holds, and drops duplicates by id.
 4. `agents` every 7 s gives the agent list, `online`, and `state` (MON-4).
+
+Once the broker has more than one project, a project menu appears under the header. "All projects" groups the agent list by project and labels each message with its project. Picking one project filters the agents, the timeline, and the feed. A broker before projects sends no `project`, which the app reads as `default`. The same address in two projects shows as two agents.
 
 Each online agent has a status dot: green for working, amber for waiting, grey for idle. A hollow dot means unknown: no state, or a `state_at` older than 15 minutes on the tray's clock. An offline agent shows no dot and its last-seen age, whatever its state.
 
