@@ -8,12 +8,33 @@ public struct Agent: Sendable, Equatable, Identifiable, Decodable {
     public let lastSeen: Int64?
     /// Live inbox watch on the broker. nil from a broker that predates it.
     public let online: Bool?
+    /// Self-reported "working", "idle", or "waiting" (MON-4), and when it was set.
+    public let state: String?
+    public let stateAt: Int64?
     public var id: String { address }
 
     enum CodingKeys: String, CodingKey {
-        case address, online
+        case address, online, state
         case lastSeen = "last_seen"
+        case stateAt = "state_at"
     }
+
+    public init(address: String, lastSeen: Int64? = nil, online: Bool? = nil, state: String? = nil, stateAt: Int64? = nil) {
+        self.address = address; self.lastSeen = lastSeen; self.online = online; self.state = state; self.stateAt = stateAt
+    }
+
+    /// Offline wins over state. A missing, unknown, or 15-minute-old state is unknown.
+    public func status(now: Date = Date()) -> AgentStatus {
+        guard online == true else { return .offline }
+        guard let state, let stateAt, Int64(now.timeIntervalSince1970 * 1000) - stateAt <= 15 * 60 * 1000 else {
+            return .unknown
+        }
+        return AgentStatus(rawValue: state) ?? .unknown
+    }
+}
+
+public enum AgentStatus: String, Sendable {
+    case working, waiting, idle, unknown, offline
 }
 
 public struct Message: Sendable, Equatable, Identifiable, Decodable {

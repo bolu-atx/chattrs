@@ -56,16 +56,15 @@ struct AgentsSection: View {
                     TimelineView(.periodic(from: .now, by: 5)) { ctx in
                         VStack(alignment: .leading, spacing: 2) {
                             ForEach(agents) { a in
-                                HStack {
+                                let st = a.status(now: ctx.date)
+                                HStack(spacing: 6) {
+                                    StatusDot(status: st)
                                     Text(a.address).font(.system(.caption, design: .monospaced))
                                     Spacer()
-                                    if a.online == true {
-                                        Circle().fill(.green).frame(width: 7, height: 7)
-                                        Text("online").font(.caption).foregroundStyle(.secondary)
-                                    } else {
-                                        Text(a.lastSeen.map { ageText(lastSeenMs: $0, now: ctx.date) } ?? "?")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                    }
+                                    Text(st == .offline
+                                        ? (a.lastSeen.map { ageText(lastSeenMs: $0, now: ctx.date) } ?? "offline")
+                                        : st.rawValue)
+                                        .font(.caption).foregroundStyle(.secondary)
                                 }
                             }
                         }
@@ -75,6 +74,25 @@ struct AgentsSection: View {
             }
         }
         .padding(10)
+    }
+}
+
+/// MON-4: green working, amber waiting, grey idle, hollow unknown, nothing when offline.
+struct StatusDot: View {
+    let status: AgentStatus
+
+    var body: some View {
+        Group {
+            switch status {
+            case .working: Circle().fill(.green)
+            case .waiting: Circle().fill(.orange)
+            case .idle: Circle().fill(.gray)
+            case .unknown: Circle().strokeBorder(.secondary, lineWidth: 1)
+            case .offline: Color.clear
+            }
+        }
+        .frame(width: 8, height: 8)
+        .help(status.rawValue)
     }
 }
 

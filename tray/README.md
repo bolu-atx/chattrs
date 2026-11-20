@@ -47,7 +47,9 @@ The app uses only the chattrs wire protocol: requirements MON-1, MON-2, and MON-
 1. `hello` with `"observer":true`. The broker does not record the app or list it in `agents`.
 2. The `welcome` must echo `"observer":true`. If it does not, the broker is too old: the app shows "broker too old: observer unsupported" and stops. It never connects as a normal agent.
 3. `watch` with `"all":true` streams every new message. The app keeps what streams, reads `log` after the last id it holds, and drops duplicates by id.
-4. `agents` every 7 s gives the agent list and `online`.
+4. `agents` every 7 s gives the agent list, `online`, and `state` (MON-4).
+
+Each online agent has a status dot: green for working, amber for waiting, grey for idle. A hollow dot means unknown: no state, or a `state_at` older than 15 minutes on the tray's clock. An offline agent shows no dot and its last-seen age, whatever its state.
 
 The app is read-only. It never sends `send`, `ack`, `wait`, or `inbox`. Nothing in chattrs depends on it running.
 
