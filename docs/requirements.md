@@ -59,6 +59,7 @@ Address = `agent@host`.
 ## Hooks
 
 - **HOOK-1** Hook adapters for Claude Code and Codex deliver unread messages between tool calls; pi later. *(N10)*
+- **HOOK-2** After a context clear or compaction, the session-start hook re-briefs the agent with its address, its lead, and its recent messages.
 
 ## Semantics
 
