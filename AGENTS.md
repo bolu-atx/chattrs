@@ -50,9 +50,10 @@ CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to
 | `src/setup.rs` | `chattrs setup`: detect agents, install hooks (via `hook/install.rs`) and the skill, write a missing config |
 | `src/setup/broker.rs` | `chattrs setup --broker`: write the broker `tokens.toml` (0600) and a systemd or launchd unit, print join strings |
 | `src/setup/join.rs` | `chattrs setup --join`: parse join strings, write token files, edit `[tokens]` in `config.toml` |
+| `src/setup_guide.rs` | `chattrs setup-guide`: detect the role and host state, print ordered steps (text or JSON) for an agent; `setup_guide/swarm.rs` builds the ask steps and the per-host ssh steps; reuses `doctor::collect`, never says `hello` |
 | `src/hook/install.rs` | `chattrs hooks install` and `hooks remove`: edit the agent hook config files (`hook.rs` holds the hook runtime) |
 | `src/backup.rs` | `chattrs backup`: online copy of the database with the SQLite backup API, temp file then rename, mode 0600 |
-| `src/doctor.rs` | `chattrs doctor`: read-only host check, one `ok`/`FAIL` line per check; probes the broker with an observer `hello` so no agent is recorded |
+| `src/doctor.rs` | `chattrs doctor`: read-only host check; `collect` returns structured checks, `run` prints one `ok`/`FAIL` line per check; probes the broker with an observer `hello` so no agent is recorded |
 | `src/project.rs` | The client project resolver: env, config, git repo name, `default`; runs `git` with a 2 s timeout |
 | `src/skill.rs` | Embedded agent skill text printed by `chattrs skill` |
 | `skills/chattrs/SKILL.md` | Agent skill: `send`, `ask`, `reply`, no polling |
