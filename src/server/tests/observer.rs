@@ -1,6 +1,6 @@
 //! Broker tests: observer hello and `watch` with `all`.
 
-use super::helpers::*;
+use super::fixture::*;
 use crate::client;
 use crate::model::Outbound;
 use tempfile::TempDir;
@@ -133,7 +133,7 @@ async fn cli_watch_all_prints_streamed_messages() {
     let out = dir.path().join("watch.out");
     let file = std::fs::File::create(&out).unwrap();
     let _watcher = ProcChild {
-        child: super::helpers::ports::command(&bin)
+        child: super::fixture::ports::command(&bin)
             .args(["watch", "--all", "--server", &addr, "--address", "tray@h"])
             .env("CHATTRS_DB", &db)
             .stdout(file)

@@ -1,7 +1,7 @@
 //! Broker tests: project namespaces (NS-1).
 
 use super::super::*;
-use super::helpers::*;
+use super::fixture::*;
 use crate::client;
 use crate::model::Outbound;
 use tempfile::TempDir;
@@ -293,7 +293,7 @@ fn chattrs_in(
     who: &str,
     args: &[&str],
 ) -> std::process::Output {
-    super::helpers::ports::command(bin)
+    super::fixture::ports::command(bin)
         .args(args)
         .arg("--server")
         .arg(addr)

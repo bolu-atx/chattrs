@@ -1,6 +1,6 @@
 //! Broker tests: one session per address (ID-1).
 
-use super::helpers::*;
+use super::fixture::*;
 use crate::model::Outbound;
 
 fn hello(address: &str, project: &str, session: Option<&str>, observer: bool) -> String {

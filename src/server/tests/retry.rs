@@ -4,7 +4,7 @@
 //! `127.0.0.1:<port>`. The address is not loopback, so a refused connect
 //! never autostarts a broker and the retry path runs.
 
-use super::helpers::*;
+use super::fixture::*;
 use crate::client;
 use tempfile::TempDir;
 
@@ -20,7 +20,7 @@ fn spawn_cli(
     files: (&std::path::Path, &std::path::Path),
     db: &std::path::Path,
 ) -> ProcChild {
-    let child = super::helpers::ports::command(bin)
+    let child = super::fixture::ports::command(bin)
         .arg(subcommand)
         .arg("--server")
         .arg(dial_addr(addr))

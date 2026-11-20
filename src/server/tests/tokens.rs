@@ -1,6 +1,6 @@
 //! Broker tests: the token table (SEC-4).
 
-use super::helpers::*;
+use super::fixture::*;
 use crate::model::{Message, Outbound};
 use crate::output;
 use crate::server::serve;

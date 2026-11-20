@@ -2,7 +2,7 @@
 //! observer.
 
 use super::super::*;
-use super::helpers::*;
+use super::fixture::*;
 use crate::client;
 use crate::model::Outbound;
 use tempfile::TempDir;

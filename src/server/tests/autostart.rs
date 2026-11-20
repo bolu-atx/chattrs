@@ -1,6 +1,6 @@
 //! Broker tests: auto-start.
 
-use super::helpers::*;
+use super::fixture::*;
 use crate::client;
 use tempfile::TempDir;
 
@@ -30,7 +30,7 @@ fn run_client(bin: &std::path::Path, db: &std::path::Path, args: &[&str]) -> std
     use std::io::{Read as _, Seek as _, SeekFrom};
     let mut out = tempfile::tempfile().expect("stdout file");
     let mut err = tempfile::tempfile().expect("stderr file");
-    let status = super::helpers::ports::command(bin)
+    let status = super::fixture::ports::command(bin)
         .args(args)
         .env("CHATTRS_DB", db)
         .stdin(std::process::Stdio::null())
@@ -48,7 +48,7 @@ fn run_client(bin: &std::path::Path, db: &std::path::Path, args: &[&str]) -> std
 }
 
 fn run_stop(bin: &std::path::Path, db: &std::path::Path) -> std::process::Output {
-    super::helpers::ports::command(bin)
+    super::fixture::ports::command(bin)
         .arg("stop")
         .env("CHATTRS_DB", db)
         .output()
@@ -155,7 +155,7 @@ async fn watch_starts_broker_on_demand() {
 
     let out_path = dir.path().join("watch.out");
     let file = std::fs::File::create(&out_path).expect("watch output file");
-    let child = super::helpers::ports::command(&bin)
+    let child = super::fixture::ports::command(&bin)
         .arg("watch")
         .arg("--server")
         .arg(&addr)
@@ -261,7 +261,7 @@ async fn remote_connect_failure_starts_nothing() {
     drop(probe);
     let remote = format!("192.0.2.1:{port}");
 
-    let mut child = super::helpers::ports::command(&bin)
+    let mut child = super::fixture::ports::command(&bin)
         .arg("send")
         .arg("--server")
         .arg(&remote)

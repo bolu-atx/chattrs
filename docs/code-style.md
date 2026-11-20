@@ -46,6 +46,8 @@ What good code looks like here:
   by item kind.
 - Tests stay in the same file as the code they test, in
   `#[cfg(test)] mod tests`.
+  Exception: a big module may keep its tests in `foo/tests/*.rs`, one file
+  per subject, as `src/server/tests/` does.
 - Item order in a file: `mod` declarations, then `use`, then re-exports.
   After that, types before `impl` blocks and functions; public items before
   private ones.
