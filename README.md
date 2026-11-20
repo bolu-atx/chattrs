@@ -25,8 +25,19 @@ over TCP, so a script in any language can join too.
 
 ## Get running
 
-chattrs never starts agents. You start them. `chattrs env` sets the
-address and the session in the launch line.
+`chattrs exec claude` starts an agent on the swarm. It sets the address
+and the session, then hands the process to the agent. chattrs never hosts
+or supervises the agent. For other launchers (Herdr, tmux, scripts), use
+`chattrs env`, which prints the same settings as `export` lines.
+
+`exec` does not put the token in the agent's environment. Each chattrs
+call in the agent reads the token from `config.toml`, as the hooks do. An
+explicit `CHATTRS_TOKEN` in your shell passes through unchanged. If no
+token is found, `exec` prints `chattrs: no token for ADDR; the broker may
+refuse` and still starts the agent.
+
+The broker refuses a second live session for the same address (ID-1). The
+refusal shows when the agent's hooks or `watch` connect.
 
 ### Solo, one machine
 
@@ -49,11 +60,15 @@ Three steps.
 
    ```bash
    # Terminal 1
-   eval "$(chattrs env --as lead@mac)" && claude
+   chattrs exec --as lead@mac claude
 
    # Terminal 2
-   eval "$(chattrs env --as w1@mac --lead lead@mac)" && codex
+   chattrs exec --as w1@mac --lead lead@mac codex
    ```
+
+   Without `--as`, the address is `<program>@<host>`, for example
+   `claude@mac`. Arguments after the program go to the program:
+   `chattrs exec claude --resume ID`.
 
 The first command starts a loopback broker on its own. The session-start
 hook tells each agent its address and its lead, and to load the skill.
@@ -103,8 +118,8 @@ the solo path.
 5. Launch every agent with its own address:
 
    ```bash
-   eval "$(chattrs env --as lead@mac)" && claude
-   eval "$(chattrs env --as w1@bobox --lead lead@mac)" && codex
+   chattrs exec --as lead@mac claude
+   chattrs exec --as w1@bobox --lead lead@mac codex
    ```
 
 `env --as` exports the address, a new session id, and the server. It does
@@ -241,6 +256,7 @@ acks them (MSG-5). Announcements never reach an inbox.
 | `agents [--all] [--json]` | List the agents of the project: online or last seen, state, health, tags. Hides agents offline over 7 days with no traffic since. `--all` shows them. |
 | `projects [--json]` | List every project with its agent and message counts. Read-only. |
 | `status working\|idle\|waiting` | Report the own state. Best effort: it never starts a broker, gives up after about 2 s, and always exits 0. |
+| `exec [--as ADDR] [--project P] [--lead ADDR] [--server S] [--tags T] [--] PROGRAM [ARGS...]` | Run PROGRAM with the session env that `env` prints. On Unix it replaces the chattrs process. The default address is `<program>@<host>`. It never adds the token to the environment. |
 | `env --as ADDR [--project P] [--lead ADDR] [--server S] [--tags T] [--token T] [--with-token]` | Print `export` lines for one session: `eval "$(chattrs env --as a@h)"`. It makes a new `CHATTRS_SESSION` on every run. It omits the token unless `--with-token`. |
 | `setup` | Install the hooks and the skill for each agent found (Claude Code, Codex). Write a starter `config.toml` only if missing. Safe to run again. `setup --broker --hosts a,b [...]` prepares a broker host; `setup --join STRING\|-` stores join-string tokens. See [Several hosts](#several-hosts-setup---broker-and-setup---join-setup-2). |
 | `doctor [--as ADDR] [--server S]` | Check config, token files, broker, token, protocol, hooks, and skill. One `ok` or `FAIL` line each; exit 1 on any failure. Read-only. See [Check a host](#check-a-host-doctor-setup-3). |

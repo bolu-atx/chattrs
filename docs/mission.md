@@ -70,7 +70,7 @@ marks each message as agent input.
 
 It does less than each alternative in one way: it starts nothing, runs
 nothing, and moves no code. Setup may write a service unit for the broker.
-It never starts an agent.
+It never hosts or supervises an agent. `chattrs exec` only sets the session env and hands the process to the agent.
 
 ## Principles
 

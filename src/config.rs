@@ -183,6 +183,9 @@ pub fn load() -> Result<Config, String> {
 /// it is ignored.
 pub fn address_hint(args: &[String], var: impl Fn(&str) -> Option<String>) -> Option<String> {
     let is_hook = args.first().is_some_and(|arg| arg == "hook");
+    if args.first().is_some_and(|arg| arg == "exec") {
+        return exec_address_hint(&args[1..]);
+    }
     let args = &args[..args.iter().position(|arg| arg == "--").unwrap_or(args.len())];
     let flag = |name: &str| {
         let prefix = format!("{name}=");
@@ -202,6 +205,28 @@ pub fn address_hint(args: &[String], var: impl Fn(&str) -> Option<String>) -> Op
         .or_else(|| flag("--agent").filter(|_| !is_hook).map(host))
         .or_else(|| var("CHATTRS_ADDRESS").filter(|value| !value.is_empty()))
         .or_else(|| var("CHATTRS_AGENT").filter(|value| !value.is_empty()).map(host))
+}
+
+/// The address `chattrs exec` will use. Only the flags before the program
+/// count: the program and its arguments are never read as chattrs flags.
+fn exec_address_hint(args: &[String]) -> Option<String> {
+    let mut address = None;
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--" => return address.or_else(|| rest.next().map(|p| crate::exec_default_address(p))),
+            "--as" => address = rest.next().cloned(),
+            "--project" | "--lead" | "--server" | "--tags" => {
+                rest.next();
+            }
+            _ if arg.starts_with("--as=") => {
+                address = arg.strip_prefix("--as=").map(str::to_string)
+            }
+            _ if arg.starts_with('-') => {}
+            program => return address.or_else(|| Some(crate::exec_default_address(program))),
+        }
+    }
+    address
 }
 
 impl Config {
@@ -253,6 +278,7 @@ impl Config {
             match name {
                 "CHATTRS_PROJECT" => PROJECT_FROM_CONFIG.store(true, Ordering::Relaxed),
                 "CHATTRS_LEAD" => LEAD_FROM_CONFIG.store(true, Ordering::Relaxed),
+                "CHATTRS_TOKEN" => TOKEN_FROM_CONFIG.store(true, Ordering::Relaxed),
                 _ => {}
             }
             std::env::set_var(name, value);
@@ -265,6 +291,14 @@ static PROJECT_FROM_CONFIG: AtomicBool = AtomicBool::new(false);
 
 /// Set when `apply_env` exported the config `lead` as `CHATTRS_LEAD`.
 static LEAD_FROM_CONFIG: AtomicBool = AtomicBool::new(false);
+
+/// Set when `apply_env` exported a config token as `CHATTRS_TOKEN`.
+static TOKEN_FROM_CONFIG: AtomicBool = AtomicBool::new(false);
+
+/// Whether `CHATTRS_TOKEN` holds a config token and not an explicit one.
+pub fn token_from_config() -> bool {
+    TOKEN_FROM_CONFIG.load(Ordering::Relaxed)
+}
 
 /// Whether `CHATTRS_PROJECT` holds the config project and not an explicit one.
 pub fn project_from_config() -> bool {
