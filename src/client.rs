@@ -119,13 +119,17 @@ fn hello_tags(custom: Option<&str>) -> Vec<String> {
     tags
 }
 
-/// The project from `CHATTRS_PROJECT`, or `None` when it is unset or
-/// blank. The one place the variable is read: the `hello` and the hook
-/// context both use it. Never derive a project from the directory.
-pub fn env_project() -> Option<String> {
-    let value = std::env::var("CHATTRS_PROJECT").ok()?;
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_string())
+/// The project to say in the `hello` when none is given: `CHATTRS_PROJECT`,
+/// then the config, then the git repo name. `None` means the default
+/// project, so the `hello` stays as old clients send it.
+fn implicit_project() -> Option<String> {
+    // Unit tests run inside this repo, so they would join project `chattrs`
+    // while the binaries they spawn join `default`. Opt out.
+    if cfg!(test) {
+        return None;
+    }
+    let (project, source) = crate::project::current();
+    (*source != crate::project::ProjectSource::Default).then(|| project.clone())
 }
 
 /// The lead from `CHATTRS_LEAD`, or `None` when it is unset or blank. The
@@ -202,7 +206,7 @@ impl Client {
             },
             observer,
             state: state.map(str::to_string),
-            project: project.map(str::to_string).or_else(env_project),
+            project: project.map(str::to_string).or_else(implicit_project),
             session: env_session(),
         };
         // On a startable server a broker may be coming up, ours or a

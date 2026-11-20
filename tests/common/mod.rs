@@ -54,7 +54,8 @@ fn scratch_home() -> &'static std::path::Path {
 
 /// A `Command` for a spawned chattrs (or any child) that is cut off from
 /// the user's environment: `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and
-/// `CODEX_HOME` point into a scratch dir, and every inherited `CHATTRS_*`
+/// `CODEX_HOME` point into a scratch dir, the cwd is that dir (not a repo),
+/// the variables that name a repo are removed, and every inherited `CHATTRS_*`
 /// variable is removed. Set test variables on the result, after this call.
 pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
     let home = scratch_home();
@@ -64,7 +65,14 @@ pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
             command.env_remove(name);
         }
     }
+    // No test derives a git project unless it means to: the cwd is not a
+    // repo, no variable names one, and the search stops at the temp dir.
+    for name in ["GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR"] {
+        command.env_remove(name);
+    }
     command
+        .current_dir(home)
+        .env("GIT_CEILING_DIRECTORIES", std::env::temp_dir())
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
         .env("XDG_DATA_HOME", home.join(".local/share"))

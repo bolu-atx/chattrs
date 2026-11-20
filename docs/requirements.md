@@ -56,7 +56,7 @@ Address = `agent@host`.
 
 ## Projects
 
-- **NS-1** One broker serves many projects. Mailboxes, agents, log, topics, leases, and state are scoped to a project. An agent cannot see or send to another project. Old clients use the project `default`.
+- **NS-1** One broker serves many projects. Mailboxes, agents, log, topics, leases, and state are scoped to a project. An agent cannot see or send to another project. Old clients use the project `default`. A client with no explicit project (env or config) inside a repo uses the repo name. Outside a repo it uses `default`.
 
 ## Hooks
 
@@ -71,7 +71,7 @@ Address = `agent@host`.
 
 - **SETUP-1** `chattrs setup` installs the hooks and the skill for each detected agent and writes a missing user config. It is safe to run again and never overwrites user settings.
 - **SETUP-2** `chattrs setup --broker` writes the tokens file, the service unit, and one join string per host. `chattrs setup --join <string>` configures a host from a join string.
-- **SETUP-3** `chattrs doctor` checks config, broker reachability, token acceptance (project and role), protocol support, hooks, and skill. It prints one pass or fail line for each check and exits 1 on any failure.
+- **SETUP-3** `chattrs doctor` checks config, broker reachability, token acceptance (project and role), protocol support, hooks, and skill. It prints the project and its source (env, config, git, or default). It prints one pass or fail line for each check and exits 1 on any failure.
 - **SETUP-4** The client config maps addresses to token files, so one host can hold several identities.
 
 ## Operations

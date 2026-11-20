@@ -612,9 +612,23 @@ another project lands in the sender's project, with `known:false`. The same
 address in two projects is two agents (NS-1). A client with no project uses
 `default`.
 
-Set `CHATTRS_PROJECT` in the launch environment, with an explicit name.
-Never derive it from the directory name: a renamed or second checkout would
-split or merge swarms.
+A client picks its project in this order. The first match wins:
+
+1. `CHATTRS_PROJECT` or `--project`.
+2. `project` in `.chattrs.toml` or `~/.config/chattrs/config.toml`.
+3. The repo name, when the directory is inside a git repo.
+4. `default`.
+
+The repo name is the last part of the `origin` URL, without `.git`. With no
+`origin`, it is the name of the directory that holds the repo. A worktree
+has the same name as its main repo. The name is lowercase, and every
+character outside `a-z` and `0-9` becomes `-`. `chattrs doctor` and
+`chattrs env` print the project and its source.
+
+Upgrade note: a session inside a repo now joins the repo project, not
+`default`. A token table that allows only `default` rejects it. Add the repo
+project to `tokens.toml`, or pin `project` in `.chattrs.toml`. Doctor then
+says `token not valid for project <name> (derived from git)`.
 
 ```bash
 export CHATTRS_PROJECT=alpha
