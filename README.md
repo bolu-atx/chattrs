@@ -25,67 +25,99 @@ over TCP, so a script in any language can join too.
 
 ## Get running
 
+chattrs never starts agents. You start them. `chattrs env` sets the
+address and the session in the launch line.
+
 ### Solo, one machine
 
-Install chattrs, then set up the agents once.
+Three steps.
 
-```bash
-brew install bolu-atx/tap/chattrs      # or: npm install -g chattrs
-chattrs setup                          # hooks and skill for each agent found
-```
+1. Install chattrs. On macOS: `brew install bolu-atx/tap/chattrs`. For
+   npm or cargo, see [Install](#install).
+2. Set up the agents once:
 
-`setup` finds Claude Code and Codex. For each one it installs the hooks and
-writes the skill (`~/.claude/skills/chattrs/SKILL.md`,
-`$CODEX_HOME/skills/chattrs/SKILL.md`, default `~/.codex`). It writes
-`~/.config/chattrs/config.toml` (mode 0600, all comments) only when none
-exists. It is safe to run again: it never overwrites your settings or config,
-and it refreshes the skill text after an upgrade.
+   ```bash
+   chattrs setup
+   ```
 
-Then follow the printed trust steps. Open Codex once and run `/hooks` to
-trust the new hooks. Claude Code may ask you to review the hooks.
+   `setup` finds Claude Code and Codex. For each one it installs the hooks
+   and the skill. It writes `~/.config/chattrs/config.toml` only when none
+   exists. It is safe to run again. Then follow the printed trust steps:
+   open Codex once and run `/hooks` to trust the new hooks. Claude Code may
+   ask you to review the hooks.
+3. Start a lead and a worker in two terminals:
 
-Now start a lead and a worker in two terminals. Each line sets the
-address, a session, and the lead. Nothing else is needed.
+   ```bash
+   # Terminal 1
+   eval "$(chattrs env --as lead@mac)" && claude
 
-```bash
-# Terminal 1
-eval "$(chattrs env --as lead@mac)" && claude
-
-# Terminal 2
-eval "$(chattrs env --as w1@mac --lead lead@mac)" && codex
-```
+   # Terminal 2
+   eval "$(chattrs env --as w1@mac --lead lead@mac)" && codex
+   ```
 
 The first command starts a loopback broker on its own. The session-start
-hook tells each agent its address and its lead, and to load the skill. The
-hooks deliver messages between tool calls. In Claude Code, the agent also
-runs `chattrs watch` under Monitor, so a message wakes it. No special launch
-prompt is needed. Ask the lead to send w1 a task, and run `chattrs agents`
-to see both agents and their state. An agent shows `online` only while it
-runs `chattrs watch`.
+hook tells each agent its address and its lead, and to load the skill.
+Ask the lead to send w1 a task. Run `chattrs agents` to see both agents.
+An agent shows `online` only while it runs `chattrs watch`. Hooks deliver
+messages between tool calls. In Claude Code, the agent runs `chattrs
+watch` under Monitor, so a message wakes it.
 
 ### Swarm, several machines
 
-1. Pick an always-on broker host. Run `chattrs serve` there as a service
-   ([Run the broker as a service](#run-the-broker-as-a-service)).
-2. Write `tokens.toml` with one token per host
-   ([Token table](#token-table)). To move an existing swarm to tokens
-   without breaking clients, follow
-   [Turning on per-host tokens](#turning-on-per-host-tokens).
-3. On each host, put `server` and `token_file` in
-   `~/.config/chattrs/config.toml`
-   ([Set client hosts](#set-client-hosts)).
-4. In each repo, commit a `.chattrs.toml` with `project` and `lead`
-   ([Environment and config](#environment-and-config)).
-5. Start every agent with the same launch line, with its own address:
-   `eval "$(chattrs env --as w1@box1)" && codex`
-   ([Start a worker](#start-a-worker)).
+Five steps. Use a broker host that is always on. A laptop sleeps, and the
+swarm stops. Install and run `chattrs setup` on every host first, as in
+the solo path.
+
+1. On the broker host, issue tokens and write the service unit:
+
+   ```bash
+   chattrs setup --broker --hosts mac,bobox --bind 100.64.0.1 --enable
+   ```
+
+   `--hosts` lists the agent hosts. `--bind` is the tailnet or LAN IP. It
+   defaults to the Tailscale IPv4. It never takes `0.0.0.0` or `::`.
+   `--enable` starts the service. The command prints one join string for
+   each token.
+2. Copy each host's join string to that host, over a private channel. A
+   join string holds a token. Treat it like a password. The broker never
+   stores it.
+3. On each host, run `setup --join` and paste the join strings on stdin.
+   End with Ctrl-D. This keeps them out of shell history:
+
+   ```bash
+   chattrs setup --join -
+   ```
+
+   It writes a token file (mode 0600) and one `[tokens]` entry in
+   `~/.config/chattrs/config.toml`, and it sets `server`. A host that runs
+   agents next to the broker needs this step too. The lead host needs
+   the lead's join string as well.
+4. On each host, check the setup:
+
+   ```bash
+   chattrs doctor --as w1@bobox
+   ```
+
+   Each check prints `ok` or `FAIL` with a fix hint. The command exits 1
+   on any failure.
+5. Launch every agent with its own address:
+
+   ```bash
+   eval "$(chattrs env --as lead@mac)" && claude
+   eval "$(chattrs env --as w1@bobox --lead lead@mac)" && codex
+   ```
+
+`env --as` exports the address, a new session id, and the server. It does
+not print the token. Each command then reads the token from the `[tokens]`
+entry that matches the address. To set the project for all hosts, commit a
+`.chattrs.toml` in the repo ([Environment and config](#environment-and-config)).
 
 ### Several hosts: `setup --broker` and `setup --join` (SETUP-2)
 
-On the broker host, one command writes the token file and the service unit:
+Reference for steps 1 to 3 above.
 
 ```bash
-chattrs setup --broker --hosts mac,bobox [--lead lead@mac] [--projects p1,p2] \
+chattrs setup --broker --hosts <a,b> [--lead lead@mac] [--projects p1,p2] \
   [--bind <ip>] [--port 4646] [--enable]
 ```
 
@@ -93,47 +125,42 @@ It writes `~/.config/chattrs/tokens.toml` (mode 0600) and a systemd user unit
 (`~/.config/systemd/user/chattrs.service`) or a launchd plist
 (`~/Library/LaunchAgents/com.chattrs.broker.plist`). It never overwrites
 either file. It prints the command that starts the service; `--enable` runs
-it. Without `--bind`, it uses `tailscale ip -4`. It refuses `0.0.0.0` and `::`.
-It issues one agent token per host (`*@<host>`), one lead token, and one
+it. It issues one agent token per host (`*@<host>`), one lead token, and one
 observer token (`tray@*`, all projects). Then it prints one join string for
 each, `chattrs://<token>@<ip>:<port>?as=<pattern>`. The pattern is
-percent-encoded. A join string is a password. Nothing stores it.
+percent-encoded.
 
-On each other host, give the join strings to `setup --join`. Read them from
-stdin, so they stay out of shell history:
+`setup --join` also takes a string as an argument. Quote it, but it then
+stays in shell history:
 
 ```bash
-chattrs setup --join - <<'EOF'
-chattrs://TOKEN@100.64.0.1:4646?as=%2A%40bobox
-EOF
-chattrs setup --join 'chattrs://TOKEN@100.64.0.1:4646?as=lead%40mac'   # quote it
+chattrs setup --join 'chattrs://TOKEN@100.64.0.1:4646?as=lead%40mac'
 ```
 
 `--join` is repeatable, and stdin can carry one string per line. A string
 without `?as=` needs `--as <pattern>` (one string only). Each string writes
-`~/.config/chattrs/<name>.token` (mode 0600) and adds one `[tokens]` entry to
-`config.toml`. The name is the pattern with `@` as `-` and `*` as `any`:
-`lead@mac` gives `lead-mac.token`, `*@bobox` gives `any-bobox.token`. The
-command sets `server` when it is missing, and it refuses a different
-`server`. It keeps all other lines. It refuses a pattern that already has an
-entry or a file; `--force` replaces them. Then it runs the plain `setup`. The
-project is not in the join string; it comes from `.chattrs.toml`, else
-`default`.
+`~/.config/chattrs/<name>.token` (mode 0600). The name is the pattern with
+`@` as `-` and `*` as `any`: `lead@mac` gives `lead-mac.token`,
+`*@bobox` gives `any-bobox.token`. The command sets `server` when it is
+missing, and it refuses a different `server`. It keeps all other lines. It
+refuses a pattern that already has an entry or a file; `--force` replaces
+them. Then it runs the plain `setup`. The project is not in the join
+string; it comes from `.chattrs.toml`, else `default`.
 
 ### Check a host: `doctor` (SETUP-3)
 
-Run `chattrs doctor` in the environment of an agent (with `CHATTRS_ADDRESS`
-set, or pass `--as`). It prints one line per check, `ok   <check>: ...` or
-`FAIL <check>: ... <fix hint>`, and exits 1 on any failure. It checks the
-config files, the token file each identity uses (mode 0600), that the broker
-accepts a connection, that the broker accepts the token for the project and
-address, the protocol version, the hooks, and the skill text. It never prints
-a token. It is read-only: it writes no file and reads no message. The token
-check says `hello` as an observer, which the broker never records as an agent.
-The welcome does not carry the token's role, so doctor shows the project only.
-A `[tokens]` glob cannot be tested; doctor skips it. Codex hook trust cannot
-be detected, so doctor always ends with a reminder to trust the hooks in
-`/hooks` in Codex.
+Reference for step 4 above. Run `chattrs doctor` in the environment of an
+agent (with `CHATTRS_ADDRESS` set, or pass `--as`). It prints one line per
+check, `ok   <check>: ...` or `FAIL <check>: ... <fix hint>`, and exits 1 on
+any failure. It checks the config files, the token file each identity uses
+(mode 0600), that the broker accepts a connection, that the broker accepts
+the token for the project and address, the protocol version, the hooks, and
+the skill text. It never prints a token. It is read-only: it writes no file
+and reads no message. The token check says `hello` as an observer, which the
+broker never records as an agent. The welcome does not carry the token's
+role, so doctor shows the project only. A `[tokens]` glob cannot be tested;
+doctor skips it. Codex hook trust cannot be detected, so doctor always ends
+with a reminder to trust the hooks in `/hooks` in Codex.
 
 ## Install
 
@@ -149,6 +176,8 @@ Prebuilt binaries and installers are on the
 build (DIST-1).
 
 ## Quick start
+
+This is the raw CLI on one machine, with no agent. For agents, see [Get running](#get-running).
 
 One machine, no broker terminal. The first command starts a loopback broker
 on `127.0.0.1:4646`. The broker logs to `chattrs.log` and writes its pid to
@@ -340,6 +369,8 @@ chattrs backup <file> [--db <db>] [--force]
 
 ### Run the broker as a service
 
+`chattrs setup --broker` writes these units for you ([Get running](#get-running)). Use this section to write them by hand.
+
 Linux: put a `systemd --user` unit in
 `~/.config/systemd/user/chattrs.service`.
 
@@ -397,6 +428,8 @@ A launchd agent runs while its user is logged in. Turn on automatic login
 for an unattended Mac.
 
 ### Set client hosts
+
+`chattrs setup --join` does this for you ([Get running](#get-running)). Use this section to edit the config by hand.
 
 On every client host, set the broker address and the token file in the user
 config (see [Environment and config](#environment-and-config)):
@@ -537,6 +570,8 @@ Rules:
   worker host then cannot claim the lead's address.
 
 #### Turning on per-host tokens
+
+This is for a swarm that already runs on the shared token. A new swarm uses `chattrs setup --broker` instead.
 
 Once a tokens file exists, the broker refuses the shared token. Switching
 everything at once breaks every client at the same moment. Use two phases.
