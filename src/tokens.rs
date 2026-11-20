@@ -47,6 +47,15 @@ pub struct Entry {
     pub role: Role,
 }
 
+/// Why `Tokens::find` found no entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Miss {
+    /// No entry has this token.
+    BadToken,
+    /// Some entry has this token, but none for the hello project.
+    WrongProject,
+}
+
 /// The token table. It is never empty.
 #[derive(Debug)]
 pub struct Tokens {
@@ -231,27 +240,46 @@ impl Tokens {
         Ok(Tokens { entries })
     }
 
-    /// Two entries with one token would make the match ambiguous.
+    /// The same token may appear in several projects (one lead token for
+    /// several projects). One token twice in one project is ambiguous.
     fn check_unique(entries: &[Entry]) -> Result<(), String> {
         for (i, entry) in entries.iter().enumerate() {
-            if entries[..i].iter().any(|other| other.token == entry.token) {
-                return Err(format!("entry {} repeats an earlier token", i + 1));
+            if entries[..i]
+                .iter()
+                .any(|other| other.token == entry.token && other.project == entry.project)
+            {
+                return Err(format!(
+                    "entry {} repeats a token for project {}",
+                    i + 1,
+                    entry.project
+                ));
             }
         }
         Ok(())
     }
 
-    /// The entry for a presented token. The compare runs against every
-    /// entry, in constant time each, and never stops at a match.
-    pub fn find(&self, presented: Option<&str>) -> Option<&Entry> {
+    /// The entry for a presented token and the hello project. The compare
+    /// runs against every entry, in constant time each, and never stops at
+    /// a match. An entry for the project wins over one for `*`.
+    pub fn find(&self, presented: Option<&str>, project: &str) -> Result<&Entry, Miss> {
         let got = presented.unwrap_or_default().as_bytes();
-        let mut found = None;
+        let (mut exact, mut any, mut token_known) = (None, None, false);
         for entry in &self.entries {
-            if ct_eq(got, entry.token.as_bytes()) {
-                found = Some(entry);
+            if !ct_eq(got, entry.token.as_bytes()) {
+                continue;
+            }
+            token_known = true;
+            if entry.project == project {
+                exact = Some(entry);
+            } else if entry.project == model::ALL_PROJECTS {
+                any = Some(entry);
             }
         }
-        found
+        match (exact.or(any), token_known) {
+            (Some(entry), _) => Ok(entry),
+            (None, true) => Err(Miss::WrongProject),
+            (None, false) => Err(Miss::BadToken),
+        }
     }
 
     /// Decide whether `entry` may open a connection for `address` in
@@ -317,9 +345,9 @@ role = "observer"
     fn parses_a_good_file() {
         let tokens = Tokens::parse(GOOD).unwrap();
         assert_eq!(tokens.entries.len(), 3);
-        assert_eq!(tokens.find(Some("t-agent")).unwrap().role, Role::Agent);
-        assert!(tokens.find(Some("t-agen")).is_none());
-        assert!(tokens.find(None).is_none());
+        assert_eq!(tokens.find(Some("t-agent"), "alpha").unwrap().role, Role::Agent);
+        assert!(tokens.find(Some("t-agen"), "alpha").unwrap_err() == Miss::BadToken);
+        assert!(tokens.find(None, "alpha").unwrap_err() == Miss::BadToken);
     }
 
     #[test]
@@ -357,7 +385,40 @@ role = "observer"
         }
         let dup = "[[token]]\ntoken=\"a\"\nproject=\"p\"\naddr=\"a@h\"\nrole=\"agent\"\n";
         let err = Tokens::parse(&format!("{dup}{dup}")).unwrap_err();
-        assert!(err.contains("repeats an earlier token"), "{err}");
+        assert!(err.contains("repeats a token for project p"), "{err}");
+    }
+
+    #[test]
+    fn one_token_may_cover_several_projects() {
+        let block = |token: &str, project: &str, addr: &str, role: &str| {
+            format!(
+                "[[token]]\ntoken=\"{token}\"\nproject=\"{project}\"\naddr=\"{addr}\"\nrole=\"{role}\"\n"
+            )
+        };
+        let text = format!(
+            "{}{}{}",
+            block("t-l", "alpha", "lead@h", "lead"),
+            block("t-l", "beta", "lead@h", "lead"),
+            block("t-a", "alpha", "*@h", "agent"),
+        );
+        let tokens = Tokens::parse(&text).unwrap();
+        assert_eq!(tokens.find(Some("t-l"), "alpha").unwrap().project, "alpha");
+        assert_eq!(tokens.find(Some("t-l"), "beta").unwrap().project, "beta");
+        assert_eq!(tokens.find(Some("t-l"), "gamma").unwrap_err(), Miss::WrongProject);
+        assert_eq!(tokens.find(Some("nope"), "alpha").unwrap_err(), Miss::BadToken);
+        for other in
+            [block("t-l", "beta", "other@h", "lead"), block("t-l", "beta", "lead@h", "agent")]
+        {
+            let err = Tokens::parse(&format!("{text}{other}")).unwrap_err();
+            assert!(err.contains("entry 4 repeats a token for project beta"), "{err}");
+        }
+        // The same token may have a different role in another project.
+        let mixed = format!(
+            "{}{}",
+            block("t-m", "alpha", "lead@h", "lead"),
+            block("t-m", "beta", "*@h", "agent")
+        );
+        assert!(Tokens::parse(&mixed).is_ok());
     }
 
     #[test]
@@ -386,9 +447,9 @@ role = "observer"
     #[test]
     fn authorize_applies_project_address_role_and_lead_rules() {
         let tokens = Tokens::parse(GOOD).unwrap();
-        let lead = tokens.find(Some("t-lead")).unwrap();
-        let agent = tokens.find(Some("t-agent")).unwrap();
-        let obs = tokens.find(Some("t-obs")).unwrap();
+        let lead = tokens.find(Some("t-lead"), "alpha").unwrap();
+        let agent = tokens.find(Some("t-agent"), "alpha").unwrap();
+        let obs = tokens.find(Some("t-obs"), "alpha").unwrap();
         assert!(tokens.authorize(lead, "alpha", "lead@box1", false).is_ok());
         assert!(tokens.authorize(lead, "beta", "lead@box1", false).is_err());
         assert!(tokens.authorize(lead, "alpha", "other@box1", false).is_err());

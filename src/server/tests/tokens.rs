@@ -26,6 +26,18 @@ addr = "*@h"
 role = "agent"
 
 [[token]]
+token = "t-multi"
+project = "alpha"
+addr = "multi@h"
+role = "lead"
+
+[[token]]
+token = "t-multi"
+project = "beta"
+addr = "multi@h"
+role = "lead"
+
+[[token]]
 token = "t-obs-alpha"
 project = "alpha"
 addr = "tray@h"
@@ -216,4 +228,15 @@ async fn serve_refuses_a_tokens_file_that_is_too_open_or_malformed() {
 
     let missing = dir.path().join("missing.toml");
     assert!(serve("127.0.0.1:0", &db, None, Some(&missing)).await.is_err());
+}
+
+#[tokio::test]
+async fn one_lead_token_works_in_each_listed_project_and_not_others() {
+    let (addr, _dir, handle) = spawn_with_tokens(TABLE, None).await;
+    expect_welcome(&addr, &hello("t-multi", "multi@h", "alpha", false)).await;
+    expect_welcome(&addr, &hello("t-multi", "multi@h", "beta", false)).await;
+    expect_code(&addr, &hello("t-multi", "multi@h", "gamma", false), "forbidden").await;
+    // An agent token repeated across projects works in each.
+    expect_welcome(&addr, &hello("t-agent", "w@h", "alpha", false)).await;
+    handle.abort();
 }
