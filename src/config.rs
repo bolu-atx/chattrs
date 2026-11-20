@@ -24,6 +24,8 @@ pub struct Config {
     pub lead: Option<String>,
     /// The trimmed content of the `token_file`.
     pub token: Option<String>,
+    /// The `token_file` path itself, for `doctor`.
+    pub token_file: Option<PathBuf>,
     /// The `[tokens]` table: address pattern and token file path, in file
     /// order. The file is read only when the entry is chosen.
     pub token_map: Vec<(String, PathBuf)>,
@@ -75,7 +77,7 @@ fn parse_file(path: &Path, allowed: &[&str]) -> Result<Parsed, String> {
 }
 
 /// Read the token from `path`. On unix, a file wider than 0600 is refused.
-fn read_token_file(path: &Path) -> Result<String, String> {
+pub(crate) fn read_token_file(path: &Path) -> Result<String, String> {
     let shown = path.display();
     #[cfg(unix)]
     {
@@ -98,7 +100,7 @@ fn read_token_file(path: &Path) -> Result<String, String> {
 
 /// The nearest `.chattrs.toml` from `start` upward, stopping after the
 /// first directory that holds `.git`.
-fn find_repo_file(start: &Path) -> Option<PathBuf> {
+pub(crate) fn find_repo_file(start: &Path) -> Option<PathBuf> {
     for dir in start.ancestors() {
         let file = dir.join(".chattrs.toml");
         if file.is_file() {
@@ -137,7 +139,10 @@ pub fn load_from(home: Option<&Path>, cwd: &Path) -> Result<Config, String> {
             match key.as_str() {
                 "server" => config.server = Some(value),
                 "tags" => config.tags = Some(value),
-                _ => config.token = Some(read_token_file(Path::new(&value))?),
+                _ => {
+                    config.token = Some(read_token_file(Path::new(&value))?);
+                    config.token_file = Some(PathBuf::from(value));
+                }
             }
         }
         config.token_map = parsed
@@ -202,7 +207,7 @@ impl Config {
     /// The `[tokens]` entry for `address`. An exact entry beats a glob. Among
     /// globs (entries with `*`), the longest pattern wins. A tie goes to the
     /// entry listed first in the file.
-    fn mapped_token_file(&self, address: &str) -> Option<&Path> {
+    pub(crate) fn mapped_token_file(&self, address: &str) -> Option<&Path> {
         // `max_by_key` keeps the last of equal ranks, so walk the file backwards.
         let (_, path) = self
             .token_map

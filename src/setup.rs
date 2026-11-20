@@ -63,12 +63,32 @@ fn write_config_if_missing(path: &Path) -> Result<bool, String> {
 }
 
 /// One agent `setup` can serve.
-struct Target {
-    name: &'static str,
-    agent: HooksAgent,
+pub(crate) struct Target {
+    pub(crate) name: &'static str,
+    pub(crate) agent: HooksAgent,
     /// The directory the agent reads skills from.
-    skills_dir: PathBuf,
-    detected: bool,
+    pub(crate) skills_dir: PathBuf,
+    pub(crate) detected: bool,
+}
+
+/// Claude Code and Codex for the user `home`, each marked found or not.
+pub(crate) fn targets(home: &Path) -> [Target; 2] {
+    let claude_dir = home.join(".claude");
+    let codex_dir = hook_install::codex_home(home);
+    [
+        Target {
+            name: "claude",
+            agent: HooksAgent::Claude,
+            skills_dir: claude_dir.join("skills"),
+            detected: claude_dir.is_dir() || on_path("claude"),
+        },
+        Target {
+            name: "codex",
+            agent: HooksAgent::Codex,
+            skills_dir: codex_dir.join("skills"),
+            detected: codex_dir.is_dir() || on_path("codex"),
+        },
+    ]
 }
 
 /// Install the hooks and the skill for one agent.
@@ -95,22 +115,7 @@ pub fn run(args: SetupArgs) -> Result<(), String> {
 /// Hooks, skill, and config for this host.
 fn run_host() -> Result<(), String> {
     let home = hook_install::home()?;
-    let claude_dir = home.join(".claude");
-    let codex_dir = hook_install::codex_home(&home);
-    let targets = [
-        Target {
-            name: "claude",
-            agent: HooksAgent::Claude,
-            skills_dir: claude_dir.join("skills"),
-            detected: claude_dir.is_dir() || on_path("claude"),
-        },
-        Target {
-            name: "codex",
-            agent: HooksAgent::Codex,
-            skills_dir: codex_dir.join("skills"),
-            detected: codex_dir.is_dir() || on_path("codex"),
-        },
-    ];
+    let targets = targets(&home);
     for target in targets.iter().filter(|target| !target.detected) {
         eprintln!("chattrs: {} not found, skipped", target.name);
     }
