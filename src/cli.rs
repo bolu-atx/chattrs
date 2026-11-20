@@ -122,7 +122,7 @@ pub struct ServeArgs {
 
     /// Token for the broker. A bind outside loopback refuses to start
     /// without one.
-    #[arg(long, env = "CHATTRS_TOKEN")]
+    #[arg(long, env = "CHATTRS_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
 
     /// Token table file (TOML, mode 0600): each token gets its own
@@ -154,7 +154,7 @@ pub struct EnvArgs {
     pub tags: Option<String>,
 
     /// Token to export with `--with-token`.
-    #[arg(long, env = "CHATTRS_TOKEN")]
+    #[arg(long, env = "CHATTRS_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
 
     /// Also print `CHATTRS_TOKEN`. Without it the token stays out of the
@@ -180,7 +180,7 @@ pub struct ClientArgs {
     pub agent: Option<String>,
 
     /// Token for the broker (checked once multi-host binds need it).
-    #[arg(long, env = "CHATTRS_TOKEN")]
+    #[arg(long, env = "CHATTRS_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
 }
 
