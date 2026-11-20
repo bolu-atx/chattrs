@@ -22,6 +22,7 @@ mod model;
 mod output;
 mod protocol;
 mod server;
+mod setup;
 mod skill;
 mod store;
 mod tokens;
@@ -51,12 +52,26 @@ impl From<String> for RunError {
     }
 }
 
+/// Load the config files and export them as variables. A `[tokens]` entry
+/// replaces the plain `token_file` when it fits the address; an explicit
+/// `CHATTRS_TOKEN` still wins over both.
+fn load_config() -> Result<(), String> {
+    let mut config = config::load()?;
+    if std::env::var_os("CHATTRS_TOKEN").is_none() {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let address = config::address_hint(&args, |name| std::env::var(name).ok());
+        config.select_token(address.as_deref())?;
+    }
+    config.apply_env();
+    Ok(())
+}
+
 fn main() {
     // Config files fill the variables that the environment leaves unset,
     // before clap reads them. A bad file stops the command, except a hook,
     // which must never break the agent. This runs before the tokio runtime
     // starts, so no other thread can read the environment while it is set.
-    if let Err(error) = config::load().map(|config| config.apply_env()) {
+    if let Err(error) = load_config() {
         eprintln!("chattrs: {error}");
         if std::env::args().nth(1).as_deref() != Some("hook") {
             std::process::exit(1);
@@ -135,6 +150,7 @@ async fn run(args: Args) -> Result<(), RunError> {
         Command::Inbox(c) => cmd_inbox(c).await,
         Command::Skill => cmd_skill(),
         Command::Env(c) => cmd_env(c),
+        Command::Setup => setup::run().map_err(RunError::Message),
         Command::Log(c) => cmd_log(c).await,
         Command::Agents(c) => cmd_agents(c).await,
         Command::Projects(c) => cmd_projects(c).await,

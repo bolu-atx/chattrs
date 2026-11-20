@@ -46,6 +46,8 @@ pub enum Command {
     Hook(HookArgs),
     /// Install or remove the chattrs hooks in Claude Code and Codex configs.
     Hooks(HooksArgs),
+    /// Set up this host: hooks and skill for each agent found, and a starter config.
+    Setup,
 }
 
 /// The agent events a hook serves, in the kebab-case form of the Claude
