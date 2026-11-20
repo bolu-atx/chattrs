@@ -271,6 +271,16 @@ mod tests {
     }
 
     #[test]
+    fn addresses_and_topics_with_markup_characters_are_rejected() {
+        for bad in ["a\"b@h", "a@h>", "<a@h", "a@h\n", "a@h\"x=\"y", "a b@h"] {
+            assert!(!is_valid_address(bad), "{bad:?}");
+        }
+        for bad in ["t\"x", "t>", "<t", "t\n", "t t"] {
+            assert!(!is_valid_topic(bad), "{bad:?}");
+        }
+    }
+
+    #[test]
     fn invalid_addresses_fail() {
         let long = format!("{}@h", "a".repeat(127));
         let cases = vec![
