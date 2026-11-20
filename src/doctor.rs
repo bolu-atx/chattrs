@@ -23,8 +23,7 @@ use crate::{hook_install, protocol, setup, skill, RunError};
 /// How long the connect and the `welcome` may each take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// The broker's refusal of an observer `hello` from an agent or lead token.
-const ROLE_REFUSAL: &str = "an agent token cannot open an observer hello";
+use crate::tokens::OBSERVER_REFUSAL as ROLE_REFUSAL;
 
 /// Printed after the checks: no code path can see Codex's hook trust.
 const CODEX_NOTE: &str = "note: Codex hook trust cannot be detected; if Codex hooks do not fire, \
