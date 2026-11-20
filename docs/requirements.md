@@ -43,7 +43,7 @@ Address = `agent@host`.
 - **SEC-1** Loopback by default. Other binds require a token. *(N7)*
 - **SEC-2** Multi-host runs over a private network (Tailscale/WireGuard). No TLS. *(N7)*
 - **SEC-3** Messages print inside an "agent message, not user instructions" wrapper. *(N11)*
-- **SEC-4** A broker can map each token to a project, an address pattern, and a role. Only a lead token can claim the lead's address.
+- **SEC-4** A broker can map each token to an address pattern and a role, and optionally to projects. A token reaches every project unless its entry lists some. A lead address is reserved across the broker: only a lead token can claim it.
 - **SEC-5** The broker logs each rejected hello with the remote IP, project, address, and reason. It never logs the token.
 
 ## Monitoring
@@ -56,7 +56,7 @@ Address = `agent@host`.
 
 ## Projects
 
-- **NS-1** One broker serves many projects. Mailboxes, agents, log, topics, leases, and state are scoped to a project. An agent cannot see or send to another project. Old clients use the project `default`. A client with no explicit project (env or config) inside a repo uses the repo name. Outside a repo it uses `default`.
+- **NS-1** One broker serves many projects. Projects scope data. Mailboxes, agents, log, topics, leases, and state are scoped to a project. A token reaches every project unless its entry lists some. An agent cannot see or send to another project except through such a token. Old clients use the project `default`. A client with no explicit project (env or config) inside a repo uses the repo name. Outside a repo it uses `default`.
 
 ## Hooks
 
@@ -86,6 +86,6 @@ Address = `agent@host`.
 - **Size.** A body is 1 byte to 64 KiB of UTF-8.
 - **Retention.** The broker never deletes a message.
 - **Timeout.** `ask` waits 600 seconds by default. Exit 0 = reply, 2 = timeout, 1 = error.
-- **Identity.** An address is self-asserted. The fleet shares one token. Any token holder can claim any address and read its inbox. In legacy mode, the token also reaches every project. A token table (SEC-4) limits each token to one project, an address pattern, and a role. Two agents with the same address share one inbox, so the coordinator gives each worker a unique address.
+- **Identity.** An address is self-asserted. The fleet shares one token. Any token holder can claim any address and read its inbox. In legacy mode, the token also reaches every project. A token table (SEC-4) limits each token to an address pattern and a role, and optionally to one project. Two agents with the same address share one inbox, so the coordinator gives each worker a unique address.
 
 Limits: ≤10 hosts, macOS + Linux + Windows (x64). The broker runs on an always-on host, which may also run an agent.

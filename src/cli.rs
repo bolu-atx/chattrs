@@ -477,7 +477,7 @@ pub struct SetupArgs {
     #[arg(long, requires = "broker")]
     pub lead: Option<String>,
 
-    /// Projects to issue tokens for, comma-separated (default `default`).
+    /// Projects to issue tokens for, comma-separated (default: no project line).
     #[arg(long, value_delimiter = ',', requires = "broker")]
     pub projects: Vec<String>,
 

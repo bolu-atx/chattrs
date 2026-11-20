@@ -125,8 +125,21 @@ async fn only_a_lead_token_claims_the_lead_address() {
     let (addr, _dir, handle) = spawn_with_tokens(TABLE, None).await;
     expect_code(&addr, &hello("t-agent", "lead@h", "alpha", false), "forbidden").await;
     expect_welcome(&addr, &hello("t-lead", "lead@h", "alpha", false)).await;
-    // The lead address is the lead's in alpha only.
-    expect_welcome(&addr, &hello("t-beta", "lead@h", "beta", false)).await;
+    // The lead address is reserved in every project.
+    expect_code(&addr, &hello("t-beta", "lead@h", "beta", false), "forbidden").await;
+    expect_code(&addr, &hello("t-lead", "lead@h", "beta", false), "forbidden").await;
+    handle.abort();
+}
+
+#[tokio::test]
+async fn an_unscoped_token_works_in_two_projects() {
+    let table = "[[token]]\ntoken = \"t-free\"\naddr = \"*@h\"\nrole = \"agent\"\n\n\
+                 [[token]]\ntoken = \"t-lead\"\nproject = \"alpha\"\naddr = \"lead@h\"\nrole = \"lead\"\n";
+    let (addr, _dir, handle) = spawn_with_tokens(table, None).await;
+    expect_welcome(&addr, &hello("t-free", "w1@h", "alpha", false)).await;
+    expect_welcome(&addr, &hello("t-free", "w1@h", "beta", false)).await;
+    expect_code(&addr, &hello("t-free", "lead@h", "alpha", false), "forbidden").await;
+    expect_code(&addr, &hello("t-free", "lead@h", "beta", false), "forbidden").await;
     handle.abort();
 }
 
