@@ -176,12 +176,12 @@ struct AgentsSection: View {
         .padding(Theme.pad)
     }
 
-    /// Online agents first, then by address.
+    /// Online agents first, gone agents last, then by address.
     private func sorted(_ list: [Agent], now: Date) -> [Agent] {
-        list.sorted { a, b in
-            let ao = a.status(now: now) != .offline, bo = b.status(now: now) != .offline
-            return ao != bo ? ao : a.address < b.address
+        func rank(_ a: Agent) -> Int {
+            a.status(now: now) != .offline ? 0 : (a.health(now: now) == .gone ? 2 : 1)
         }
+        return list.sorted { rank($0) != rank($1) ? rank($0) < rank($1) : $0.address < $1.address }
     }
 }
 
@@ -191,21 +191,27 @@ struct AgentRow: View {
 
     var body: some View {
         let st = agent.status(now: now)
+        let health = agent.health(now: now)
         HStack(spacing: 10) {
-            StatusPixel(status: st)
+            StatusPixel(status: st, stalled: health == .stalled)
             Text(agent.address)
                 .font(.system(.callout, design: .monospaced))
-                .foregroundStyle(AgentPalette.color(agent.address).opacity(st == .offline ? 0.55 : 1))
+                .foregroundStyle(AgentPalette.color(agent.address)
+                    .opacity(health == .gone ? 0.3 : st == .offline ? 0.55 : 1))
                 .lineLimit(1).truncationMode(.middle)
             Spacer()
-            Text(label(st)).font(.callout).foregroundStyle(.secondary)
+            Text(label(st, health)).font(.callout)
+                .foregroundStyle(health == .stalled && st != .offline ? Theme.red : .secondary)
         }
         .accessibilityElement(children: .combine)
     }
 
-    private func label(_ st: AgentStatus) -> String {
+    private func label(_ st: AgentStatus, _ health: AgentHealth) -> String {
+        let seen = agent.lastSeen.map { "seen " + ageText(lastSeenMs: $0, now: now) }
+        if health == .gone { return seen.map { "gone, " + $0 } ?? "gone" }
+        if health == .stalled && st != .offline { return "stalled" }
         switch st {
-        case .offline: return agent.lastSeen.map { "seen " + ageText(lastSeenMs: $0, now: now) } ?? "offline"
+        case .offline: return seen ?? "offline"
         case .unknown: return "online"
         default: return st.rawValue
         }
@@ -213,11 +219,23 @@ struct AgentRow: View {
 }
 
 /// MON-4: green working, amber waiting, grey idle, hollow unknown, nothing when offline.
+/// MON-5: red when an online agent is stalled.
 struct StatusPixel: View {
     let status: AgentStatus
+    var stalled = false
 
     var body: some View {
         Group {
+            if stalled && status != .offline {
+                Pixel(color: Theme.red)
+            } else {
+                stateDot
+            }
+        }
+        .help(stalled && status != .offline ? "stalled" : status.rawValue)
+    }
+
+    @ViewBuilder private var stateDot: some View {
             switch status {
             case .working: Pixel(color: Theme.green)
             case .waiting: Pixel(color: Theme.amber)
@@ -225,8 +243,18 @@ struct StatusPixel: View {
             case .unknown: Pixel(color: nil)
             case .offline: Color.clear.frame(width: 7, height: 7)
             }
-        }
-        .help(status.rawValue)
+    }
+}
+
+/// The sender's token is a lead token (`from_role`).
+struct LeadBadge: View {
+    var body: some View {
+        Text("lead")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(Theme.amber)
+            .padding(.horizontal, 4).padding(.vertical, 1)
+            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Theme.amber.opacity(0.7), lineWidth: 1))
+            .help("Sent with a lead token")
     }
 }
 
@@ -279,7 +307,14 @@ struct FeedList: View {
         let open = expanded.contains(m.id)
         return VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                route(m).font(.callout).lineLimit(1).truncationMode(.middle)
+                HStack(spacing: 5) {
+                    Text(m.from).fontWeight(.semibold).foregroundColor(AgentPalette.color(m.from))
+                        .layoutPriority(1)
+                    if m.fromRole == "lead" { LeadBadge() }
+                    Text("→").foregroundColor(.secondary)
+                    recipient(m)
+                }
+                .font(.callout).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 8)
                 if showProject {
                     Text(m.projectName).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
@@ -319,12 +354,10 @@ struct FeedList: View {
         return abs(m.ts - p) <= window
     }
 
-    /// Sender and recipient in their agent colours; a topic in amber.
-    private func route(_ m: Message) -> Text {
-        let to = m.to.map { Text($0).foregroundColor(AgentPalette.color($0)) }
+    /// The recipient in its agent colour; a topic in amber.
+    private func recipient(_ m: Message) -> Text {
+        m.to.map { Text($0).foregroundColor(AgentPalette.color($0)) }
             ?? Text("#\(m.topic ?? "?")").foregroundColor(Theme.amber)
-        return Text(m.from).fontWeight(.semibold).foregroundColor(AgentPalette.color(m.from))
-            + Text("  →  ").foregroundColor(.secondary) + to
     }
 }
 

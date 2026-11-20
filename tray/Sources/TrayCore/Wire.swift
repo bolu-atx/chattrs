@@ -36,10 +36,23 @@ public struct Agent: Sendable, Equatable, Identifiable, Decodable {
         }
         return AgentStatus(rawValue: state) ?? .unknown
     }
+
+    /// MON-5, the README Viewer contract rule: activity is the later of
+    /// last_seen and state_at; check gone, then stalled, then healthy.
+    public func health(now: Date = Date()) -> AgentHealth {
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        let activity = max(lastSeen ?? 0, stateAt ?? 0)
+        if online != true, let seen = lastSeen, nowMs - seen > 60 * 60_000 { return .gone }
+        if state == "working", nowMs - activity >= 10 * 60_000 { return .stalled }
+        if online == true, nowMs - activity < 10 * 60_000 { return .healthy }
+        return .none
+    }
 }
 
 /// A broker without projects (before NS-1) puts everything in this one.
 public let defaultProject = "default"
+
+public enum AgentHealth: String, Sendable { case healthy, stalled, gone, none }
 
 public enum AgentStatus: String, Sendable {
     case working, waiting, idle, unknown, offline
@@ -56,9 +69,12 @@ public struct Message: Sendable, Equatable, Identifiable, Decodable {
     public let ackedAt: Int64?
     public let project: String?
     public var projectName: String { project ?? defaultProject }
+    /// "lead" or "agent" from a broker with a tokens file; absent otherwise.
+    public let fromRole: String?
 
     enum CodingKeys: String, CodingKey {
         case id, from, to, body, ts, topic, project
+        case fromRole = "from_role"
         case replyTo = "reply_to"
         case ackedAt = "acked_at"
     }
