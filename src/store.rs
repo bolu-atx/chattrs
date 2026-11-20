@@ -392,6 +392,9 @@ fn open_store(path: &Path) -> Result<Store, String> {
         }
     }
     let conn = Connection::open(path).map_err(|e| format!("open db {}: {e}", path.display()))?;
+    // Two brokers that race to start open the same file. Wait for the
+    // lock instead of failing with "database is locked".
+    conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
         .map_err(|e| e.to_string())?;
     migrate(&conn)?;

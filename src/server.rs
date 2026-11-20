@@ -844,9 +844,11 @@ pub async fn serve(
 ) -> Result<(), String> {
     let tokens = tokens.map(Tokens::load).transpose()?;
     check_listen(listen, token.is_some() || tokens.is_some())?;
+    // Open the store before the bind: a broker that fails here never
+    // listens, so no client connects to it and gets a reset.
+    let store = Store::open(db.to_path_buf()).await?;
     let listener = TcpListener::bind(listen).await.map_err(|e| format!("bind {listen}: {e}"))?;
     let bound = listener.local_addr().map_err(|e| e.to_string())?;
-    let store = Store::open(db.to_path_buf()).await?;
     eprintln!("chattrs: serving on {bound}");
     let owned = autostart::is_autostart_child();
     if owned {

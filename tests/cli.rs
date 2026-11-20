@@ -1052,3 +1052,39 @@ fn env_output_evals_in_sh_with_a_fresh_session_and_no_token() {
     let with = stdout_text(&run_in(cwd, cwd, &[], &["env", "--as", "w@h", "--with-token"]));
     assert!(with.contains("export CHATTRS_TOKEN='sekret'\n"), "{with}");
 }
+
+#[test]
+fn first_command_retries_when_a_starting_broker_drops_the_connection() {
+    // A broker that is starting can accept a connection and then drop it
+    // before it answers `hello`. On a loopback server the first command
+    // retries on a fresh connection instead of failing (CLI-11). The
+    // stand-in below drops the first connection, then frees the port so
+    // the client starts the real broker.
+    let dir = tempfile::TempDir::new().expect("make a temp dir");
+    let db = dir.path().join("c.db");
+    let (listener, addr) = loop {
+        let addr = format!("127.0.0.1:{}", free_port());
+        if let Ok(listener) = std::net::TcpListener::bind(&addr) {
+            break (listener, addr);
+        }
+    };
+    let dropper = std::thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("accept the client");
+        drop(stream);
+    });
+    let mut command = Command::new(binary());
+    command.arg("inbox").arg("--server").arg(&addr);
+    command.env("CHATTRS_ADDRESS", "a@h");
+    command.env("CHATTRS_DB", &db);
+    command.env_remove("CHATTRS_TOKEN").env_remove("CHATTRS_AGENT").env_remove("CHATTRS_SERVER");
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = command.output().expect("run the client");
+    dropper.join().expect("stand-in thread");
+    assert_eq!(output.status.code(), Some(0), "a drop during start is retried: {output:?}");
+
+    let mut stop = Command::new(binary());
+    stop.arg("stop").env("CHATTRS_DB", &db);
+    stop.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let stopped = stop.output().expect("stop the broker");
+    assert_eq!(stopped.status.code(), Some(0), "stop exits zero: {stopped:?}");
+}

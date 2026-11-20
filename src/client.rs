@@ -146,11 +146,20 @@ pub fn env_session() -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// True for an I/O failure that a broker still starting can cause: the
+/// peer reset the connection, closed it, or the write hit a closed socket.
+fn is_transient(message: &str) -> bool {
+    message == "server closed the connection"
+        || message.contains("Connection reset")
+        || message.contains("Broken pipe")
+}
+
 impl Client {
-    /// Connect to `endpoint` and say `hello`. When the first connect
-    /// fails with connection refused on a loopback server, start a
-    /// broker on demand and retry once on a fresh connection. Any
-    /// other failure returns the original connect error.
+    /// Connect to `endpoint` and say `hello`. When the connect fails with
+    /// connection refused on a loopback server, start a broker on demand.
+    /// On a loopback server a refused, reset, or closed connection while
+    /// a broker starts is retried on a fresh connection until the wait
+    /// window ends. Any other failure returns at once.
     pub async fn connect(endpoint: &Endpoint) -> Result<Client, ClientError> {
         Client::open(endpoint, true, false, None, None).await
     }
@@ -181,41 +190,63 @@ impl Client {
         state: Option<&str>,
         project: Option<&str>,
     ) -> Result<Client, ClientError> {
-        let stream = match connect_stream(&endpoint.server).await {
-            Ok(stream) => stream,
-            Err(error)
-                if may_start
-                    && error.refused
-                    && autostart::is_loopback_server(&endpoint.server) =>
-            {
-                autostart::ensure_started(&endpoint.server, endpoint.token.as_deref())
-                    .await
-                    .map_err(ClientError::Io)?;
-                connect_stream(&endpoint.server)
-                    .await
-                    .map_err(|error| ClientError::Io(error.message))?
-            }
-            Err(error) => return Err(ClientError::Io(error.message)),
+        let startable = may_start && autostart::is_loopback_server(&endpoint.server);
+        let hello = Inbound::Hello {
+            v: model::PROTOCOL_VERSION,
+            address: endpoint.address.clone(),
+            token: endpoint.token.clone(),
+            tags: if observer {
+                Vec::new()
+            } else {
+                hello_tags(std::env::var("CHATTRS_TAGS").ok().as_deref())
+            },
+            observer,
+            state: state.map(str::to_string),
+            project: project.map(str::to_string).or_else(env_project),
+            session: env_session(),
         };
-        let (read_half, write_half) = stream.into_split();
-        let mut client =
-            Client { reader: BufReader::new(read_half), writer: write_half, watching: false };
-        let frame = client
-            .request(&Inbound::Hello {
-                v: model::PROTOCOL_VERSION,
-                address: endpoint.address.clone(),
-                token: endpoint.token.clone(),
-                tags: if observer {
-                    Vec::new()
-                } else {
-                    hello_tags(std::env::var("CHATTRS_TAGS").ok().as_deref())
-                },
-                observer,
-                state: state.map(str::to_string),
-                project: project.map(str::to_string).or_else(env_project),
-                session: env_session(),
-            })
-            .await?;
+        // On a startable server a broker may be coming up, ours or a
+        // racer's. Until it is ready the port refuses, or accepts and then
+        // resets or closes. Retry the connect and `hello` on a fresh
+        // connection inside the autostart wait window. Nothing but `hello`
+        // is ever resent.
+        let mut deadline = None;
+        let mut started = false;
+        let (mut client, frame) = loop {
+            let stream = match connect_stream(&endpoint.server).await {
+                Ok(stream) => stream,
+                Err(error) if startable && error.refused => {
+                    if started {
+                        if deadline.is_some_and(|end| tokio::time::Instant::now() >= end) {
+                            return Err(ClientError::Io(error.message));
+                        }
+                        tokio::time::sleep(autostart::RETRY_DELAY).await;
+                    } else {
+                        autostart::ensure_started(&endpoint.server, endpoint.token.as_deref())
+                            .await
+                            .map_err(ClientError::Io)?;
+                        started = true;
+                        deadline = Some(autostart::wait_deadline());
+                    }
+                    continue;
+                }
+                Err(error) => return Err(ClientError::Io(error.message)),
+            };
+            let (read_half, write_half) = stream.into_split();
+            let mut client =
+                Client { reader: BufReader::new(read_half), writer: write_half, watching: false };
+            match client.request(&hello).await {
+                Ok(frame) => break (client, frame),
+                Err(ClientError::Io(message)) if startable && is_transient(&message) => {
+                    let end = *deadline.get_or_insert_with(autostart::wait_deadline);
+                    if tokio::time::Instant::now() >= end {
+                        return Err(ClientError::Io(message));
+                    }
+                    tokio::time::sleep(autostart::RETRY_DELAY).await;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         match frame {
             Outbound::Welcome { observer: echoed, .. } if observer && !echoed => {
                 Err(ClientError::Protocol(
