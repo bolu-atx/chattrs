@@ -253,3 +253,35 @@ async fn one_lead_token_works_in_each_listed_project_and_not_others() {
     expect_welcome(&addr, &hello("t-agent", "w@h", "alpha", false)).await;
     handle.abort();
 }
+
+/// A rejected hello always reaches the client, even when it sent more
+/// bytes behind the hello. Unread bytes at close must not become an RST
+/// that beats the error frame. Covers `bad_token` and the project-scoped
+/// `forbidden` case, under parallel load.
+#[tokio::test]
+async fn rejected_hello_with_trailing_bytes_never_resets() {
+    let (addr, _dir, handle) = spawn_with_tokens(TABLE, None).await;
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let addr = addr.clone();
+        tasks.push(tokio::spawn(async move {
+            for _ in 0..25 {
+                for (line, code) in [
+                    (hello("nope", "w@h", "alpha", false), "bad_token"),
+                    (hello("t-agent", "w@h", "beta", false), "forbidden"),
+                ] {
+                    let mut raw = raw_connect(&addr).await;
+                    let extra = "{\"type\":\"inbox\",\"v\":1}\n".repeat(100);
+                    raw_send(&mut raw, &format!("{line}{extra}")).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    let frame = raw_recv(&mut raw).await.expect("error frame before any reset");
+                    assert_eq!(error_code(&frame), code);
+                }
+            }
+        }));
+    }
+    for task in tasks {
+        task.await.unwrap();
+    }
+    handle.abort();
+}

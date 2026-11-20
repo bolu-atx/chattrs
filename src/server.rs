@@ -298,6 +298,27 @@ fn spawn_reader(read_half: OwnedReadHalf, sender: mpsc::Sender<LineRead>) {
     });
 }
 
+/// Most bytes `drain` reads from a rejected connection.
+const DRAIN_MAX_BYTES: usize = 4096;
+/// Longest `drain` waits on a rejected connection.
+const DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Discard what a rejected client still sends, until EOF, `DRAIN_MAX_BYTES`,
+/// or `DRAIN_TIMEOUT`, so a hostile client cannot hold the task open.
+async fn drain(lines: &mut mpsc::Receiver<LineRead>) {
+    let _ = tokio::time::timeout(DRAIN_TIMEOUT, async {
+        let mut seen = 0;
+        while seen < DRAIN_MAX_BYTES {
+            match lines.recv().await {
+                Some(LineRead::Line(line)) => seen += line.len(),
+                Some(LineRead::TooLarge) => break,
+                Some(LineRead::Closed) | None => break,
+            }
+        }
+    })
+    .await;
+}
+
 /// The next pushed message for a connection, or a lag or close report.
 enum Push {
     Message(Arc<Message>),
@@ -446,6 +467,11 @@ impl Broker {
             };
             write_result(&mut writer, result).await;
             if close {
+                // Send the error frame and a FIN, then read out what the client already
+                // sent. Closing with unread bytes makes the OS send an RST that can
+                // beat the error frame to the client.
+                let _ = writer.shutdown().await;
+                drain(&mut lines).await;
                 break;
             }
         }
