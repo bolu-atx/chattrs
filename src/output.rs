@@ -6,7 +6,7 @@
 
 use std::io::Write as _;
 
-use crate::model::{Agent, LoggedMessage, Message};
+use crate::model::{Agent, LoggedMessage, Message, ProjectInfo, DEFAULT_PROJECT};
 
 /// The line that opens a list of messages in text output and in hook
 /// context, so a reader knows the text is not from the user.
@@ -169,8 +169,16 @@ fn agent_text_at(agent: &Agent, now: u64) -> String {
         line.push_str("  ");
         line.push_str(&agent.tags.join(","));
     }
+    if agent.project != DEFAULT_PROJECT {
+        line.push_str(&format!("  project:{}", agent.project));
+    }
     line.push('\n');
     line
+}
+
+/// One project as a text line: its name and the agent and message counts.
+pub fn project_text(project: &ProjectInfo) -> String {
+    format!("{}  {} agents  {} messages\n", project.project, project.agents, project.messages)
 }
 
 /// A published id as a text line.
@@ -211,6 +219,11 @@ pub fn agent_json(agent: &Agent) -> String {
     json_line(to_value(agent), "agent", false)
 }
 
+/// One project as a JSON `project` line.
+pub fn project_json(project: &ProjectInfo) -> String {
+    json_line(to_value(project), "project", false)
+}
+
 /// A published id as a JSON `sent` line.
 pub fn sent_json(id: u64) -> String {
     json_line(serde_json::json!({ "id": id }), "sent", false)
@@ -244,6 +257,7 @@ pub(crate) mod tests {
             tags: vec!["gpu".into()],
             state: None,
             state_at: None,
+            project: "default".into(),
         };
         assert_eq!(agent_text(&agent), "a@h  2025-11-15T09:46:40Z  gpu\n");
         agent.online = true;
@@ -265,6 +279,7 @@ pub(crate) mod tests {
             tags: vec!["gpu".into()],
             state: Some("working".into()),
             state_at: Some(at),
+            project: "default".into(),
         };
         assert_eq!(agent_text_at(&agent, at + 60_000), "a@h  online  working  gpu\n");
         assert_eq!(agent_text_at(&agent, at + 15 * 60_000), "a@h  online  working  gpu\n");
@@ -283,6 +298,7 @@ pub(crate) mod tests {
             tags: vec![],
             state: None,
             state_at: None,
+            project: "default".into(),
         };
         let json: serde_json::Value = serde_json::from_str(&agent_json(&agent)).unwrap();
         assert!(json["state"].is_null() && json["state_at"].is_null());
@@ -306,6 +322,7 @@ pub(crate) mod tests {
             ts: 1763200000000,
             reply_to: Some(12),
             topic: None,
+            project: "default".into(),
         };
         let expected = concat!(
             "<agent-message id=\"13\" from=\"codex@box1\" to=\"opus@mac\" ",
@@ -328,6 +345,7 @@ pub(crate) mod tests {
             ts: 1763200000000,
             reply_to: None,
             topic: None,
+            project: "default".into(),
         };
         let text = render_message(&message);
         assert!(!text.contains("reply-to"), "no reply-to without a reply: {text}");
@@ -347,6 +365,7 @@ pub(crate) mod tests {
             ts: 1763200000000,
             reply_to: None,
             topic: None,
+            project: "default".into(),
         };
         let text = render_message(&message);
         assert_eq!(text.matches("</agent-message>").count(), 1, "only the wrapper closes: {text}");
@@ -368,6 +387,7 @@ pub(crate) mod tests {
                 ts: 1763200000000,
                 reply_to: Some(12),
                 topic: None,
+                project: "default".into(),
             },
             acked_at: Some(1763200000500),
         };
@@ -388,6 +408,7 @@ pub(crate) mod tests {
                 ts: 1763200000000,
                 reply_to: None,
                 topic: None,
+                project: "default".into(),
             },
             acked_at: None,
         };
@@ -408,6 +429,7 @@ pub(crate) mod tests {
                 ts: 1763164800000,
                 reply_to: None,
                 topic: Some("release-26".into()),
+                project: "default".into(),
             },
             acked_at: None,
         };
@@ -428,6 +450,7 @@ pub(crate) mod tests {
                 ts: 1763200000000,
                 reply_to: Some(12),
                 topic: None,
+                project: "default".into(),
             },
             acked_at: None,
         };
@@ -464,6 +487,7 @@ pub(crate) mod tests {
             ts: 0,
             reply_to: None,
             topic: None,
+            project: "default".into(),
         }
     }
 

@@ -244,7 +244,7 @@ async fn frames_keep_flowing_while_waiting() {
     raw_send(&mut raw, &wait).await;
     raw_send(&mut raw, "{\"type\":\"agents\"}\n").await;
     match raw_recv(&mut raw).await.unwrap() {
-        Outbound::Agents { agents } => {
+        Outbound::Agents { agents, .. } => {
             assert!(agents.iter().any(|agent| agent.address == "w@h"), "{agents:?}")
         }
         other => panic!("expected an agents frame, got {other:?}"),
@@ -270,7 +270,7 @@ async fn agent_is_online_while_it_has_an_inbox_watch() {
     assert!(!online_of(&addr, "w@h").await, "connected but not watching");
     raw_send(&mut raw, "{\"type\":\"watch\"}\n").await;
     raw_send(&mut raw, "{\"type\":\"agents\"}\n").await;
-    let Outbound::Agents { agents } = raw_recv(&mut raw).await.unwrap() else {
+    let Outbound::Agents { agents, .. } = raw_recv(&mut raw).await.unwrap() else {
         panic!("expected agents")
     };
     assert!(agents.iter().find(|a| a.address == "w@h").unwrap().online);

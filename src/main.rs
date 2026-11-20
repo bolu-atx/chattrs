@@ -118,6 +118,7 @@ async fn run(args: Args) -> Result<(), RunError> {
         Command::Skill => cmd_skill(),
         Command::Log(c) => cmd_log(c).await,
         Command::Agents(c) => cmd_agents(c).await,
+        Command::Projects(c) => cmd_projects(c).await,
         Command::Status(c) => cmd_status(c).await,
         Command::Hook(c) => {
             hook::run(c.event, &c.client).await;
@@ -303,12 +304,26 @@ async fn cmd_agents(c: cli::AgentsArgs) -> Result<(), RunError> {
     let endpoint = endpoint(&c.client)?;
     let mut conn = client::Client::connect(&endpoint).await?;
     deliver_unread(&mut conn, c.json).await?;
-    let agents = conn.agents().await?;
+    let agents = conn.agents(c.all).await?;
     for agent in &agents {
         if c.json {
             write(&output::agent_json(agent))?;
         } else {
             write(&output::agent_text(agent))?;
+        }
+    }
+    Ok(())
+}
+
+/// List the projects. The `*` observer behind it cannot hold an inbox, so
+/// this command prints no unread messages first.
+async fn cmd_projects(c: cli::ProjectsArgs) -> Result<(), RunError> {
+    let endpoint = endpoint(&c.client)?;
+    for project in &client::projects(&endpoint).await? {
+        if c.json {
+            write(&output::project_json(project))?;
+        } else {
+            write(&output::project_text(project))?;
         }
     }
     Ok(())

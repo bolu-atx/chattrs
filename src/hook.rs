@@ -12,8 +12,8 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::cli::{ClientArgs, HookEvent};
-use crate::client::{Client, Endpoint};
-use crate::model::Message;
+use crate::client::{self, Client, Endpoint};
+use crate::model::{Message, DEFAULT_PROJECT};
 use crate::output;
 
 /// Total time for connect plus exchange. The agent waits on the hook, so a
@@ -42,7 +42,7 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
         // The context prints even when the broker cannot be reached.
         let _ = tokio::time::timeout(BUDGET, Client::reconnect_with(&endpoint, "idle")).await;
         let codex = client.agent.as_deref() == Some("codex");
-        print_json(&session_start_output(address, codex));
+        print_json(&session_start_output(address, client::env_project().as_deref(), codex));
         return;
     }
     // A timeout drops the exchange; unacked messages stay unread.
@@ -179,9 +179,12 @@ fn context_output(event_name: &str, text: &str) -> Value {
 
 /// The `SessionStart` context: the address, the skill, and, for Claude
 /// Code only, the Monitor reminder. Codex has no Monitor tool.
-fn session_start_output(address: &str, codex: bool) -> Value {
+fn session_start_output(address: &str, project: Option<&str>, codex: bool) -> Value {
     let mut text =
         format!("Your chattrs address is {address}. Load the chattrs skill: run `chattrs skill`.");
+    if let Some(project) = project.filter(|project| *project != DEFAULT_PROJECT) {
+        text.push_str(&format!(" Your chattrs project is {project}."));
+    }
     if !codex {
         text.push_str(" Run `chattrs watch` under the Monitor tool to wake on messages.");
     }
@@ -201,6 +204,7 @@ mod tests {
             ts: 0,
             reply_to: None,
             topic: None,
+            project: "default".into(),
         }
     }
 
@@ -223,12 +227,24 @@ mod tests {
 
     #[test]
     fn session_start_names_monitor_for_claude_and_not_codex() {
-        let claude = session_start_output("c@h", false);
+        let claude = session_start_output("c@h", None, false);
         let text = claude["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(text.contains("c@h") && text.contains("Monitor"));
-        let codex = session_start_output("c@h", true);
+        let codex = session_start_output("c@h", None, true);
         let text = codex["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(text.contains("chattrs skill") && !text.contains("Monitor"));
+    }
+
+    #[test]
+    fn session_start_names_the_project_unless_it_is_default() {
+        for project in [None, Some("default")] {
+            let value = session_start_output("c@h", project, false);
+            let text = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+            assert!(!text.contains("project"), "{text}");
+        }
+        let value = session_start_output("c@h", Some("alpha"), false);
+        let text = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(text.contains("Your chattrs project is alpha."), "{text}");
     }
 
     #[test]

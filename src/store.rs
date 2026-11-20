@@ -4,12 +4,13 @@
 //! runs on a blocking thread so the broker never stalls. The broker commits
 //! a row before it writes `sent`, and messages are never deleted.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 
-use crate::model::{Agent, LoggedMessage, Message, MAX_TOPIC_BACKLOG};
+use crate::model::{Agent, LoggedMessage, Message, ProjectInfo, ALL_PROJECTS, MAX_TOPIC_BACKLOG};
 
 /// SQLite store for messages, safe to share across broker tasks.
 #[derive(Debug, Clone)]
@@ -20,12 +21,13 @@ pub struct Store {
 /// Latest schema version, tracked with `PRAGMA user_version`. Version 1 is
 /// the tables without the `topic` column; version 2 adds it; version 3 adds
 /// the `tags` column to `agents`; version 4 adds `state` and
-/// `state_at`.
-const SCHEMA_VERSION: i64 = 4;
+/// `state_at`; version 5 adds `project` to both tables and keys `agents`
+/// by (project, address).
+const SCHEMA_VERSION: i64 = 5;
 
 /// The columns of one stored message. Every query that returns messages
 /// selects this list and maps it with `message_from_row`.
-const MESSAGE_COLUMNS: &str = "id, sender, recipient, body, ts, reply_to, topic";
+const MESSAGE_COLUMNS: &str = "id, sender, recipient, body, ts, reply_to, topic, project";
 
 impl Store {
     /// Open (creating parent directories) or create the database at `path`.
@@ -53,6 +55,7 @@ impl Store {
     /// A `None` topic is the general chat; a `None` recipient announces.
     pub async fn insert(
         &self,
+        project: String,
         sender: String,
         recipient: Option<String>,
         body: String,
@@ -62,15 +65,16 @@ impl Store {
         self.with(move |conn| {
             let ts = now_ms();
             conn.execute(
-                "INSERT INTO messages (sender, recipient, body, ts, reply_to, topic)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO messages (sender, recipient, body, ts, reply_to, topic, project)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     sender,
                     recipient.as_deref().unwrap_or(""),
                     body,
                     ts as i64,
                     reply_to.map(|id| id as i64),
-                    topic
+                    topic,
+                    project
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -82,18 +86,20 @@ impl Store {
                 ts,
                 reply_to,
                 topic,
+                project,
             })
         })
         .await
     }
 
-    /// Fetch one message by id, or `None` when no such id exists.
-    pub async fn get(&self, id: u64) -> Result<Option<Message>, String> {
+    /// Fetch one message of `project` by id, or `None` when the project has
+    /// no such id.
+    pub async fn get(&self, project: String, id: u64) -> Result<Option<Message>, String> {
         self.with(move |conn| {
             select_first(
                 conn,
-                &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?1"),
-                [id as i64],
+                &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE id = ?1 AND project = ?2"),
+                rusqlite::params![id as i64, project],
                 message_from_row,
             )
         })
@@ -101,12 +107,12 @@ impl Store {
     }
 
     /// List every unread message for `recipient`, in id order.
-    pub async fn inbox(&self, recipient: String) -> Result<Vec<Message>, String> {
+    pub async fn inbox(&self, project: String, recipient: String) -> Result<Vec<Message>, String> {
         self.with(move |conn| {
             select_all(
                 conn,
-                &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE recipient = ?1 AND acked_at IS NULL ORDER BY id"),
-                [recipient],
+                &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE project = ?1 AND recipient = ?2 AND acked_at IS NULL ORDER BY id"),
+                rusqlite::params![project, recipient],
                 message_from_row,
             )
         })
@@ -117,14 +123,15 @@ impl Store {
     /// whether it is acked or not. `wait` also matches acked messages.
     pub async fn find_reply(
         &self,
+        project: String,
         recipient: String,
         reply_to: u64,
     ) -> Result<Option<Message>, String> {
         self.with(move |conn| {
             select_first(
                 conn,
-                &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE recipient = ?1 AND reply_to = ?2 ORDER BY id LIMIT 1"),
-                rusqlite::params![recipient, reply_to as i64],
+                &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE project = ?1 AND recipient = ?2 AND reply_to = ?3 ORDER BY id LIMIT 1"),
+                rusqlite::params![project, recipient, reply_to as i64],
                 message_from_row,
             )
         })
@@ -133,7 +140,12 @@ impl Store {
 
     /// Mark the listed ids as read when they belong to `recipient` and are
     /// unread; return the changed ids in input order. One transaction.
-    pub async fn ack(&self, recipient: String, ids: Vec<u64>) -> Result<Vec<u64>, String> {
+    pub async fn ack(
+        &self,
+        project: String,
+        recipient: String,
+        ids: Vec<u64>,
+    ) -> Result<Vec<u64>, String> {
         self.with(move |conn| {
             let now = now_ms() as i64;
             let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -141,8 +153,8 @@ impl Store {
             for id in ids {
                 let n = tx
                     .execute(
-                        "UPDATE messages SET acked_at = ?1 WHERE id = ?2 AND recipient = ?3 AND acked_at IS NULL",
-                        rusqlite::params![now, id as i64, recipient],
+                        "UPDATE messages SET acked_at = ?1 WHERE id = ?2 AND project = ?3 AND recipient = ?4 AND acked_at IS NULL",
+                        rusqlite::params![now, id as i64, project, recipient],
                     )
                     .map_err(|e| e.to_string())?;
                 if n == 1 {
@@ -161,6 +173,7 @@ impl Store {
     /// keeps both.
     pub async fn touch_agent(
         &self,
+        project: String,
         address: String,
         tags: Vec<String>,
         state: Option<String>,
@@ -174,8 +187,8 @@ impl Store {
             let now = now_ms() as i64;
             let state_at = state.as_ref().map(|_| now);
             conn.execute(
-                "INSERT INTO agents (address, last_seen, tags, state, state_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(address) DO UPDATE SET last_seen = excluded.last_seen, tags = COALESCE(excluded.tags, tags), state = COALESCE(excluded.state, state), state_at = COALESCE(excluded.state_at, state_at)",
-                rusqlite::params![address, now, tags_json, state, state_at],
+                "INSERT INTO agents (project, address, last_seen, tags, state, state_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(project, address) DO UPDATE SET last_seen = excluded.last_seen, tags = COALESCE(excluded.tags, tags), state = COALESCE(excluded.state, state), state_at = COALESCE(excluded.state_at, state_at)",
+                rusqlite::params![project, address, now, tags_json, state, state_at],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -183,12 +196,12 @@ impl Store {
         .await
     }
 
-    /// Whether `address` has said `hello` at least once.
-    pub async fn is_known_agent(&self, address: String) -> Result<bool, String> {
+    /// Whether `address` has said `hello` in `project` at least once.
+    pub async fn is_known_agent(&self, project: String, address: String) -> Result<bool, String> {
         self.with(move |conn| {
             conn.query_row(
-                "SELECT EXISTS(SELECT 1 FROM agents WHERE address = ?1)",
-                [address],
+                "SELECT EXISTS(SELECT 1 FROM agents WHERE project = ?1 AND address = ?2)",
+                rusqlite::params![project, address],
                 |row| row.get(0),
             )
             .map_err(|e| e.to_string())
@@ -200,6 +213,7 @@ impl Store {
     /// `limit` rows. With `address`, only messages it sent or received.
     pub async fn log(
         &self,
+        project: String,
         address: Option<String>,
         after: u64,
         limit: u64,
@@ -207,12 +221,12 @@ impl Store {
         self.with(move |conn| {
             select_all(
                 conn,
-                &format!("SELECT {MESSAGE_COLUMNS}, acked_at FROM messages WHERE id > ?1 AND (?2 IS NULL OR sender = ?2 OR recipient = ?2) ORDER BY id LIMIT ?3"),
-                rusqlite::params![after as i64, address, limit as i64],
+                &format!("SELECT {MESSAGE_COLUMNS}, acked_at FROM messages WHERE id > ?1 AND (?2 IS NULL OR sender = ?2 OR recipient = ?2) AND (?4 = '{ALL_PROJECTS}' OR project = ?4) ORDER BY id LIMIT ?3"),
+                rusqlite::params![after as i64, address, limit as i64, project],
                 |row| {
                     Ok(LoggedMessage {
                         message: message_from_row(row)?,
-                        acked_at: row.get::<_, Option<i64>>(7)?.map(|ts| ts as u64),
+                        acked_at: row.get::<_, Option<i64>>(8)?.map(|ts| ts as u64),
                     })
                 },
             )
@@ -222,14 +236,18 @@ impl Store {
 
     /// Replay the most recent announcements per topic, merged in id
     /// order. Direct messages that carry a topic never replay.
-    pub async fn topic_backlog(&self, topics: Vec<String>) -> Result<Vec<Message>, String> {
+    pub async fn topic_backlog(
+        &self,
+        project: String,
+        topics: Vec<String>,
+    ) -> Result<Vec<Message>, String> {
         self.with(move |conn| {
             let mut backlog = Vec::new();
             for topic in &topics {
                 backlog.extend(select_all(
                     conn,
-                    &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE topic = ?1 AND recipient = '' ORDER BY id DESC LIMIT ?2"),
-                    rusqlite::params![topic, MAX_TOPIC_BACKLOG as i64],
+                    &format!("SELECT {MESSAGE_COLUMNS} FROM messages WHERE topic = ?1 AND recipient = '' AND (?3 = '{ALL_PROJECTS}' OR project = ?3) ORDER BY id DESC LIMIT ?2"),
+                    rusqlite::params![topic, MAX_TOPIC_BACKLOG as i64, project],
                     message_from_row,
                 )?);
             }
@@ -239,24 +257,70 @@ impl Store {
         .await
     }
 
-    /// List every address that ever said `hello`, sorted by address.
-    pub async fn agents(&self) -> Result<Vec<Agent>, String> {
+    /// List every address in `project` that ever said `hello`, sorted by
+    /// project then address. The project `*` lists every project.
+    pub async fn agents(&self, project: String) -> Result<Vec<Agent>, String> {
         self.with(move |conn| {
             select_all(
                 conn,
-                "SELECT address, last_seen, tags, state, state_at FROM agents ORDER BY address",
-                [],
+                &format!("SELECT project, address, last_seen, tags, state, state_at FROM agents WHERE ?1 = '{ALL_PROJECTS}' OR project = ?1 ORDER BY project, address"),
+                [project],
                 |row| {
-                    let tags: Option<String> = row.get(2)?;
+                    let tags: Option<String> = row.get(3)?;
                     Ok(Agent {
-                        address: row.get(0)?,
-                        last_seen: row.get::<_, i64>(1)? as u64,
+                        project: row.get(0)?,
+                        address: row.get(1)?,
+                        last_seen: row.get::<_, i64>(2)? as u64,
                         online: false,
                         tags: tags
                             .and_then(|json| serde_json::from_str(&json).ok())
                             .unwrap_or_default(),
-                        state: row.get(3)?,
-                        state_at: row.get::<_, Option<i64>>(4)?.map(|at| at as u64),
+                        state: row.get(4)?,
+                        state_at: row.get::<_, Option<i64>>(5)?.map(|at| at as u64),
+                    })
+                },
+            )
+        })
+        .await
+    }
+
+    /// The (project, address) pairs that sent or received a message at or
+    /// after `since`, in ms since the epoch.
+    pub async fn active_since(
+        &self,
+        project: String,
+        since: u64,
+    ) -> Result<HashSet<(String, String)>, String> {
+        self.with(move |conn| {
+            let pairs = select_all(
+                conn,
+                &format!("SELECT project, sender FROM messages WHERE ts >= ?1 AND (?2 = '{ALL_PROJECTS}' OR project = ?2)
+                          UNION SELECT project, recipient FROM messages WHERE ts >= ?1 AND recipient <> '' AND (?2 = '{ALL_PROJECTS}' OR project = ?2)"),
+                rusqlite::params![since as i64, project],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            Ok(pairs.into_iter().collect())
+        })
+        .await
+    }
+
+    /// Agent and message counts per project, sorted by project. The
+    /// project `*` counts every project.
+    pub async fn projects(&self, project: String) -> Result<Vec<ProjectInfo>, String> {
+        self.with(move |conn| {
+            select_all(
+                conn,
+                &format!("SELECT project, SUM(agents), SUM(messages) FROM (
+                            SELECT project, COUNT(*) AS agents, 0 AS messages FROM agents GROUP BY project
+                            UNION ALL
+                            SELECT project, 0, COUNT(*) FROM messages GROUP BY project)
+                          WHERE ?1 = '{ALL_PROJECTS}' OR project = ?1 GROUP BY project ORDER BY project"),
+                [project],
+                |row| {
+                    Ok(ProjectInfo {
+                        project: row.get(0)?,
+                        agents: row.get::<_, i64>(1)? as u64,
+                        messages: row.get::<_, i64>(2)? as u64,
                     })
                 },
             )
@@ -329,6 +393,9 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if version < 4 {
         add_state(conn)?;
     }
+    if version < 5 {
+        add_project(conn)?;
+    }
     conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -366,6 +433,28 @@ fn add_state(conn: &Connection) -> Result<(), String> {
     conn.execute("ALTER TABLE agents ADD COLUMN state_at INTEGER", [])
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// The version-5 step: add `project` to `messages` and `agents`, with
+/// every old row in `default`. SQLite cannot change a primary key in
+/// place, so `agents` is rebuilt as a new table keyed by (project,
+/// address): create, copy, drop, rename. One transaction, so a failure
+/// leaves the version-4 tables untouched.
+fn add_project(conn: &Connection) -> Result<(), String> {
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute_batch(
+        "ALTER TABLE messages ADD COLUMN project TEXT NOT NULL DEFAULT 'default';
+         CREATE TABLE agents_v5 (project TEXT NOT NULL DEFAULT 'default', address TEXT NOT NULL, last_seen INTEGER NOT NULL, tags TEXT, state TEXT, state_at INTEGER, PRIMARY KEY (project, address));
+         INSERT INTO agents_v5 (project, address, last_seen, tags, state, state_at) SELECT 'default', address, last_seen, tags, state, state_at FROM agents;
+         DROP TABLE agents;
+         ALTER TABLE agents_v5 RENAME TO agents;
+         DROP INDEX IF EXISTS messages_unread;
+         CREATE INDEX messages_unread ON messages(project, recipient, id) WHERE acked_at IS NULL;
+         CREATE INDEX messages_topic ON messages(project, topic, id) WHERE recipient = '';
+         CREATE INDEX messages_ts ON messages(ts);",
+    )
+    .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 /// Read an env var, treating a missing or blank value as absent.
@@ -416,10 +505,11 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         ts: row.get::<_, i64>(4)? as u64,
         reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
         topic: row.get(6)?,
+        project: row.get(7)?,
     })
 }
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -467,34 +557,34 @@ mod tests {
         let db = dir.path().join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
         let first = store
-            .insert("a@h".into(), Some("b@h".into()), "one".into(), None, None)
+            .insert("default".into(), "a@h".into(), Some("b@h".into()), "one".into(), None, None)
             .await
             .unwrap()
             .id;
         let second = store
-            .insert("a@h".into(), Some("b@h".into()), "two".into(), None, None)
+            .insert("default".into(), "a@h".into(), Some("b@h".into()), "two".into(), None, None)
             .await
             .unwrap()
             .id;
         let other = store
-            .insert("a@h".into(), Some("c@h".into()), "other".into(), None, None)
+            .insert("default".into(), "a@h".into(), Some("c@h".into()), "other".into(), None, None)
             .await
             .unwrap()
             .id;
 
-        let messages = store.inbox("b@h".into()).await.unwrap();
+        let messages = store.inbox("default".into(), "b@h".into()).await.unwrap();
         let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
         assert_eq!(ids, vec![first, second]);
         assert_eq!(messages[0].from, "a@h");
         assert_eq!(messages[0].body, "one");
 
-        let changed = store.ack("b@h".into(), vec![first, other]).await.unwrap();
+        let changed = store.ack("default".into(), "b@h".into(), vec![first, other]).await.unwrap();
         assert_eq!(changed, vec![first]);
 
-        let messages = store.inbox("b@h".into()).await.unwrap();
+        let messages = store.inbox("default".into(), "b@h".into()).await.unwrap();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].id, second);
-        let kept = store.inbox("c@h".into()).await.unwrap();
+        let kept = store.inbox("default".into(), "c@h".into()).await.unwrap();
         assert_eq!(kept.len(), 1);
         assert_eq!(kept[0].id, other);
     }
@@ -504,8 +594,10 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let db = dir.path().join("sub").join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
-        let stored =
-            store.insert("a@h".into(), Some("b@h".into()), "hi".into(), None, None).await.unwrap();
+        let stored = store
+            .insert("default".into(), "a@h".into(), Some("b@h".into()), "hi".into(), None, None)
+            .await
+            .unwrap();
         let id = stored.id;
         assert_eq!(id, 1);
         assert_eq!(stored.from, "a@h");
@@ -517,7 +609,7 @@ mod tests {
 
         let store = Store::open(db.clone()).await.unwrap();
         let next = store
-            .insert("b@h".into(), Some("a@h".into()), "yo".into(), Some(id), None)
+            .insert("default".into(), "b@h".into(), Some("a@h".into()), "yo".into(), Some(id), None)
             .await
             .unwrap()
             .id;
@@ -533,7 +625,14 @@ mod tests {
         let mut first_kept = 0;
         for i in 0..crate::model::MAX_TOPIC_BACKLOG + 5 {
             let id = store
-                .insert("a@h".into(), None, format!("note {i}"), None, Some("release-26".into()))
+                .insert(
+                    "default".into(),
+                    "a@h".into(),
+                    None,
+                    format!("note {i}"),
+                    None,
+                    Some("release-26".into()),
+                )
                 .await
                 .unwrap()
                 .id;
@@ -545,12 +644,20 @@ mod tests {
             }
         }
         let other = store
-            .insert("a@h".into(), None, "other room".into(), None, Some("other-topic".into()))
+            .insert(
+                "default".into(),
+                "a@h".into(),
+                None,
+                "other room".into(),
+                None,
+                Some("other-topic".into()),
+            )
             .await
             .unwrap()
             .id;
         let direct = store
             .insert(
+                "default".into(),
                 "a@h".into(),
                 Some("b@h".into()),
                 "direct".into(),
@@ -561,8 +668,10 @@ mod tests {
             .unwrap()
             .id;
 
-        let backlog =
-            store.topic_backlog(vec!["release-26".into(), "other-topic".into()]).await.unwrap();
+        let backlog = store
+            .topic_backlog("default".into(), vec!["release-26".into(), "other-topic".into()])
+            .await
+            .unwrap();
         assert_eq!(backlog.len(), crate::model::MAX_TOPIC_BACKLOG as usize + 1);
         let ids: Vec<u64> = backlog.iter().map(|message| message.id).collect();
         assert!(ids.windows(2).all(|pair| pair[0] < pair[1]), "backlog is in id order");
@@ -606,11 +715,12 @@ mod tests {
                 conn.execute(&format!("PRAGMA user_version = {stamp}"), []).unwrap();
             }
             let store = Store::open(db.clone()).await.unwrap();
-            let old = store.get(1).await.unwrap().expect("old row survives");
+            let old = store.get("default".into(), 1).await.unwrap().expect("old row survives");
             assert_eq!(old.body, "old");
             assert_eq!(old.topic, None, "old rows read back with no topic");
             let id = store
                 .insert(
+                    "default".into(),
                     "a@h".into(),
                     Some("b@h".into()),
                     "new".into(),
@@ -620,13 +730,13 @@ mod tests {
                 .await
                 .unwrap()
                 .id;
-            let fresh = store.get(id).await.unwrap().unwrap();
+            let fresh = store.get("default".into(), id).await.unwrap().unwrap();
             assert_eq!(fresh.topic.as_deref(), Some("release-26"));
             let version: i64 = rusqlite::Connection::open(&db)
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 4, "open stamps the latest version");
+            assert_eq!(version, 5, "open stamps the latest version");
         }
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -654,9 +764,9 @@ mod tests {
             .unwrap();
         }
         let store = Store::open(db.clone()).await.unwrap();
-        let old = store.get(1).await.unwrap().expect("old row survives");
+        let old = store.get("default".into(), 1).await.unwrap().expect("old row survives");
         assert_eq!(old.topic.as_deref(), Some("release-26"), "a migrated row keeps its topic");
-        let inbox = store.inbox("b@h".into()).await.unwrap();
+        let inbox = store.inbox("default".into(), "b@h".into()).await.unwrap();
         assert_eq!(inbox.len(), 1, "the row still belongs to its inbox");
     }
 
@@ -675,17 +785,17 @@ mod tests {
             .unwrap();
         }
         let store = Store::open(db.clone()).await.unwrap();
-        let agents = store.agents().await.unwrap();
+        let agents = store.agents("default".into()).await.unwrap();
         assert_eq!(agents.len(), 1);
         assert!(agents[0].tags.is_empty(), "an old row has no tags");
-        store.touch_agent("a@h".into(), vec!["gpu".into()], None).await.unwrap();
-        store.touch_agent("a@h".into(), vec![], None).await.unwrap();
-        assert_eq!(store.agents().await.unwrap()[0].tags, ["gpu"]);
+        store.touch_agent("default".into(), "a@h".into(), vec!["gpu".into()], None).await.unwrap();
+        store.touch_agent("default".into(), "a@h".into(), vec![], None).await.unwrap();
+        assert_eq!(store.agents("default".into()).await.unwrap()[0].tags, ["gpu"]);
         let version: i64 = rusqlite::Connection::open(&db)
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
     }
 
     #[tokio::test]
@@ -703,14 +813,17 @@ mod tests {
             .unwrap();
         }
         let store = Store::open(db.clone()).await.unwrap();
-        let agent = store.agents().await.unwrap().remove(0);
+        let agent = store.agents("default".into()).await.unwrap().remove(0);
         assert_eq!((agent.state, agent.state_at), (None, None), "an old row has no state");
-        store.touch_agent("a@h".into(), vec![], Some("working".into())).await.unwrap();
-        let set = store.agents().await.unwrap().remove(0);
+        store
+            .touch_agent("default".into(), "a@h".into(), vec![], Some("working".into()))
+            .await
+            .unwrap();
+        let set = store.agents("default".into()).await.unwrap().remove(0);
         assert_eq!(set.state.as_deref(), Some("working"));
         assert!(set.state_at.is_some());
-        store.touch_agent("a@h".into(), vec![], None).await.unwrap();
-        let kept = store.agents().await.unwrap().remove(0);
+        store.touch_agent("default".into(), "a@h".into(), vec![], None).await.unwrap();
+        let kept = store.agents("default".into()).await.unwrap().remove(0);
         assert_eq!(
             (kept.state, kept.state_at),
             (set.state, set.state_at),
@@ -720,6 +833,56 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
+    }
+
+    #[tokio::test]
+    async fn version_four_database_migrates_every_row_into_default() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, body TEXT NOT NULL, ts INTEGER NOT NULL, reply_to INTEGER, topic TEXT, acked_at INTEGER);
+                 CREATE INDEX messages_unread ON messages(recipient, id) WHERE acked_at IS NULL;
+                 CREATE TABLE agents (address TEXT PRIMARY KEY, last_seen INTEGER NOT NULL, tags TEXT, state TEXT, state_at INTEGER);
+                 INSERT INTO messages (sender, recipient, body, ts, topic) VALUES ('a@h', 'b@h', 'direct', 1763200000000, NULL);
+                 INSERT INTO messages (sender, recipient, body, ts, topic) VALUES ('a@h', '', 'room note', 1763200000001, 'release-26');
+                 INSERT INTO agents (address, last_seen, tags, state, state_at) VALUES ('a@h', 1763200000000, '[\"gpu\"]', 'idle', 1763200000000);
+                 INSERT INTO agents (address, last_seen) VALUES ('b@h', 1763200000000);
+                 PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        }
+        let store = Store::open(db.clone()).await.unwrap();
+        let default = || "default".to_string();
+        let agents = store.agents(default()).await.unwrap();
+        assert_eq!(agents.len(), 2);
+        assert!(agents.iter().all(|agent| agent.project == "default"));
+        assert_eq!(
+            (agents[0].tags.clone(), agents[0].state.as_deref()),
+            (vec!["gpu".to_string()], Some("idle"))
+        );
+        let inbox = store.inbox(default(), "b@h".into()).await.unwrap();
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].project, "default");
+        let backlog = store.topic_backlog(default(), vec!["release-26".into()]).await.unwrap();
+        assert_eq!(backlog.len(), 1);
+        assert_eq!(backlog[0].project, "default");
+        assert!(store.agents("other".into()).await.unwrap().is_empty());
+        assert!(store.inbox("other".into(), "b@h".into()).await.unwrap().is_empty());
+
+        // The key is (project, address): the same address can join another project.
+        store.touch_agent("other".into(), "a@h".into(), vec![], None).await.unwrap();
+        assert_eq!(store.agents("*".into()).await.unwrap().len(), 3);
+        let counts = store.projects("*".into()).await.unwrap();
+        let rows: Vec<(&str, u64, u64)> =
+            counts.iter().map(|p| (p.project.as_str(), p.agents, p.messages)).collect();
+        assert_eq!(rows, [("default", 2, 2), ("other", 1, 0)]);
+        let version: i64 = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 5);
     }
 }

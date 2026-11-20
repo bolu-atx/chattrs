@@ -51,6 +51,10 @@ Address = `agent@host`.
 - **MON-3** The wire protocol is the only monitoring interface. A viewer (tray, TUI, or GUI) uses `hello`, `agents`, `log`, and the observer `watch`. *(N12)*
 - **MON-4** An agent can report its state: working, idle, or waiting. `agents` shows the latest state and when it was set. A client shows a state older than 15 minutes as unknown. *(N9, N12)*
 
+## Projects
+
+- **NS-1** One broker serves many projects. Mailboxes, agents, log, topics, leases, and state are scoped to a project. An agent cannot see or send to another project. Old clients use the project `default`.
+
 ## Hooks
 
 - **HOOK-1** Hook adapters for Claude Code and Codex deliver unread messages between tool calls; pi later. *(N10)*
@@ -63,6 +67,6 @@ Address = `agent@host`.
 - **Size.** A body is 1 byte to 64 KiB of UTF-8.
 - **Retention.** The broker never deletes a message.
 - **Timeout.** `ask` waits 600 seconds by default. Exit 0 = reply, 2 = timeout, 1 = error.
-- **Identity.** An address is self-asserted. The fleet shares one token. Any token holder can claim any address and read its inbox. Two agents with the same address share one inbox, so the coordinator gives each worker a unique address.
+- **Identity.** An address is self-asserted. The fleet shares one token. Any token holder can claim any address and read its inbox. Until signed tokens land, the token also reaches every project. Two agents with the same address share one inbox, so the coordinator gives each worker a unique address.
 
 Limits: ≤10 hosts, macOS + Linux + Windows (x64). The broker runs on an always-on host, which may also run an agent.
