@@ -161,9 +161,11 @@ fn run_with_stdin(home: &std::path::Path, args: &[&str], stdin: &str) -> Output 
 fn setup_broker_then_join_gives_each_identity_its_token() {
     let broker = tempfile::TempDir::new().expect("broker home");
     let client = tempfile::TempDir::new().expect("client home");
+    let join_dir = broker.path().join("joins");
+    let dir = join_dir.display().to_string();
     let first = run_with_stdin(
         broker.path(),
-        &["setup", "--broker", "--hosts", "mac,bobox", "--bind", "127.0.0.1"],
+        &["setup", "--broker", "--hosts", "mac,bobox", "--bind", "127.0.0.1", "--join-dir", &dir],
         "",
     );
     assert_eq!(first.status.code(), Some(0), "setup --broker: {first:?}");
@@ -183,18 +185,17 @@ fn setup_broker_then_join_gives_each_identity_its_token() {
     let unit_text = std::fs::read_to_string(&unit).expect("unit");
     assert!(unit_text.contains("127.0.0.1:4646") && unit_text.contains("--tokens"), "{unit_text}");
     let stdout = stdout_text(&first);
-    assert!(stdout.starts_with("Treat these like passwords."), "{stdout}");
-    let joins: Vec<(&str, &str)> =
-        stdout.lines().filter_map(|line| line.split_once(": chattrs://")).collect();
+    assert!(!stdout.contains("chattrs://"), "no join string on stdout: {stdout}");
     let find = |label: &str| {
-        let (_, rest) = joins.iter().find(|(l, _)| *l == label).expect(label);
-        format!("chattrs://{rest}")
+        let (kind, rest) = label.split_once(' ').expect("label");
+        let name = if kind == "agent" { rest } else { kind };
+        let text = std::fs::read_to_string(join_dir.join(format!("{name}.join"))).expect(label);
+        text.trim().to_string()
     };
-    assert_eq!(joins.len(), 4, "{stdout}");
 
     let again = run_with_stdin(
         broker.path(),
-        &["setup", "--broker", "--hosts", "mac", "--bind", "127.0.0.1"],
+        &["setup", "--broker", "--hosts", "mac", "--bind", "127.0.0.1", "--join-dir", &dir],
         "",
     );
     assert_ne!(again.status.code(), Some(0), "a second run refuses");
@@ -230,6 +231,103 @@ fn setup_broker_then_join_gives_each_identity_its_token() {
     let forced =
         run_with_stdin(client.path(), &["setup", "--join", &find("agent bobox"), "--force"], "");
     assert_eq!(forced.status.code(), Some(0), "--force replaces: {forced:?}");
+}
+
+/// Every token in the broker's tokens file.
+fn tokens_in(path: &std::path::Path) -> Vec<String> {
+    let text = std::fs::read_to_string(path).expect("tokens file");
+    let tokens: Vec<String> = text
+        .lines()
+        .filter_map(|l| l.strip_prefix("token = \""))
+        .map(|l| l.trim_end_matches('"').to_string())
+        .collect();
+    assert_eq!(tokens.len(), 4, "{text}");
+    tokens
+}
+
+/// Run `setup --broker` for `hosts` with `--join-dir dir`.
+fn broker_to_dir(home: &std::path::Path, hosts: &str, dir: &std::path::Path) -> Output {
+    let dir = dir.to_str().expect("utf8 path");
+    run_with_stdin(
+        home,
+        &["setup", "--broker", "--hosts", hosts, "--bind", "127.0.0.1", "--join-dir", dir],
+        "",
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn join_dir_writes_private_files_and_prints_only_paths() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode =
+        |p: &std::path::Path| std::fs::metadata(p).expect("meta").permissions().mode() & 0o777;
+    let broker = tempfile::TempDir::new().expect("broker home");
+    let dir = broker.path().join("out/joins");
+    let out = broker_to_dir(broker.path(), "mac,bobox", &dir);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert_eq!(mode(&dir), 0o700);
+    let shown = stdout_text(&out);
+    let all = shown.clone() + &String::from_utf8_lossy(&out.stderr);
+    assert!(!all.contains("chattrs://"), "{all}");
+    for token in tokens_in(&broker.path().join(".config/chattrs/tokens.toml")) {
+        assert!(!all.contains(&token), "a token reached the output");
+    }
+    for name in ["mac", "bobox", "lead", "observer"] {
+        let file = dir.join(format!("{name}.join"));
+        assert_eq!(mode(&file), 0o600, "{name}");
+        assert!(std::fs::read_to_string(&file).expect("join").starts_with("chattrs://"));
+        assert!(shown.contains(&file.display().to_string()), "{shown}");
+    }
+    assert_eq!(shown.lines().count(), 4, "{shown}");
+}
+
+#[test]
+fn join_dir_refusals_leave_no_error_text_with_tokens() {
+    let broker = tempfile::TempDir::new().expect("broker home");
+    let dir = broker.path().join("joins");
+    std::fs::create_dir_all(&dir).expect("dir");
+    std::fs::write(dir.join("mac.join"), "old").expect("file");
+    let out = broker_to_dir(broker.path(), "mac", &dir);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("mac.join"), "{out:?}");
+    assert!(!broker.path().join(".config/chattrs/tokens.toml").exists(), "no partial state");
+    assert_eq!(std::fs::read_to_string(dir.join("mac.join")).expect("kept"), "old");
+}
+
+#[test]
+fn broker_without_a_terminal_needs_join_dir() {
+    let broker = tempfile::TempDir::new().expect("broker home");
+    let out = run_with_stdin(
+        broker.path(),
+        &["setup", "--broker", "--hosts", "mac", "--bind", "127.0.0.1"],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(out.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains(
+            "chattrs: stdout is not a terminal; pass --join-dir DIR so join strings go to files"
+        ),
+        "{out:?}"
+    );
+    assert!(!broker.path().join(".config/chattrs/tokens.toml").exists(), "no partial state");
+}
+
+#[test]
+fn join_file_round_trips_through_stdin() {
+    let broker = tempfile::TempDir::new().expect("broker home");
+    let client = tempfile::TempDir::new().expect("client home");
+    let dir = broker.path().join("joins");
+    let out = broker_to_dir(broker.path(), "bobox", &dir);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let file = std::fs::read_to_string(dir.join("bobox.join")).expect("join file");
+    assert!(file.ends_with('\n'));
+    let joined = run_with_stdin(client.path(), &["setup", "--join", "-"], &file);
+    assert_eq!(joined.status.code(), Some(0), "{joined:?}");
+    assert!(client.path().join(".config/chattrs/any-bobox.token").is_file());
+    let config =
+        std::fs::read_to_string(client.path().join(".config/chattrs/config.toml")).expect("config");
+    assert!(config.contains("any-bobox.token"), "{config}");
 }
 
 #[test]

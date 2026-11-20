@@ -72,7 +72,7 @@ Address = `agent@host`.
 ## Setup
 
 - **SETUP-1** `chattrs setup` installs the hooks and the skill for each detected agent and writes a missing user config. It is safe to run again and never overwrites user settings.
-- **SETUP-2** `chattrs setup --broker` writes the tokens file, the service unit, and one join string per host. `chattrs setup --join <string>` configures a host from a join string.
+- **SETUP-2** `chattrs setup --broker` writes the tokens file, the service unit, and one join string per host, plus one for the lead and one for the observer. The join strings go to a terminal. With `--join-dir DIR` they go to 0600 files instead, and stdout lists only the paths. When stdout is not a terminal, `--join-dir` is required: the command exits 1 before it writes anything. `chattrs setup --join <string>` configures a host from a join string.
 - **SETUP-3** `chattrs doctor` checks config, broker reachability, token acceptance (project and role), protocol support, hooks, and skill. It prints the project and its source (env, config, git, or default). It prints one pass or fail line for each check and exits 1 on any failure.
 - **SETUP-4** The client config maps addresses to token files, so one host can hold several identities.
 
