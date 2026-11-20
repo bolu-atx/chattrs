@@ -130,6 +130,11 @@ Common flags:
 - `CHATTRS_PROJECT` — the project of every command, such as `alpha`
   (default `default`). It has no flag. Valid names follow the topic rule:
   lowercase letters, digits, and hyphens. See [Projects](#projects).
+- `CHATTRS_LEAD` — the address of the agent's lead. Only the
+  `session-start` hook reads it (see [Hooks](#hooks-claude-code-and-codex)).
+  Optional. Set it only in the launch environment, with `CHATTRS_ADDRESS`
+  and `CHATTRS_PROJECT`. Never set these in a shell rc file: every session
+  would share one identity.
 - `--token TOKEN` — fleet token (`CHATTRS_TOKEN`). `serve` needs it for a
   non-loopback bind; every other command sends it in `hello`.
 - `--json` — print JSON lines; every line carries a `type`, and
@@ -345,6 +350,7 @@ ssh <host> 'tmux new -d -s worker1 \
    export CHATTRS_ADDRESS=worker1@<host> \
           CHATTRS_SERVER=<broker-ip>:4646 \
           CHATTRS_PROJECT=<project> \
+          CHATTRS_LEAD=opus@mac \
           CHATTRS_TAGS=gpu; \
    mkdir -p ~/.claude/skills/chattrs && \
      chattrs skill > ~/.claude/skills/chattrs/SKILL.md; \
@@ -352,7 +358,8 @@ ssh <host> 'tmux new -d -s worker1 \
 Run chattrs watch under the Monitor tool now.\""'
 ```
 
-The prompt names the worker's address and its lead. It also starts
+`CHATTRS_LEAD` survives `/clear`; the launch prompt does not. The prompt
+names the worker's address and its lead. It also starts
 `chattrs watch` under Monitor, so a message wakes the worker. See the
 `chattrs-fleet` skill for the same wording. `CHATTRS_TAGS` is optional
 and shows in `agents`.
@@ -424,7 +431,7 @@ What each event does (`chattrs hook <event>`):
 
 | Event | Effect |
 | ----- | ------ |
-| `session-start` | Sets the state to idle, tells the agent its address and to load the skill. Claude Code also gets the Monitor reminder (Codex has none; the Codex config passes `--agent codex`, and no flag means Claude). Prints even when the broker is unreachable. |
+| `session-start` | Fires on startup, clear, and compact, and behaves the same for all three (HOOK-2). Sets the state to idle. Tells the agent its address, its project when not `default`, its lead (`CHATTRS_LEAD`, when set), and to load the skill. Claude Code also gets the Monitor reminder (Codex has none; the Codex config passes `--agent codex`, and no flag means Claude). Then it adds the last 10 messages to and from the address, oldest first, in the `<agent-message>` wrapper. When `CHATTRS_LEAD` is unset or equals the address, it also lists up to 10 messages to the address that it has not replied to, most recent first. It reads the log and acks nothing. It gets about 800 ms and prints the address, lead, and skill lines even when the broker is unreachable. |
 | `user-prompt-submit`, `post-tool-use` | Adds unread messages as `additionalContext`, in the `<agent-message>` wrapper. `user-prompt-submit` also sets the state to working. |
 | `stop` | Sets the state to idle. When messages are unread, blocks the stop with them as the reason, and sets working again. Never blocks when `stop_hook_active` is true. |
 

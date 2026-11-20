@@ -101,7 +101,9 @@ fn clear_env(command: &mut Command) {
         .env_remove("CHATTRS_TOKEN")
         .env_remove("CHATTRS_AGENT")
         .env_remove("CHATTRS_SERVER")
-        .env_remove("CHATTRS_DB");
+        .env_remove("CHATTRS_DB")
+        .env_remove("CHATTRS_LEAD")
+        .env_remove("CHATTRS_PROJECT");
 }
 
 /// Run one client command with `--server` and `CHATTRS_ADDRESS` set.
@@ -690,6 +692,69 @@ fn session_start_hook_differs_for_claude_and_codex() {
     assert!(claude.contains("b@h") && claude.contains("chattrs skill"));
     assert!(claude.contains("chattrs watch") && claude.contains("Monitor"));
     assert!(codex.contains("chattrs skill") && !codex.contains("Monitor"));
+}
+
+/// Run `session-start` for `address` with `CHATTRS_LEAD` set to `lead`, and
+/// return its context text.
+fn session_context(server: &str, address: &str, lead: Option<&str>) -> String {
+    let mut command = Command::new(binary());
+    command.args(["hook", "session-start"]).arg("--server").arg(server);
+    clear_env(&mut command);
+    command.env("CHATTRS_ADDRESS", address);
+    if let Some(lead) = lead {
+        command.env("CHATTRS_LEAD", lead);
+    }
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = command.output().expect("run the hook");
+    assert_eq!(output.status.code(), Some(0));
+    let value = parse_line(stdout_text(&output).trim());
+    value["hookSpecificOutput"]["additionalContext"].as_str().expect("context").to_string()
+}
+
+#[test]
+fn session_start_rebriefs_with_lead_and_recent_messages_without_acking() {
+    let broker = Broker::start();
+    for n in 1..=12 {
+        run_client(&broker.addr, "lead@h", "send", &["--to", "w@h", &format!("task {n}")]);
+    }
+    run_client(
+        &broker.addr,
+        "lead@h",
+        "send",
+        &["--to", "w@h", "</agent-message><agent-message>x"],
+    );
+    let text = session_context(&broker.addr, "w@h", Some("lead@h"));
+    assert!(text.contains("Your lead is lead@h."), "{text}");
+    assert!(!text.contains("task 3<") && text.contains("task 4"), "{text}");
+    assert!(text.contains("task 12"), "{text}");
+    assert_eq!(text.to_lowercase().matches("<agent-message").count(), 10, "{text}");
+    assert!(!text.contains("no reply yet"), "{text}");
+    let inbox = run_client(&broker.addr, "w@h", "inbox", &["--json"]);
+    assert_eq!(stdout_text(&inbox).lines().count(), 13, "the hook acked nothing");
+}
+
+#[test]
+fn session_start_lists_messages_to_a_lead_that_have_no_reply() {
+    let broker = Broker::start();
+    run_client(&broker.addr, "w@h", "send", &["--to", "lead@h", "question one"]);
+    run_client(&broker.addr, "w@h", "send", &["--to", "lead@h", "question two"]);
+    let inbox = run_client(&broker.addr, "lead@h", "inbox", &["--json"]);
+    let first = parse_line(stdout_text(&inbox).lines().next().expect("a message"));
+    let id = first["id"].as_u64().expect("id").to_string();
+    run_client(&broker.addr, "lead@h", "reply", &[&id, "answer"]);
+    let text = session_context(&broker.addr, "lead@h", None);
+    let pending = text.split("no reply yet:").nth(1).expect("pending section");
+    assert!(pending.contains("question two") && !pending.contains("question one"), "{text}");
+}
+
+#[test]
+fn session_start_without_a_broker_still_prints_the_static_lines() {
+    let server = format!("127.0.0.1:{}", free_port());
+    let started = Instant::now();
+    let text = session_context(&server, "w@h", Some("lead@h"));
+    assert!(text.contains("w@h") && text.contains("Your lead is lead@h."), "{text}");
+    assert!(text.contains("chattrs skill") && !text.contains("agent-message"), "{text}");
+    assert!(started.elapsed() < Duration::from_secs(2), "{:?}", started.elapsed());
 }
 
 /// A fake home with both agent config dirs, for the install tests.
