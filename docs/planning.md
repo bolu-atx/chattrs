@@ -67,7 +67,7 @@ issues or move cards by hand.
 ### First run
 
 Outcome: a new user goes from `brew install chattrs` to a working swarm
-using only the README. Chattrs still never starts an agent.
+using only the README. Chattrs still never hosts or supervises an agent.
 
 Requirements: SETUP-1, SETUP-2, SETUP-3, SETUP-4, OPS-1, SEC-5.
 

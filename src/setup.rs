@@ -132,6 +132,9 @@ fn run_host() -> Result<(), String> {
     } else {
         eprintln!("chattrs: kept {}", config.display());
     }
+    if !found.is_empty() {
+        eprintln!("chattrs: start an agent on the swarm with: chattrs exec claude");
+    }
     Ok(())
 }
 

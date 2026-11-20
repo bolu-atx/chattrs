@@ -163,6 +163,7 @@ async fn run(args: Args) -> Result<(), RunError> {
         Command::Inbox(c) => cmd_inbox(c).await,
         Command::Skill => cmd_skill(),
         Command::Env(c) => cmd_env(c),
+        Command::Exec(c) => cmd_exec(c),
         Command::Setup(c) => setup::run(c).map_err(RunError::Message),
         Command::Backup(c) => backup::run(c),
         Command::Doctor(c) => doctor::run(c).await,
@@ -317,28 +318,118 @@ fn new_session_id() -> String {
     format!("{:016x}{:016x}", word(), word())
 }
 
-fn cmd_env(c: cli::EnvArgs) -> Result<(), RunError> {
-    if !model::is_valid_address(&c.address) {
-        return Err(RunError::Message(format!("`{}` is not a user@host address", c.address)));
+/// The session settings that `env` and `exec` both turn into variables.
+struct Session {
+    address: String,
+    project: Option<String>,
+    lead: Option<String>,
+    server: String,
+    tags: Option<String>,
+    token: Option<String>,
+}
+
+type SessionPairs = (Vec<(&'static str, String)>, &'static str);
+
+/// The `(name, value)` pairs of one session, and the word for the project
+/// source. The token is in the pairs only with `with_token`.
+fn session_pairs(s: Session, with_token: bool) -> Result<SessionPairs, RunError> {
+    if !model::is_valid_address(&s.address) {
+        return Err(RunError::Message(format!("`{}` is not a user@host address", s.address)));
     }
     let mut pairs = vec![
-        ("CHATTRS_SERVER", c.server),
-        ("CHATTRS_ADDRESS", c.address),
+        ("CHATTRS_SERVER", s.server),
+        ("CHATTRS_ADDRESS", s.address),
         ("CHATTRS_SESSION", new_session_id()),
     ];
-    let (explicit, from_config) = project::split_applied(c.project);
+    let (explicit, from_config) = project::split_applied(s.project);
     let cwd = std::env::current_dir().unwrap_or_default();
     let (project, source) = project::resolve(explicit.as_deref(), from_config.as_deref(), &cwd);
     let project = (source != project::ProjectSource::Default).then_some(project);
     let optional = [
         ("CHATTRS_PROJECT", project),
-        ("CHATTRS_LEAD", c.lead),
-        ("CHATTRS_TAGS", c.tags),
-        ("CHATTRS_TOKEN", c.token.filter(|_| c.with_token)),
+        ("CHATTRS_LEAD", s.lead),
+        ("CHATTRS_TAGS", s.tags),
+        ("CHATTRS_TOKEN", s.token.filter(|_| with_token)),
     ];
     pairs.extend(optional.into_iter().filter_map(|(name, value)| Some((name, value?))));
-    let source = format!("# project source: {}\n", source.word());
-    write(&(output::export_lines(&pairs) + &source))
+    Ok((pairs, source.word()))
+}
+
+fn cmd_env(c: cli::EnvArgs) -> Result<(), RunError> {
+    let session = Session {
+        address: c.address,
+        project: c.project,
+        lead: c.lead,
+        server: c.server,
+        tags: c.tags,
+        token: c.token,
+    };
+    let (pairs, source) = session_pairs(session, c.with_token)?;
+    write(&(output::export_lines(&pairs) + &format!("# project source: {source}\n")))
+}
+
+/// The default address of `chattrs exec PROGRAM`: `<basename>@<host>`.
+pub(crate) fn exec_default_address(program: &str) -> String {
+    let base = std::path::Path::new(program).file_name().and_then(|n| n.to_str()).unwrap_or("");
+    format!("{base}@{}", cli::short_hostname())
+}
+
+/// Run the program with the `env` pairs. The token stays out of the
+/// program's environment, so no tool it runs can print it: each chattrs call
+/// in the program reads the token from the config, as the hooks do. An
+/// explicit `CHATTRS_TOKEN` in the parent env passes through unchanged.
+/// On Unix this replaces the chattrs process.
+fn cmd_exec(c: cli::ExecArgs) -> Result<(), RunError> {
+    let program = c.command[0].clone();
+    let has_token = c.token.is_some();
+    let address = match c.address {
+        Some(address) => address,
+        None => {
+            let address = exec_default_address(&program);
+            if !model::is_valid_address(&address) {
+                return Err(RunError::Message(format!(
+                    "`{address}` is not a user@host address; pass --as ADDRESS"
+                )));
+            }
+            address
+        }
+    };
+    let session = Session {
+        address,
+        project: c.project,
+        lead: c.lead,
+        server: c.server,
+        tags: c.tags,
+        token: c.token,
+    };
+    let (pairs, _) = session_pairs(session, false)?;
+    let address = pairs.iter().find(|(name, _)| *name == "CHATTRS_ADDRESS").map(|p| p.1.clone());
+    let mut command = std::process::Command::new(&program);
+    command.args(&c.command[1..]).envs(pairs);
+    if config::token_from_config() {
+        // `load_config` put the config token in our env; do not hand it on.
+        command.env_remove("CHATTRS_TOKEN");
+    } else if !has_token {
+        eprintln!("chattrs: no token for {}; the broker may refuse", address.unwrap_or_default());
+    }
+    run_program(command, &program)
+}
+
+#[cfg(unix)]
+fn run_program(mut command: std::process::Command, program: &str) -> Result<(), RunError> {
+    use std::os::unix::process::CommandExt as _;
+    // `exec` returns only when it fails.
+    let error = command.exec();
+    eprintln!("chattrs: cannot run {program}: {error}");
+    std::process::exit(127)
+}
+
+#[cfg(windows)]
+fn run_program(mut command: std::process::Command, program: &str) -> Result<(), RunError> {
+    let status = command
+        .status()
+        .map_err(|error| RunError::Message(format!("cannot run {program}: {error}")))?;
+    std::process::exit(status.code().unwrap_or(1))
 }
 
 fn cmd_skill() -> Result<(), RunError> {

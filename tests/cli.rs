@@ -1525,3 +1525,120 @@ fn env_derives_the_project_from_a_repo() {
     assert!(out.contains("export CHATTRS_PROJECT='my-repo'\n"), "{out}");
     assert!(out.contains("# project source: git\n"), "{out}");
 }
+
+/// Run `chattrs exec ARGS...` in `home`, with extra env pairs.
+#[cfg(unix)]
+fn run_exec(home: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let mut command = common::command(binary());
+    command.arg("exec").args(args);
+    clean_home_env(&mut command, home);
+    command.envs(envs.iter().copied());
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.output().expect("run chattrs exec")
+}
+
+/// The `CHATTRS_*` lines of `env` output, as a sorted map.
+#[cfg(unix)]
+fn chattrs_vars(text: &str) -> std::collections::BTreeMap<String, String> {
+    text.lines()
+        .filter(|line| line.starts_with("CHATTRS_"))
+        .filter_map(|line| line.split_once('='))
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect()
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_child_env_matches_env_without_the_token() {
+    let dir = tempfile::TempDir::new().expect("temp home");
+    let home = dir.path();
+    let token = home.join("tok");
+    std::fs::write(&token, "secret\n").expect("write token");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+    let config = home.join(".config/chattrs");
+    std::fs::create_dir_all(&config).expect("config dir");
+    std::fs::write(
+        config.join("config.toml"),
+        format!("[tokens]\n\"w1@h\" = \"{}\"\n", token.display()),
+    )
+    .expect("write config");
+    let flags = ["--as", "w1@h", "--lead", "lead@h", "--tags", "gpu"];
+
+    let mut env_cmd = common::command(binary());
+    env_cmd.arg("env").args(flags);
+    clean_home_env(&mut env_cmd, home);
+    let env_out = env_cmd.output().expect("run chattrs env");
+    assert_eq!(env_out.status.code(), Some(0), "env: {env_out:?}");
+    let mut expected = parse_exports(&stdout_text(&env_out));
+    let session_env = expected.remove("CHATTRS_SESSION").expect("env session");
+    assert!(!expected.contains_key("CHATTRS_TOKEN"));
+
+    let mut args = flags.to_vec();
+    args.extend(["--", "env"]);
+    let out = run_exec(home, &args, &[]);
+    assert_eq!(out.status.code(), Some(0), "exec: {out:?}");
+    let mut actual = chattrs_vars(&stdout_text(&out));
+    let session_exec = actual.remove("CHATTRS_SESSION").expect("exec session");
+    let expected: std::collections::BTreeMap<_, _> = expected.into_iter().collect();
+    assert_eq!(actual, expected);
+    assert_eq!(session_exec.len(), 32);
+    assert_ne!(session_exec, session_env);
+    assert!(!stdout_text(&out).contains("secret"), "the token must not reach the child");
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_passes_an_explicit_token_through() {
+    let dir = tempfile::TempDir::new().expect("temp home");
+    let out = run_exec(
+        dir.path(),
+        &["--as", "w1@h", "--", "sh", "-c", "echo $CHATTRS_TOKEN"],
+        &[("CHATTRS_TOKEN", "explicit")],
+    );
+    assert_eq!(stdout_text(&out).trim(), "explicit");
+    assert!(!stderr_text(&out).contains("no token"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_warns_when_no_token_is_found() {
+    let dir = tempfile::TempDir::new().expect("temp home");
+    let out = run_exec(dir.path(), &["--as", "w1@h", "sh", "-c", "echo ok"], &[]);
+    assert_eq!(stdout_text(&out).trim(), "ok");
+    assert!(stderr_text(&out).contains("chattrs: no token for w1@h; the broker may refuse"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_default_address_is_the_program_basename_at_the_host() {
+    let dir = tempfile::TempDir::new().expect("temp home");
+    let out = run_exec(dir.path(), &["/bin/sh", "-c", "echo $CHATTRS_ADDRESS"], &[]);
+    let host =
+        gethostname::gethostname().to_string_lossy().split('.').next().unwrap().to_lowercase();
+    assert_eq!(stdout_text(&out).trim(), format!("sh@{host}"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_rejects_a_program_name_that_is_no_address_part() {
+    let dir = tempfile::TempDir::new().expect("temp home");
+    let out = run_exec(dir.path(), &["bad name!"], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr_text(&out).contains("pass --as"), "{}", stderr_text(&out));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_passes_hyphen_args_and_the_exit_code_to_the_program() {
+    let dir = tempfile::TempDir::new().expect("temp home");
+    let out = run_exec(
+        dir.path(),
+        &["--as", "w1@h", "sh", "-c", "echo \"$1 $2\"; exit 7", "x", "--as", "evil@h"],
+        &[],
+    );
+    assert_eq!(out.status.code(), Some(7));
+    assert_eq!(stdout_text(&out).trim(), "--as evil@h");
+}

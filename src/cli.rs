@@ -45,6 +45,8 @@ pub enum Command {
     Skill,
     /// Print shell `export` lines that set up a session: `eval "$(chattrs env --as a@h)"`.
     Env(EnvArgs),
+    /// Run a program with the session env that `env` prints: `chattrs exec claude`.
+    Exec(ExecArgs),
     /// Run as an agent hook: read the hook JSON on stdin, print hook JSON.
     Hook(HookArgs),
     /// Install or remove the chattrs hooks in Claude Code and Codex configs.
@@ -129,6 +131,42 @@ pub struct ServeArgs {
     /// project, address pattern, and role. When set, it replaces `--token`.
     #[arg(long, env = "CHATTRS_TOKENS")]
     pub tokens: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ExecArgs {
+    /// Own address of the session. Default: `<program>@<host>`.
+    #[arg(long = "as", value_name = "ADDRESS")]
+    pub address: Option<String>,
+
+    /// Project of the session (`CHATTRS_PROJECT`, then the repo config).
+    #[arg(long, env = "CHATTRS_PROJECT")]
+    pub project: Option<String>,
+
+    /// Address of the lead (`CHATTRS_LEAD`, then the repo config).
+    #[arg(long, env = "CHATTRS_LEAD")]
+    pub lead: Option<String>,
+
+    /// Broker address for the program.
+    #[arg(long, default_value = DEFAULT_SERVER, env = "CHATTRS_SERVER")]
+    pub server: String,
+
+    /// Agent tags for the program, comma-separated.
+    #[arg(long, env = "CHATTRS_TAGS")]
+    pub tags: Option<String>,
+
+    /// Token for the program. Default: the one for the address.
+    #[arg(long, env = "CHATTRS_TOKEN", hide_env_values = true)]
+    pub token: Option<String>,
+
+    /// The program and its arguments. Everything after the program is its own.
+    #[arg(
+        required = true,
+        trailing_var_arg = true,
+        allow_hyphen_values = true,
+        value_name = "PROGRAM"
+    )]
+    pub command: Vec<String>,
 }
 
 #[derive(clap::Args, Debug)]

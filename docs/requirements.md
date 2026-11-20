@@ -33,6 +33,7 @@ Address = `agent@host`.
 - **CLI-13** `hello` may carry tags. The client sends its OS and architecture, plus any tags in `CHATTRS_TAGS`. `agents` shows them. *(N9)*
 - **CLI-14** `agents` marks an address online while it has a live `watch` connection. *(N9, N12)*
 - **CLI-15** When an address already has a live `watch`, a second `watch` on it warns on stderr. *(N9)* — two sessions do not share an inbox by mistake.
+- **CLI-16** `exec [--as ADDR] PROGRAM [ARGS...]` runs the program with the env that `env` prints. It never adds the token to that env. On Unix it replaces the chattrs process. The default address is `<program>@<hostname>`. *(N1, N3)*
 
 ## Distribution
 
