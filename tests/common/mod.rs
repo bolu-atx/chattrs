@@ -31,3 +31,43 @@ pub fn free_port() -> u16 {
         }
     }
 }
+
+/// The developer's own home, read once before any test changes anything.
+static REAL_HOME: std::sync::OnceLock<Option<std::ffi::OsString>> = std::sync::OnceLock::new();
+
+/// One scratch home per test process. A spawned chattrs sees it as `HOME`,
+/// the XDG dirs, and `CODEX_HOME`, so no test reads or writes the user's
+/// `~/.config`, `~/.claude`, or `~/.codex`.
+fn scratch_home() -> &'static std::path::Path {
+    static HOME: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+    let real = REAL_HOME.get_or_init(|| std::env::var_os("HOME"));
+    HOME.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!("chattrs-test-home-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("make the scratch home");
+        assert!(
+            real.as_deref() != Some(dir.as_os_str()),
+            "the scratch home must not be the real HOME"
+        );
+        dir
+    })
+}
+
+/// A `Command` for a spawned chattrs (or any child) that is cut off from
+/// the user's environment: `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, and
+/// `CODEX_HOME` point into a scratch dir, and every inherited `CHATTRS_*`
+/// variable is removed. Set test variables on the result, after this call.
+pub fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let home = scratch_home();
+    let mut command = std::process::Command::new(program);
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("CHATTRS_") {
+            command.env_remove(name);
+        }
+    }
+    command
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("CODEX_HOME", home.join(".codex"));
+    command
+}

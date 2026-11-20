@@ -133,7 +133,7 @@ async fn cli_watch_all_prints_streamed_messages() {
     let out = dir.path().join("watch.out");
     let file = std::fs::File::create(&out).unwrap();
     let _watcher = ProcChild {
-        child: std::process::Command::new(&bin)
+        child: super::helpers::ports::command(&bin)
             .args(["watch", "--all", "--server", &addr, "--address", "tray@h"])
             .env("CHATTRS_DB", &db)
             .stdout(file)

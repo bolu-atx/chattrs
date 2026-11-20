@@ -34,7 +34,7 @@ impl Broker {
     fn start_with(extra: &[&str]) -> Broker {
         let dir = tempfile::TempDir::new().expect("make a temp dir");
         let db = dir.path().join("c.db");
-        let mut child = Command::new(binary())
+        let mut child = common::command(binary())
             .args(["serve", "--listen", "127.0.0.1:0", "--db", db.to_str().expect("db path")])
             .args(extra)
             .stdin(Stdio::null())
@@ -99,27 +99,11 @@ impl Drop for KillOnDrop {
     }
 }
 
-/// Clear the `CHATTRS_*` overrides that would let the developer's shell
-/// change the result. The address always comes from the caller.
-fn clear_env(command: &mut Command) {
-    command
-        .env_remove("CHATTRS_TOKEN")
-        .env_remove("CHATTRS_AGENT")
-        .env_remove("CHATTRS_SERVER")
-        .env_remove("CHATTRS_DB")
-        .env_remove("CHATTRS_LEAD")
-        .env_remove("CHATTRS_PROJECT")
-        .env_remove("CHATTRS_TAGS")
-        .env_remove("CHATTRS_SESSION")
-        .env("HOME", "/nonexistent-chattrs-test-home");
-}
-
 /// Run one client command with `--server` and `CHATTRS_ADDRESS` set.
 fn run_client(server: &str, address: &str, subcommand: &str, args: &[&str]) -> Output {
-    let mut command = Command::new(binary());
+    let mut command = common::command(binary());
     command.arg(subcommand).arg("--server").arg(server).args(args);
     command.env("CHATTRS_ADDRESS", address);
-    clear_env(&mut command);
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     command.output().expect("run the client")
 }
@@ -286,17 +270,16 @@ fn first_run_creates_the_data_directory() {
     let dir = tempfile::TempDir::new().expect("make a temp dir");
     let db = dir.path().join("new").join("data").join("c.db");
     let closed = format!("127.0.0.1:{}", free_port());
-    let mut command = Command::new(binary());
+    let mut command = common::command(binary());
     command.arg("inbox").arg("--server").arg(&closed);
     command.env("CHATTRS_ADDRESS", "a@h");
     command.env("CHATTRS_DB", &db);
-    command.env_remove("CHATTRS_TOKEN").env_remove("CHATTRS_AGENT").env_remove("CHATTRS_SERVER");
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = command.output().expect("run the client");
     assert_eq!(output.status.code(), Some(0), "first run auto-starts a broker: {output:?}");
     assert!(db.parent().expect("db dir").join("chattrs.log").exists(), "the log is created");
 
-    let mut stop = Command::new(binary());
+    let mut stop = common::command(binary());
     stop.arg("stop").env("CHATTRS_DB", &db);
     stop.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let stopped = stop.output().expect("stop the broker");
@@ -312,11 +295,10 @@ fn errors_go_to_stderr_with_exit_one() {
     let dir = tempfile::TempDir::new().expect("make a temp dir");
     let db = dir.path().join("c.db");
     let closed = format!("127.0.0.1:{}", free_port());
-    let mut command = Command::new(binary());
+    let mut command = common::command(binary());
     command.arg("inbox").arg("--server").arg(&closed);
     command.env("CHATTRS_ADDRESS", "a@h");
     command.env("CHATTRS_DB", &db);
-    command.env_remove("CHATTRS_TOKEN").env_remove("CHATTRS_AGENT").env_remove("CHATTRS_SERVER");
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = command.output().expect("run the client");
     assert_eq!(output.status.code(), Some(0), "inbox auto-starts a broker: {output:?}");
@@ -324,7 +306,7 @@ fn errors_go_to_stderr_with_exit_one() {
     let stderr = stderr_text(&output);
     assert!(stderr.contains("started a broker"), "stderr names the start: {stderr:?}");
 
-    let mut stop = Command::new(binary());
+    let mut stop = common::command(binary());
     stop.arg("stop").env("CHATTRS_DB", &db);
     stop.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let stopped = stop.output().expect("stop the broker");
@@ -335,11 +317,10 @@ fn errors_go_to_stderr_with_exit_one() {
     // A remote server is never auto-started: the failure is an error
     // on stderr with exit 1, and it starts nothing.
     let remote = format!("192.0.2.1:{}", free_port());
-    let mut command = Command::new(binary());
+    let mut command = common::command(binary());
     command.arg("inbox").arg("--server").arg(&remote);
     command.env("CHATTRS_ADDRESS", "a@h");
     command.env("CHATTRS_DB", &db);
-    command.env_remove("CHATTRS_TOKEN").env_remove("CHATTRS_AGENT").env_remove("CHATTRS_SERVER");
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = command.output().expect("run the client");
     assert_eq!(output.status.code(), Some(1), "remote failure exits one: {output:?}");
@@ -424,10 +405,9 @@ fn closed_stdout_does_not_panic() {
     let broker = Broker::start();
     seed_history(&broker.addr, 2000);
 
-    let mut command = Command::new(binary());
+    let mut command = common::command(binary());
     command.arg("log").arg("--server").arg(&broker.addr);
     command.env("CHATTRS_ADDRESS", "reader@h");
-    clear_env(&mut command);
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().expect("spawn log");
     let stdout = child.stdout.take().expect("log stdout");
@@ -460,10 +440,9 @@ fn closed_stdout_does_not_panic() {
 #[test]
 fn watch_stdout_is_json_lines_only() {
     let broker = Broker::start();
-    let mut command = Command::new(binary());
+    let mut command = common::command(binary());
     command.arg("watch").arg("--server").arg(&broker.addr);
     command.env("CHATTRS_ADDRESS", "watcher@h");
-    clear_env(&mut command);
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
     let mut watch = command.spawn().expect("spawn watch");
     let stdout: ChildStdout = watch.stdout.take().expect("watch stdout");
@@ -502,10 +481,9 @@ fn watch_stdout_is_json_lines_only() {
 
 /// Spawn `watch` for `address` with stderr piped.
 fn spawn_watch(server: &str, address: &str) -> KillOnDrop {
-    let mut command = Command::new(binary());
+    let mut command = common::command(binary());
     command.arg("watch").arg("--server").arg(server);
     command.env("CHATTRS_ADDRESS", address);
-    clear_env(&mut command);
     command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
     KillOnDrop(command.spawn().expect("spawn watch"))
 }
@@ -560,13 +538,12 @@ fn run_hook_with(
     stdin: &str,
     flags: &[&str],
 ) -> Output {
-    let mut command = Command::new(binary());
+    let mut command = common::command(binary());
     command.args(["hook", event]).arg("--server").arg(server).args(flags);
     command.env_remove("CHATTRS_ADDRESS");
     if let Some(address) = address {
         command.env("CHATTRS_ADDRESS", address);
     }
-    clear_env(&mut command);
     command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command.spawn().expect("spawn the hook");
     child.stdin.take().expect("hook stdin").write_all(stdin.as_bytes()).expect("write stdin");
@@ -679,7 +656,7 @@ fn hook_debug_file_gets_one_json_line_per_run() {
     let dir = tempfile::TempDir::new().expect("temp dir");
     let log = dir.path().join("hook.log");
     for _ in 0..2 {
-        let mut command = Command::new(binary());
+        let mut command = common::command(binary());
         command.args(["hook", "post-tool-use"]).arg("--server").arg(&broker.addr);
         command.env("CHATTRS_ADDRESS", "b@h").env("CHATTRS_HOOK_DEBUG", &log);
         command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -730,9 +707,8 @@ fn session_start_hook_differs_for_claude_and_codex() {
 /// Run `session-start` for `address` with `CHATTRS_LEAD` set to `lead`, and
 /// return its context text.
 fn session_context(server: &str, address: &str, lead: Option<&str>) -> String {
-    let mut command = Command::new(binary());
+    let mut command = common::command(binary());
     command.args(["hook", "session-start"]).arg("--server").arg(server);
-    clear_env(&mut command);
     command.env("CHATTRS_ADDRESS", address);
     if let Some(lead) = lead {
         command.env("CHATTRS_LEAD", lead);
@@ -813,7 +789,7 @@ impl FakeHome {
 
     /// Run `chattrs hooks ARGS` with HOME in the fake home, from `cwd`.
     fn hooks_in(&self, cwd: &std::path::Path, args: &[&str]) -> Output {
-        let mut command = Command::new(binary());
+        let mut command = common::command(binary());
         command.arg("hooks").args(args);
         command.env("HOME", self.dir.path()).env_remove("CODEX_HOME");
         command.current_dir(cwd);
@@ -982,9 +958,8 @@ fn run_in(
     envs: &[(&str, &str)],
     args: &[&str],
 ) -> Output {
-    let mut command = Command::new(binary());
+    let mut command = common::command(binary());
     command.args(args).current_dir(cwd);
-    clear_env(&mut command);
     command.env("HOME", home).envs(envs.iter().copied());
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     command.output().expect("run chattrs")
@@ -1071,7 +1046,7 @@ fn env_output_evals_in_sh_with_a_fresh_session_and_no_token() {
     };
     assert_ne!(session(&first), session(&second));
     let script = format!("eval '{}'; printf '%s|%s|%s' \"$CHATTRS_ADDRESS\" \"$CHATTRS_TAGS\" \"${{CHATTRS_TOKEN-unset}}\"", first.replace('\'', "'\\''"));
-    let sh = Command::new("sh").args(["-c", &script]).current_dir(cwd).output().unwrap();
+    let sh = common::command("sh").args(["-c", &script]).current_dir(cwd).output().unwrap();
     assert_eq!(stdout_text(&sh), "w@h|it's $(touch pwned) \\\"x|unset");
     assert!(!cwd.join("pwned").exists());
     let with = stdout_text(&run_in(cwd, cwd, &[], &["env", "--as", "w@h", "--with-token"]));
@@ -1097,17 +1072,16 @@ fn first_command_retries_when_a_starting_broker_drops_the_connection() {
         let (stream, _) = listener.accept().expect("accept the client");
         drop(stream);
     });
-    let mut command = Command::new(binary());
+    let mut command = common::command(binary());
     command.arg("inbox").arg("--server").arg(&addr);
     command.env("CHATTRS_ADDRESS", "a@h");
     command.env("CHATTRS_DB", &db);
-    command.env_remove("CHATTRS_TOKEN").env_remove("CHATTRS_AGENT").env_remove("CHATTRS_SERVER");
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let output = command.output().expect("run the client");
     dropper.join().expect("stand-in thread");
     assert_eq!(output.status.code(), Some(0), "a drop during start is retried: {output:?}");
 
-    let mut stop = Command::new(binary());
+    let mut stop = common::command(binary());
     stop.arg("stop").env("CHATTRS_DB", &db);
     stop.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let stopped = stop.output().expect("stop the broker");
@@ -1122,7 +1096,7 @@ struct StopOnDrop {
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        let mut stop = Command::new(binary());
+        let mut stop = common::command(binary());
         stop.arg("stop");
         clean_home_env(&mut stop, &self.home);
         stop.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
@@ -1132,7 +1106,6 @@ impl Drop for StopOnDrop {
 
 /// Point every path the client reads at `home` and clear the overrides.
 fn clean_home_env(command: &mut Command, home: &std::path::Path) {
-    clear_env(command);
     command
         .env("HOME", home)
         .env("CODEX_HOME", home.join(".codex"))
@@ -1166,7 +1139,7 @@ fn readme_solo_path_works_in_a_clean_home() {
     std::fs::create_dir_all(home.join(".claude")).expect("claude dir");
     std::fs::create_dir_all(home.join(".codex")).expect("codex dir");
     let run = |args: &[&str], envs: &[(&str, &str)]| -> Output {
-        let mut command = Command::new(binary());
+        let mut command = common::command(binary());
         command.args(args);
         clean_home_env(&mut command, &home);
         command.envs(envs.iter().copied());

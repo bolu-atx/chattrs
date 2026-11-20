@@ -9,7 +9,7 @@ use tokio::io::BufReader as TokioBufReader;
 use tokio::net::TcpStream as TokioTcpStream;
 
 #[path = "../../../tests/common/mod.rs"]
-mod ports;
+pub(super) mod ports;
 
 pub(crate) async fn spawn() -> (String, TempDir, tokio::task::JoinHandle<()>) {
     let dir = TempDir::new().unwrap();
@@ -222,7 +222,7 @@ pub(crate) fn free_addr() -> String {
 }
 
 pub(crate) fn start_server(bin: &std::path::Path, addr: &str, db: &std::path::Path) -> ProcChild {
-    let child = std::process::Command::new(bin)
+    let child = ports::command(bin)
         .arg("serve")
         .arg("--listen")
         .arg(addr)
@@ -254,7 +254,7 @@ pub(crate) fn start_topic_watch(
     db: &std::path::Path,
 ) -> ProcChild {
     let file = std::fs::File::create(out).expect("watch output file");
-    let mut command = std::process::Command::new(bin);
+    let mut command = ports::command(bin);
     command.arg("watch").arg("--server").arg(addr).arg("--address").arg(who);
     for topic in topics {
         command.arg("--topic").arg(topic);
@@ -330,7 +330,7 @@ pub(crate) fn start_ask(
 ) -> ProcChild {
     let out_file = std::fs::File::create(files.0).expect("ask output file");
     let err_file = std::fs::File::create(files.1).expect("ask error file");
-    let mut command = std::process::Command::new(bin);
+    let mut command = ports::command(bin);
     command
         .arg("ask")
         .arg("--server")
@@ -388,7 +388,7 @@ pub(crate) fn run_chattrs(
     extra: &[&str],
     db: &std::path::Path,
 ) -> std::process::Output {
-    std::process::Command::new(bin)
+    ports::command(bin)
         .arg(subcommand)
         .arg("--server")
         .arg(addr)
