@@ -120,6 +120,21 @@ entry or a file; `--force` replaces them. Then it runs the plain `setup`. The
 project is not in the join string; it comes from `.chattrs.toml`, else
 `default`.
 
+### Check a host: `doctor` (SETUP-3)
+
+Run `chattrs doctor` in the environment of an agent (with `CHATTRS_ADDRESS`
+set, or pass `--as`). It prints one line per check, `ok   <check>: ...` or
+`FAIL <check>: ... <fix hint>`, and exits 1 on any failure. It checks the
+config files, the token file each identity uses (mode 0600), that the broker
+accepts a connection, that the broker accepts the token for the project and
+address, the protocol version, the hooks, and the skill text. It never prints
+a token. It is read-only: it writes no file and reads no message. The token
+check says `hello` as an observer, which the broker never records as an agent.
+The welcome does not carry the token's role, so doctor shows the project only.
+A `[tokens]` glob cannot be tested; doctor skips it. Codex hook trust cannot
+be detected, so doctor always ends with a reminder to trust the hooks in
+`/hooks` in Codex.
+
 ## Install
 
 ```bash
@@ -172,7 +187,7 @@ that holds `</agent-message` is escaped, so it cannot close the wrapper.
 
 ## Commands
 
-Every command except `serve`, `stop`, `skill`, `env`, `setup`, and `hooks` takes the
+Every command except `serve`, `stop`, `skill`, `env`, `setup`, `doctor`, and `hooks` takes the
 [common flags](#environment-and-config). Every one except `status`, `projects`,
 `hook`, and `watch` first prints unread messages, then its own output, and
 acks them (MSG-5). Announcements never reach an inbox.
@@ -192,6 +207,7 @@ acks them (MSG-5). Announcements never reach an inbox.
 | `status working\|idle\|waiting` | Report the own state. Best effort: it never starts a broker, gives up after about 2 s, and always exits 0. |
 | `env --as ADDR [--project P] [--lead ADDR] [--server S] [--tags T] [--token T] [--with-token]` | Print `export` lines for one session: `eval "$(chattrs env --as a@h)"`. It makes a new `CHATTRS_SESSION` on every run. It omits the token unless `--with-token`. |
 | `setup` | Install the hooks and the skill for each agent found (Claude Code, Codex). Write a starter `config.toml` only if missing. Safe to run again. `setup --broker --hosts a,b [...]` prepares a broker host; `setup --join STRING\|-` stores join-string tokens. See [Several hosts](#several-hosts-setup---broker-and-setup---join-setup-2). |
+| `doctor [--as ADDR] [--server S]` | Check config, token files, broker, token, protocol, hooks, and skill. One `ok` or `FAIL` line each; exit 1 on any failure. Read-only. See [Check a host](#check-a-host-doctor-setup-3). |
 | `hooks install\|remove [--agent claude\|codex\|all] [--project]` | Edit the hook entries in the agent configs. See [Hooks](#hooks-claude-code-and-codex). |
 | `hook EVENT` | Run as a hook. Reads hook JSON on stdin. Not for direct use. |
 | `skill` | Print the bundled agent skill. Needs no connection or address. |

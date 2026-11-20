@@ -49,6 +49,8 @@ pub enum Command {
     Hook(HookArgs),
     /// Install or remove the chattrs hooks in Claude Code and Codex configs.
     Hooks(HooksArgs),
+    /// Check this host end to end: config, broker, token, hooks, skill. Read-only.
+    Doctor(DoctorArgs),
     /// Set up this host (hooks, skill, config), a broker host (`--broker`), or join a broker (`--join`).
     Setup(SetupArgs),
 }
@@ -500,4 +502,27 @@ pub struct SetupArgs {
     /// Replace an existing token file and config entry for the same pattern.
     #[arg(long, requires = "join")]
     pub force: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct DoctorArgs {
+    /// Broker address (default: the `server` line of the config, else the local broker).
+    #[arg(long, env = "CHATTRS_SERVER")]
+    pub server: Option<String>,
+
+    /// Own address, as `user@host`.
+    #[arg(long = "as", alias = "address", env = "CHATTRS_ADDRESS")]
+    pub address: Option<String>,
+
+    /// Agent name for the default address, as in `<agent>@<hostname>`.
+    #[arg(long, env = "CHATTRS_AGENT")]
+    pub agent: Option<String>,
+
+    /// Project to check (default: the repo config).
+    #[arg(long, env = "CHATTRS_PROJECT")]
+    pub project: Option<String>,
+
+    /// Token that overrides every token file.
+    #[arg(long, env = "CHATTRS_TOKEN", hide_env_values = true)]
+    pub token: Option<String>,
 }

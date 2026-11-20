@@ -116,6 +116,30 @@ pub fn run(action: HooksAction) -> Result<(), String> {
     Ok(())
 }
 
+/// The events of `agent` that lack a chattrs hook in the user-level config,
+/// with the config path. Read-only: a missing file means every event lacks one.
+pub(crate) fn missing_hooks(agent: HooksAgent) -> Result<(PathBuf, Vec<&'static str>), String> {
+    let agent = match agent {
+        HooksAgent::Codex => Agent::Codex,
+        HooksAgent::Claude | HooksAgent::All => Agent::Claude,
+    };
+    let path = agent.config_path(false)?;
+    let original = match fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("read {}: {error}", path.display())),
+    };
+    let root = parse_root(original.as_deref(), &path)?;
+    let installed = |event: &str| {
+        root.get("hooks")
+            .and_then(|hooks| hooks.get(event))
+            .and_then(Value::as_array)
+            .is_some_and(|groups| groups.iter().any(|g| group_hooks(g).iter().any(is_own_command)))
+    };
+    let missing = EVENTS.iter().map(|(event, _)| *event).filter(|e| !installed(e)).collect();
+    Ok((path, missing))
+}
+
 /// Edit one agent's config. Returns true when the agent was handled, false
 /// when `--agent all` skipped it for a missing config directory.
 fn edit_agent(

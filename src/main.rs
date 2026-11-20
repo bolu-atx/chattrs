@@ -16,6 +16,7 @@ mod autostart;
 mod cli;
 mod client;
 mod config;
+mod doctor;
 mod hook;
 mod hook_install;
 mod model;
@@ -38,6 +39,8 @@ use store::Store;
 #[derive(Debug)]
 pub(crate) enum RunError {
     Message(String),
+    /// A command already printed its failures; exit 1 without a message.
+    Reported,
     BrokenPipe,
     Timeout,
 }
@@ -73,10 +76,15 @@ fn main() {
     // before clap reads them. A bad file stops the command, except a hook,
     // which must never break the agent. This runs before the tokio runtime
     // starts, so no other thread can read the environment while it is set.
-    if let Err(error) = load_config() {
-        eprintln!("chattrs: {error}");
-        if std::env::args().nth(1).as_deref() != Some("hook") {
-            std::process::exit(1);
+    // Doctor reads the config files itself, so it can report a bad one and
+    // tell a `CHATTRS_TOKEN` override from a token file.
+    let first = std::env::args().nth(1);
+    if first.as_deref() != Some("doctor") {
+        if let Err(error) = load_config() {
+            eprintln!("chattrs: {error}");
+            if first.as_deref() != Some("hook") {
+                std::process::exit(1);
+            }
         }
     }
     let args = Args::parse();
@@ -91,6 +99,7 @@ fn main() {
         Ok(()) => 0,
         Err(RunError::BrokenPipe) => 0,
         Err(RunError::Timeout) => 2,
+        Err(RunError::Reported) => 1,
         Err(RunError::Message(error)) => {
             eprintln!("chattrs: {error}");
             1
@@ -153,6 +162,7 @@ async fn run(args: Args) -> Result<(), RunError> {
         Command::Skill => cmd_skill(),
         Command::Env(c) => cmd_env(c),
         Command::Setup(c) => setup::run(c).map_err(RunError::Message),
+        Command::Doctor(c) => doctor::run(c).await,
         Command::Log(c) => cmd_log(c).await,
         Command::Agents(c) => cmd_agents(c).await,
         Command::Projects(c) => cmd_projects(c).await,
