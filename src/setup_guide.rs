@@ -142,12 +142,8 @@ async fn detect() -> Local {
     let cwd = std::env::current_dir().unwrap_or_default();
     let config = config::load_from(home.as_deref(), &cwd).unwrap_or_default();
     let server = Settings::resolve(&process_env, &config).server;
-    let loopback = autostart::is_loopback_server(&server);
     let failed: Vec<&doctor::Check> = report.checks().filter(|check| !check.pass).collect();
-    // A loopback broker that is not running starts on demand.
-    let problem = |check: &&&doctor::Check| !(loopback && check.name == "broker");
-    let problems =
-        failed.iter().filter(problem).map(|c| format!("{}: {}", c.name, c.detail)).collect();
+    let problems = failed.iter().map(|c| format!("{}: {}", c.name, c.detail)).collect();
     let setup_done = home.is_some()
         && report
             .checks()
@@ -257,7 +253,9 @@ fn doctor_step(local: &Local, status: Status) -> Step {
     let command = format!("chattrs doctor --as claude@{}", crate::cli::short_hostname());
     let mut why = String::from(
         "Checks that the broker accepts the token. The guide never sends a hello, so only \
-         doctor can tell, and this step stays todo. Fix every FAIL line, then run doctor again.",
+         doctor can tell, and this step stays todo. Fix every FAIL line, then run doctor again. \
+         On solo, never run `chattrs serve` by hand: the first chattrs command starts the \
+         broker on the right database, and a second broker would split the swarm.",
     );
     if !local.problems.is_empty() {
         why.push_str(&format!(" Failing now: {}.", local.problems.join("; ")));

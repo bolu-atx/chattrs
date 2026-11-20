@@ -319,13 +319,30 @@ fn doctor_says_so_when_the_welcome_has_no_version() {
 }
 
 #[test]
-fn doctor_fails_when_the_broker_is_unreachable() {
+fn doctor_fails_when_a_remote_broker_is_unreachable() {
     let host = healthy_host();
-    let dead = format!("127.0.0.1:{}", common::free_port());
-    let (code, stdout) = host.doctor(&[("CHATTRS_SERVER", &dead)]);
+    // TEST-NET-1 never answers. Doctor never starts a remote broker.
+    let (code, stdout) = host.doctor(&[("CHATTRS_SERVER", "192.0.2.1:9")]);
     assert_eq!(code, 1, "{stdout}");
     assert!(line_with(&stdout, "broker").starts_with("FAIL"), "{stdout}");
+    assert!(stdout.contains("start the broker or fix `server`"), "{stdout}");
     assert!(line_with(&stdout, "token").contains("broker unreachable"), "{stdout}");
+}
+
+#[test]
+fn doctor_passes_when_a_loopback_broker_is_not_running() {
+    let host = healthy_host();
+    let idle = format!("127.0.0.1:{}", common::free_port());
+    let (code, stdout) = host.doctor(&[("CHATTRS_SERVER", &idle)]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        line_with(&stdout, "broker").contains("not running; starts on first use (loopback)"),
+        "{stdout}"
+    );
+    let reason = "not checked, the loopback broker starts on first use";
+    assert!(line_with(&stdout, "token").starts_with("ok") && stdout.contains(reason), "{stdout}");
+    assert!(line_with(&stdout, "protocol").starts_with("ok"), "{stdout}");
+    assert!(TcpStream::connect(&idle).is_err(), "doctor must start nothing");
 }
 
 #[test]
