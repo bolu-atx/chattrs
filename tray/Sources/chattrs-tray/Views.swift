@@ -27,19 +27,28 @@ struct ContentView: View {
     @EnvironmentObject var store: AppStore
     @State private var showSettings = false
     @State private var playhead: Int64?
+    /// nil shows every project.
+    @State private var project: String?
 
     var body: some View {
+        let projects = projectNames(agents: store.agents, messages: store.messages)
+        let agents = store.agents.filter { project == nil || $0.projectName == project }
+        let messages = store.messages.filter { project == nil || $0.projectName == project }
+        let showProjects = projects.count > 1 && project == nil
         VStack(spacing: 0) {
             Header(showSettings: $showSettings)
+            if projects.count > 1 && !showSettings {
+                ProjectPicker(projects: projects, selection: $project)
+            }
             Divider()
             if showSettings {
                 SettingsView(done: { showSettings = false })
             } else {
-                AgentsSection(agents: store.agents)
+                AgentsSection(agents: agents, grouped: showProjects)
                 Divider()
-                ActivityStrip(messages: store.messages, playhead: $playhead)
+                ActivityStrip(messages: messages, playhead: $playhead)
                 Divider()
-                FeedList(messages: store.messages, playhead: playhead)
+                FeedList(messages: messages, playhead: playhead, showProject: showProjects)
             }
             Divider()
             footer
@@ -113,8 +122,30 @@ struct Header: View {
     }
 }
 
+/// Shown once the broker has more than one project.
+struct ProjectPicker: View {
+    let projects: [String]
+    @Binding var selection: String?
+
+    var body: some View {
+        Picker("Project", selection: $selection) {
+            Text("All projects").tag(String?.none)
+            Divider()
+            ForEach(projects, id: \.self) { Text($0).tag(String?.some($0)) }
+        }
+        .pickerStyle(.menu)
+        .fixedSize()
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, Theme.pad).padding(.bottom, 10)
+        .onChange(of: projects) { list in
+            if let s = selection, !list.contains(s) { selection = nil }
+        }
+    }
+}
+
 struct AgentsSection: View {
     let agents: [Agent]
+    var grouped = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -126,8 +157,14 @@ struct AgentsSection: View {
                 ScrollView {
                     TimelineView(.periodic(from: .now, by: 5)) { ctx in
                         VStack(alignment: .leading, spacing: 6) {
-                            ForEach(sorted(agents, now: ctx.date)) { a in
-                                AgentRow(agent: a, now: ctx.date)
+                            if grouped {
+                                ForEach(Dictionary(grouping: agents, by: \.projectName).sorted { $0.key < $1.key }, id: \.key) { name, list in
+                                    Text(name).font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                                        .padding(.top, 2)
+                                    ForEach(sorted(list, now: ctx.date)) { AgentRow(agent: $0, now: ctx.date) }
+                                }
+                            } else {
+                                ForEach(sorted(agents, now: ctx.date)) { AgentRow(agent: $0, now: ctx.date) }
                             }
                         }
                     }
@@ -196,6 +233,7 @@ struct StatusPixel: View {
 struct FeedList: View {
     let messages: [Message]
     let playhead: Int64?
+    var showProject = false
     @State private var expanded: Set<Int64> = []
 
     /// Messages within this many ms of the playhead are highlighted.
@@ -243,6 +281,9 @@ struct FeedList: View {
             HStack(spacing: 6) {
                 route(m).font(.callout).lineLimit(1).truncationMode(.middle)
                 Spacer(minLength: 8)
+                if showProject {
+                    Text(m.projectName).font(.caption).foregroundStyle(.tertiary).lineLimit(1)
+                }
                 Text(Self.clock.string(from: Date(timeIntervalSince1970: Double(m.ts) / 1000)))
                     .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
                 Pixel(color: m.ackedAt == nil ? Theme.amber : .clear, size: 6)

@@ -11,16 +11,21 @@ public struct Agent: Sendable, Equatable, Identifiable, Decodable {
     /// Self-reported "working", "idle", or "waiting" (MON-4), and when it was set.
     public let state: String?
     public let stateAt: Int64?
-    public var id: String { address }
+    /// NS-1 namespace. The same address in two projects is two agents.
+    public let project: String?
+    public var projectName: String { project ?? defaultProject }
+    public var id: String { projectName + "/" + address }
 
     enum CodingKeys: String, CodingKey {
-        case address, online, state
+        case address, online, state, project
         case lastSeen = "last_seen"
         case stateAt = "state_at"
     }
 
-    public init(address: String, lastSeen: Int64? = nil, online: Bool? = nil, state: String? = nil, stateAt: Int64? = nil) {
-        self.address = address; self.lastSeen = lastSeen; self.online = online; self.state = state; self.stateAt = stateAt
+    public init(address: String, lastSeen: Int64? = nil, online: Bool? = nil, state: String? = nil,
+                stateAt: Int64? = nil, project: String? = nil) {
+        self.address = address; self.lastSeen = lastSeen; self.online = online
+        self.state = state; self.stateAt = stateAt; self.project = project
     }
 
     /// Offline wins over state. A missing, unknown, or 15-minute-old state is unknown.
@@ -32,6 +37,9 @@ public struct Agent: Sendable, Equatable, Identifiable, Decodable {
         return AgentStatus(rawValue: state) ?? .unknown
     }
 }
+
+/// A broker without projects (before NS-1) puts everything in this one.
+public let defaultProject = "default"
 
 public enum AgentStatus: String, Sendable {
     case working, waiting, idle, unknown, offline
@@ -46,9 +54,11 @@ public struct Message: Sendable, Equatable, Identifiable, Decodable {
     public let replyTo: Int64?
     public let topic: String?
     public let ackedAt: Int64?
+    public let project: String?
+    public var projectName: String { project ?? defaultProject }
 
     enum CodingKeys: String, CodingKey {
-        case id, from, to, body, ts, topic
+        case id, from, to, body, ts, topic, project
         case replyTo = "reply_to"
         case ackedAt = "acked_at"
     }
@@ -98,7 +108,8 @@ public enum Wire {
 
     public static func hello(address: String, token: String?) -> Data {
         // observer: an older broker ignores the field and records the address.
-        var f: [String: Any] = ["type": "hello", "v": 1, "address": address, "observer": true]
+        // project "*": see every project. A broker before NS-1 ignores it.
+        var f: [String: Any] = ["type": "hello", "v": 1, "address": address, "observer": true, "project": "*"]
         if let token, !token.isEmpty { f["token"] = token }
         return encode(f)
     }
