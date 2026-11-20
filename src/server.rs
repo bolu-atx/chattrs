@@ -97,6 +97,10 @@ pub(crate) fn set_keepalive(stream: &TcpStream) {
 #[derive(Default)]
 struct ConnState {
     address: Option<String>,
+    /// True after an observer `hello`: never recorded, never online.
+    observer: bool,
+    /// True after an observer `watch` with `all`: every new message.
+    watch_all: bool,
     watch_topics: Option<Vec<String>>,
     /// Held while this connection counts in `Broker::watchers`. Its drop
     /// decrements, on every exit path.
@@ -118,6 +122,9 @@ impl ConnState {
     /// the highest id sent and dropping a satisfied `wait` id.
     fn pushed(&mut self, message: &Message) -> Option<Outbound> {
         let address = self.address.as_deref()?;
+        if self.watch_all {
+            return Some(Outbound::Message(message.clone()));
+        }
         let mut deliver = false;
         if let Some(topics) = &self.watch_topics {
             let matches = if topics.is_empty() {
@@ -302,6 +309,8 @@ impl Broker {
                 Event::Push(Push::Message(message)) => {
                     Ok(conn.pushed(&message).into_iter().collect())
                 }
+                // A slow observer lags the bounded broadcast and is dropped here, so a
+                // send never waits on it. It reconnects and catches up from `log`.
                 Event::Push(Push::Lagged) => break,
                 Event::Push(Push::Closed) => {
                     conn.push_rx = None;
@@ -318,7 +327,7 @@ impl Broker {
             }
         }
         self.count_watch(&mut conn, false);
-        if let Some(address) = conn.address.clone() {
+        if let Some(address) = conn.address.clone().filter(|_| !conn.observer) {
             let _ = self.store.touch_agent(address, Vec::new()).await;
         }
         let _ = writer.shutdown().await;
@@ -332,11 +341,22 @@ impl Broker {
     ) -> Result<Vec<Outbound>, WireError> {
         if conn.address.is_none() {
             return match frame {
-                Inbound::Hello { v, address, token, tags } => {
-                    self.on_hello(conn, v, address, token, tags).await
+                Inbound::Hello { v, address, token, tags, observer } => {
+                    self.on_hello(conn, v, address, token, tags, observer).await
                 }
                 _ => Err(WireError::new("hello_required", "hello must be the first frame")),
             };
+        }
+        if conn.observer
+            && matches!(
+                frame,
+                Inbound::Send { .. } | Inbound::Ack { .. } | Inbound::Wait { .. } | Inbound::Inbox
+            )
+        {
+            return Err(WireError::new(
+                "observer_read_only",
+                "an observer connection is read-only",
+            ));
         }
         match frame {
             Inbound::Hello { .. } => Err(WireError::new("bad_frame", "hello is already set")),
@@ -345,7 +365,7 @@ impl Broker {
             }
             Inbound::Inbox => self.on_inbox(conn).await,
             Inbound::Ack { ids } => self.on_ack(conn, ids).await,
-            Inbound::Watch { topics } => self.on_watch(conn, topics).await,
+            Inbound::Watch { topics, all } => self.on_watch(conn, topics, all).await,
             Inbound::Wait { reply_to } => self.on_wait(conn, reply_to).await,
             Inbound::Agents => self.on_agents().await,
             Inbound::Log { address, after, limit } => self.on_log(address, after, limit).await,
@@ -359,6 +379,7 @@ impl Broker {
         address: String,
         token: Option<String>,
         tags: Vec<String>,
+        observer: bool,
     ) -> Result<Vec<Outbound>, WireError> {
         if !self.token_ok(token.as_deref()) {
             return Err(WireError::new("bad_token", "token is missing or incorrect"));
@@ -372,14 +393,18 @@ impl Broker {
         if tags.len() > model::MAX_TAGS || tags.iter().any(|tag| tag.len() > model::MAX_TAG_BYTES) {
             return Err(WireError::new("bad_tags", "too many tags or a tag is too long"));
         }
-        self.store.touch_agent(address.clone(), tags).await?;
-        let watching = self.is_watched(&address);
+        if !observer {
+            self.store.touch_agent(address.clone(), tags).await?;
+        }
+        let watching = !observer && self.is_watched(&address);
+        conn.observer = observer;
         conn.address = Some(address.clone());
         Ok(vec![Outbound::Welcome {
             server: protocol::SERVER_NAME.to_string(),
             v: model::PROTOCOL_VERSION,
             address,
             watching,
+            observer,
         }])
     }
 
@@ -475,11 +500,19 @@ impl Broker {
         &self,
         conn: &mut ConnState,
         topics: Vec<String>,
+        all: bool,
     ) -> Result<Vec<Outbound>, WireError> {
+        if all && !conn.observer {
+            return Err(WireError::new("not_observer", "watch all needs an observer hello"));
+        }
         if topics.iter().any(|topic| !model::is_valid_topic(topic)) {
             return Err(WireError::new("bad_topic", "topic is invalid"));
         }
         conn.subscribe(&self.pushed);
+        if all {
+            conn.watch_all = true;
+            return Ok(Vec::new());
+        }
         conn.watch_topics = Some(topics.clone());
         self.count_watch(conn, topics.is_empty());
         let from = conn.address.clone().unwrap_or_default();
@@ -509,7 +542,7 @@ impl Broker {
     /// Make this connection count as a live inbox watch, or not. Safe to
     /// call again: the connection counts at most once.
     fn count_watch(&self, conn: &mut ConnState, inbox_watch: bool) {
-        let Some(address) = conn.address.clone() else {
+        let Some(address) = conn.address.clone().filter(|_| !conn.observer) else {
             return;
         };
         if conn.watch_guard.is_some() == inbox_watch {

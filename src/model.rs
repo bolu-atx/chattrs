@@ -135,6 +135,11 @@ pub enum Inbound {
         /// when empty.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tags: Vec<String>,
+        /// Monitor the swarm without joining it: the address is not
+        /// recorded or listed, and never counts as online. Absent when
+        /// false.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        observer: bool,
     },
     /// Store a message for the `to` address. The broker fills in `from`.
     /// With no `to`, the broker answers `reply_to` to its sender instead.
@@ -166,9 +171,13 @@ pub enum Inbound {
     /// Stream every unread message, then each new one, as `message` frames.
     /// With topics, stream announcements to those rooms instead of the
     /// inbox watch. An empty list is the inbox watch.
+    /// With `all` on an observer connection, stream every new message,
+    /// direct and announcements, and ack nothing.
     Watch {
         #[serde(default)]
         topics: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
     },
     /// Wait for the lowest-id message to the `hello` address with this
     /// `reply_to`, acked or not. The broker answers at once when one
@@ -191,6 +200,10 @@ pub enum Outbound {
         /// `hello` time. Absent when false, and from an older broker.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         watching: bool,
+        /// Echoes `observer: true` from the `hello`. Absent when false,
+        /// and from an older broker, which never echoes it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        observer: bool,
     },
     /// Confirms a stored message with its id. `known` is `false` when the
     /// `to` address never said `hello`. It is absent when the send has no

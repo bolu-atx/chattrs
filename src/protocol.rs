@@ -29,12 +29,19 @@ mod tests {
     #[test]
     fn inbound_frames_round_trip() {
         let frames = vec![
-            Inbound::Hello { v: 1, address: "codex@box1".into(), token: None, tags: vec![] },
+            Inbound::Hello {
+                v: 1,
+                address: "codex@box1".into(),
+                token: None,
+                tags: vec![],
+                observer: false,
+            },
             Inbound::Hello {
                 v: 1,
                 address: "codex@box1".into(),
                 token: Some("s3cret".into()),
                 tags: vec!["os:linux".into(), "gpu".into()],
+                observer: false,
             },
             Inbound::Send {
                 to: Some("opus@mac".into()),
@@ -51,8 +58,8 @@ mod tests {
             Inbound::Send { to: None, body: "hi".into(), reply_to: Some(3), topic: None },
             Inbound::Inbox,
             Inbound::Ack { ids: vec![12, 13] },
-            Inbound::Watch { topics: vec![] },
-            Inbound::Watch { topics: vec!["release-26".into()] },
+            Inbound::Watch { topics: vec![], all: false },
+            Inbound::Watch { topics: vec!["release-26".into()], all: false },
             Inbound::Wait { reply_to: 12 },
             Inbound::Agents,
             Inbound::Log { address: None, after: 0, limit: 500 },
@@ -94,6 +101,7 @@ mod tests {
                 v: 1,
                 address: "codex@box1".into(),
                 watching: false,
+                observer: false,
             },
             Outbound::Sent { id: 12, known: None },
             Outbound::Inbox { messages: vec![message.clone()] },
@@ -123,10 +131,24 @@ mod tests {
     fn hello_tags_are_optional_on_the_wire() {
         let old: Inbound =
             serde_json::from_str(r#"{"type":"hello","v":1,"address":"a@h"}"#).unwrap();
-        assert_eq!(old, Inbound::Hello { v: 1, address: "a@h".into(), token: None, tags: vec![] });
-        let line =
-            encode(&Inbound::Hello { v: 1, address: "a@h".into(), token: None, tags: vec![] })
-                .unwrap();
+        assert_eq!(
+            old,
+            Inbound::Hello {
+                v: 1,
+                address: "a@h".into(),
+                token: None,
+                tags: vec![],
+                observer: false
+            }
+        );
+        let line = encode(&Inbound::Hello {
+            v: 1,
+            address: "a@h".into(),
+            token: None,
+            tags: vec![],
+            observer: false,
+        })
+        .unwrap();
         assert!(!line.contains("tags"), "empty tags are omitted: {line}");
     }
 
@@ -138,6 +160,7 @@ mod tests {
                 address: "a@h".into(),
                 token: None,
                 tags: vec![],
+                observer: false,
             })
             .unwrap(),
             serde_json::to_value(Inbound::Send {
@@ -147,13 +170,14 @@ mod tests {
                 topic: None,
             })
             .unwrap(),
-            serde_json::to_value(Inbound::Watch { topics: vec![] }).unwrap(),
+            serde_json::to_value(Inbound::Watch { topics: vec![], all: false }).unwrap(),
             serde_json::to_value(Inbound::Wait { reply_to: 12 }).unwrap(),
             serde_json::to_value(Outbound::Welcome {
                 server: "chattrs".into(),
                 v: 1,
                 address: "a@h".into(),
                 watching: false,
+                observer: false,
             })
             .unwrap(),
             serde_json::to_value(Outbound::Sent { id: 1, known: None }).unwrap(),
@@ -175,7 +199,7 @@ mod tests {
     #[test]
     fn watch_without_topics_is_the_inbox_watch() {
         let frame: Inbound = decode("{\"type\":\"watch\"}\n").unwrap();
-        assert_eq!(frame, Inbound::Watch { topics: vec![] });
+        assert_eq!(frame, Inbound::Watch { topics: vec![], all: false });
     }
 
     #[test]
@@ -205,5 +229,41 @@ mod tests {
             Ok(Outbound::Welcome { watching, .. }) => assert!(!watching),
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn observer_fields_are_optional_on_the_wire() {
+        let hello: Inbound =
+            serde_json::from_str(r#"{"type":"hello","v":1,"address":"a@h"}"#).unwrap();
+        assert!(matches!(hello, Inbound::Hello { observer: false, .. }));
+        let watch: Inbound = serde_json::from_str(r#"{"type":"watch"}"#).unwrap();
+        assert_eq!(watch, Inbound::Watch { topics: vec![], all: false });
+        let welcome = r#"{"type":"welcome","server":"chattrs","v":1,"address":"a@h"}"#;
+        assert!(matches!(
+            decode::<Outbound>(welcome),
+            Ok(Outbound::Welcome { observer: false, .. })
+        ));
+        let hello_line = encode(&Inbound::Hello {
+            v: 1,
+            address: "a@h".into(),
+            token: None,
+            tags: vec![],
+            observer: false,
+        })
+        .unwrap();
+        let watch_line = encode(&Inbound::Watch { topics: vec![], all: false }).unwrap();
+        let welcome_line = encode(&Outbound::Welcome {
+            server: "chattrs".into(),
+            v: 1,
+            address: "a@h".into(),
+            watching: false,
+            observer: false,
+        })
+        .unwrap();
+        for line in [hello_line, watch_line, welcome_line] {
+            assert!(!line.contains("observer") && !line.contains("\"all\""), "{line}");
+        }
+        let on = encode(&Inbound::Watch { topics: vec![], all: true }).unwrap();
+        assert!(on.contains("\"all\":true"), "{on}");
     }
 }

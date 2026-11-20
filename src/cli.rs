@@ -176,6 +176,11 @@ pub struct WatchArgs {
     /// announcements, then each new one.
     #[arg(long)]
     pub topic: Vec<String>,
+
+    /// Observe all swarm traffic, direct messages and announcements, as an
+    /// observer that is not an agent. Never acks.
+    #[arg(long, conflicts_with = "topic")]
+    pub all: bool,
 }
 
 #[derive(clap::Args, Debug)]

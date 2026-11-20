@@ -125,7 +125,7 @@ impl Client {
     /// broker on demand and retry once on a fresh connection. Any
     /// other failure returns the original connect error.
     pub async fn connect(endpoint: &Endpoint) -> Result<Client, ClientError> {
-        Client::open(endpoint, true).await
+        Client::open(endpoint, true, false).await
     }
 
     /// Connect again after a drop. A reconnect never starts a broker:
@@ -133,10 +133,14 @@ impl Client {
     /// under a waiting `ask` or `watch` is not replaced behind the
     /// operator's back, possibly on another database.
     pub async fn reconnect(endpoint: &Endpoint) -> Result<Client, ClientError> {
-        Client::open(endpoint, false).await
+        Client::open(endpoint, false, false).await
     }
 
-    async fn open(endpoint: &Endpoint, may_start: bool) -> Result<Client, ClientError> {
+    async fn open(
+        endpoint: &Endpoint,
+        may_start: bool,
+        observer: bool,
+    ) -> Result<Client, ClientError> {
         let stream = match connect_stream(&endpoint.server).await {
             Ok(stream) => stream,
             Err(error)
@@ -161,10 +165,20 @@ impl Client {
                 v: model::PROTOCOL_VERSION,
                 address: endpoint.address.clone(),
                 token: endpoint.token.clone(),
-                tags: hello_tags(std::env::var("CHATTRS_TAGS").ok().as_deref()),
+                tags: if observer {
+                    Vec::new()
+                } else {
+                    hello_tags(std::env::var("CHATTRS_TAGS").ok().as_deref())
+                },
+                observer,
             })
             .await?;
         match frame {
+            Outbound::Welcome { observer: echoed, .. } if observer && !echoed => {
+                Err(ClientError::Protocol(
+                    "the broker does not support observer watch, upgrade the broker".to_string(),
+                ))
+            }
             Outbound::Welcome { watching, .. } => {
                 client.watching = watching;
                 Ok(client)
@@ -510,6 +524,8 @@ pub async fn ack(endpoint: &Endpoint, ids: &[u64]) -> Result<Vec<u64>, ClientErr
 pub struct Watcher {
     endpoint: Endpoint,
     topics: Vec<String>,
+    /// Observer mode: stream all swarm traffic, never ack.
+    all: bool,
     client: Option<Client>,
     backoff_secs: u64,
     /// True after the first successful connect. Later connects are
@@ -521,7 +537,19 @@ impl Watcher {
     /// A stream for `endpoint` over `topics`; an empty list watches the
     /// own inbox.
     pub fn new(endpoint: Endpoint, topics: Vec<String>) -> Watcher {
-        Watcher { endpoint, topics, client: None, backoff_secs: 1, connected_once: false }
+        Watcher {
+            endpoint,
+            topics,
+            all: false,
+            client: None,
+            backoff_secs: 1,
+            connected_once: false,
+        }
+    }
+
+    /// An observer stream of all swarm traffic for `endpoint`.
+    pub fn observer(endpoint: Endpoint) -> Watcher {
+        Watcher { all: true, ..Watcher::new(endpoint, Vec::new()) }
     }
 
     /// Drop the current connection, so the next message reconnects and
@@ -542,11 +570,7 @@ impl Watcher {
     /// Connect and send the `watch` frame. An I/O failure is returned for
     /// the caller to retry; any other failure ends the stream.
     async fn connect(&mut self) -> Result<(), ClientError> {
-        let mut client = if self.connected_once {
-            Client::reconnect(&self.endpoint).await?
-        } else {
-            Client::connect(&self.endpoint).await?
-        };
+        let mut client = Client::open(&self.endpoint, !self.connected_once, self.all).await?;
         self.connected_once = true;
         if client.watching && self.topics.is_empty() {
             eprintln!(
@@ -555,7 +579,7 @@ impl Watcher {
                 self.endpoint.address
             );
         }
-        client.send_frame(&Inbound::Watch { topics: self.topics.clone() }).await?;
+        client.send_frame(&Inbound::Watch { topics: self.topics.clone(), all: self.all }).await?;
         self.client = Some(client);
         self.backoff_secs = 1;
         Ok(())

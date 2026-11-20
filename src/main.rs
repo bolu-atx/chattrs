@@ -180,8 +180,12 @@ async fn cmd_watch(c: cli::WatchArgs) -> Result<(), RunError> {
     if let Some(bad) = c.topic.iter().find(|topic| !model::is_valid_topic(topic)) {
         return Err(RunError::Message(format!("topic is invalid: {bad}")));
     }
-    let announcing = !c.topic.is_empty();
-    let mut watcher = client::Watcher::new(endpoint, c.topic.clone());
+    let announcing = !c.topic.is_empty() || c.all;
+    let mut watcher = if c.all {
+        client::Watcher::observer(endpoint)
+    } else {
+        client::Watcher::new(endpoint, c.topic.clone())
+    };
     loop {
         let message = watcher.next_message().await?;
         write(&output::message_json(&message))?;
