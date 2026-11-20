@@ -43,7 +43,9 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
     // The project resolves from where the agent works, not from where the
     // hook command started.
     if let Some(cwd) = input["cwd"].as_str().filter(|cwd| !cwd.is_empty()) {
-        let _ = std::env::set_current_dir(cwd);
+        if std::env::set_current_dir(cwd).is_ok() {
+            resolve_project_from(std::path::Path::new(cwd));
+        }
     }
     let mut trace = Trace::new(event, input.clone());
     let endpoint = Endpoint {
@@ -74,6 +76,24 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
     // A timeout drops the exchange; unacked messages stay unread.
     let _ = tokio::time::timeout(BUDGET, deliver(event, &endpoint, &mut trace)).await;
     trace.write();
+}
+
+/// Resolve the project from the session `cwd`: its `.chattrs.toml` and its
+/// git repo. The config that `main` exported came from the process cwd, so
+/// it must not win over the one found here. An explicit `CHATTRS_PROJECT`
+/// still wins. A bad config file keeps the project that `main` exported.
+fn resolve_project_from(cwd: &std::path::Path) {
+    let (explicit, applied) = crate::project::split_applied(std::env::var("CHATTRS_PROJECT").ok());
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let config = match crate::config::load_from(home.as_deref(), cwd) {
+        Ok(config) => config.project,
+        Err(_) => applied,
+    };
+    crate::project::set_current(crate::project::resolve(
+        explicit.as_deref(),
+        config.as_deref(),
+        cwd,
+    ));
 }
 
 /// One debug record per hook run, written when `CHATTRS_HOOK_DEBUG` names a

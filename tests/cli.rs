@@ -704,6 +704,56 @@ fn session_start_hook_differs_for_claude_and_codex() {
     assert!(codex.contains("chattrs skill") && !codex.contains("Monitor"));
 }
 
+/// Run `session-start` in process dir `process_dir`, with the hook input
+/// naming `hook_cwd`, and return its context text.
+fn session_context_in(process_dir: &std::path::Path, hook_cwd: &std::path::Path) -> String {
+    let server = format!("127.0.0.1:{}", free_port());
+    let mut command = common::command(binary());
+    command.args(["hook", "session-start"]).arg("--server").arg(server);
+    command.env("CHATTRS_ADDRESS", "b@h").current_dir(process_dir);
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn the hook");
+    let input = serde_json::json!({ "cwd": hook_cwd }).to_string();
+    child.stdin.take().expect("stdin").write_all(input.as_bytes()).expect("write stdin");
+    let output = child.wait_with_output().expect("run the hook");
+    assert_eq!(output.status.code(), Some(0));
+    let value = parse_line(stdout_text(&output).trim());
+    value["hookSpecificOutput"]["additionalContext"].as_str().expect("context").to_string()
+}
+
+#[test]
+fn hook_reads_the_repo_config_from_the_hook_cwd_not_the_process_cwd() {
+    let process_dir = tempfile::tempdir().unwrap();
+    let hook_dir = tempfile::tempdir().unwrap();
+    std::fs::write(process_dir.path().join(".chattrs.toml"), "project = \"procproj\"\n").unwrap();
+    std::fs::write(hook_dir.path().join(".chattrs.toml"), "project = \"hookproj\"\n").unwrap();
+    let text = session_context_in(process_dir.path(), hook_dir.path());
+    assert!(text.contains("Your chattrs project is hookproj."), "{text}");
+}
+
+#[test]
+fn hook_derives_the_project_from_git_in_the_hook_cwd() {
+    let process_dir = tempfile::tempdir().unwrap();
+    std::fs::write(process_dir.path().join(".chattrs.toml"), "project = \"procproj\"\n").unwrap();
+    let repo = tempfile::tempdir().unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["remote", "add", "origin", "https://example.invalid/o/gitrepo.git"][..],
+    ] {
+        let mut command = common::command("git");
+        command
+            .args(args)
+            .current_dir(repo.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        assert!(command.output().expect("run git").status.success(), "git {args:?}");
+    }
+    // No `.chattrs.toml` in the hook cwd, so git decides. The process cwd's
+    // config must not leak in.
+    let text = session_context_in(process_dir.path(), repo.path());
+    assert!(text.contains("Your chattrs project is gitrepo."), "{text}");
+}
+
 /// Run `session-start` for `address` with `CHATTRS_LEAD` set to `lead`, and
 /// return its context text.
 fn session_context(server: &str, address: &str, lead: Option<&str>) -> String {

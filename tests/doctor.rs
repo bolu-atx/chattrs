@@ -87,6 +87,10 @@ impl Host {
     }
 
     fn run(&self, args: &[&str], envs: &[(&str, &str)]) -> Output {
+        self.run_in(self.home(), args, envs)
+    }
+
+    fn run_in(&self, cwd: &Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
         let mut command = common::command(binary());
         command
             .args(args)
@@ -97,7 +101,7 @@ impl Host {
             .env("CHATTRS_ADDRESS", "w1@box1")
             .env_remove("CHATTRS_SESSION")
             .envs(envs.iter().copied())
-            .current_dir(self.home())
+            .current_dir(cwd)
             .stdin(Stdio::null());
         command.output().expect("run chattrs")
     }
@@ -122,12 +126,17 @@ impl Host {
 
 /// A host that passes every check, against a broker with a token table.
 fn healthy_host() -> Host {
+    healthy_host_with(TOKENS)
+}
+
+/// `healthy_host` against a broker that holds the token table `tokens_text`.
+fn healthy_host_with(tokens_text: &str) -> Host {
     let dir = tempfile::TempDir::new().expect("make a temp home");
     let home = dir.path().to_path_buf();
     std::fs::create_dir_all(home.join(".claude")).expect("claude dir");
     std::fs::create_dir_all(home.join(".codex")).expect("codex dir");
     let tokens = home.join("broker-tokens.toml");
-    write_private(&tokens, TOKENS);
+    write_private(&tokens, tokens_text);
     let broker = start_broker(&home, &["--tokens", tokens.to_str().expect("path")]);
     let host = Host { dir, broker };
     let home = host.home();
@@ -360,4 +369,30 @@ fn doctor_fails_when_the_hooks_are_missing() {
     assert_eq!(code, 1, "{stdout}");
     assert!(stdout.contains("FAIL hooks: claude"), "{stdout}");
     assert!(stdout.contains("ok   hooks: codex"), "{stdout}");
+}
+
+#[test]
+fn doctor_names_the_derived_project_when_the_token_is_scoped_elsewhere() {
+    let host = healthy_host_with(
+        "[[token]]\ntoken = \"tok-secret-w1\"\nproject = \"default\"\naddr = \"*@box1\"\nrole = \"agent\"\n",
+    );
+    let repo = tempfile::TempDir::new().expect("repo dir");
+    for args in [
+        &["init", "-q"][..],
+        &["remote", "add", "origin", "https://example.invalid/o/myrepo.git"][..],
+    ] {
+        let mut command = common::command("git");
+        command
+            .args(args)
+            .current_dir(repo.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1");
+        assert!(command.output().expect("run git").status.success(), "git {args:?}");
+    }
+    // `run_in` empties PATH, and the derive needs `git` on it.
+    let path = std::env::var("PATH").expect("PATH");
+    let output = host.run_in(repo.path(), &["doctor"], &[("PATH", &path)]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(output.status.code(), Some(1), "{stdout}");
+    assert!(stdout.contains("token not valid for project myrepo (derived from git)"), "{stdout}");
 }

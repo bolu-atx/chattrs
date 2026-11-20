@@ -89,10 +89,17 @@ pub fn split_applied(value: Option<String>) -> (Option<String>, Option<String>) 
     }
 }
 
+static CURRENT: OnceLock<(String, ProjectSource)> = OnceLock::new();
+
+/// Fix the project of this process before the first `current()` call. A hook
+/// uses it, since its project comes from the session cwd.
+pub fn set_current(project: (String, ProjectSource)) {
+    let _ = CURRENT.set(project);
+}
+
 /// The project of this process, from the environment and the current
 /// directory. Resolved once, since a `watch` reconnects often.
 pub fn current() -> &'static (String, ProjectSource) {
-    static CURRENT: OnceLock<(String, ProjectSource)> = OnceLock::new();
     CURRENT.get_or_init(|| {
         let (explicit, config) = split_applied(std::env::var("CHATTRS_PROJECT").ok());
         let dir = std::env::current_dir().unwrap_or_default();
