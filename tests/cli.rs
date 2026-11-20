@@ -1147,19 +1147,20 @@ fn readme_solo_path_works_in_a_clean_home() {
         command.output().expect("run chattrs")
     };
 
-    let hooks = run(&["hooks", "install"], &[]);
-    assert_eq!(hooks.status.code(), Some(0), "hooks install: {hooks:?}");
+    let setup = run(&["setup"], &[]);
+    assert_eq!(setup.status.code(), Some(0), "setup: {setup:?}");
     for file in [".claude/settings.json", ".codex/hooks.json"] {
         let text = std::fs::read_to_string(home.join(file)).expect("config file written");
         assert!(text.contains("chattrs hook"), "{file} has the hook: {text}");
     }
-
     let skill = run(&["skill"], &[]);
     assert_eq!(skill.status.code(), Some(0), "skill: {skill:?}");
     assert!(!skill.stdout.is_empty(), "the skill text is not empty");
-    let skill_file = home.join(".claude/skills/chattrs/SKILL.md");
-    std::fs::create_dir_all(skill_file.parent().expect("skill dir")).expect("skill dir");
-    std::fs::write(&skill_file, &skill.stdout).expect("write the skill");
+    for file in [".claude/skills/chattrs/SKILL.md", ".codex/skills/chattrs/SKILL.md"] {
+        let text = std::fs::read(home.join(file)).expect("skill file written");
+        assert_eq!(text, skill.stdout, "{file} holds the bundled skill");
+    }
+    assert!(home.join(".config/chattrs/config.toml").is_file(), "setup wrote the config");
 
     let env = run(&["env", "--as", "w1@mac", "--lead", "lead@mac", "--server", &server], &[]);
     assert_eq!(env.status.code(), Some(0), "env: {env:?}");
@@ -1178,4 +1179,115 @@ fn readme_solo_path_works_in_a_clean_home() {
     assert!(stdout_text(&inbox).contains("hello"), "the worker sees the message: {inbox:?}");
 
     assert!(started.elapsed() < Duration::from_secs(10), "too slow: {:?}", started.elapsed());
+}
+
+/// The bytes of every file `setup` or a user may own, keyed by path.
+fn snapshot(home: &std::path::Path, files: &[&str]) -> Vec<Option<Vec<u8>>> {
+    files.iter().map(|file| std::fs::read(home.join(file)).ok()).collect()
+}
+
+#[test]
+fn setup_is_safe_to_run_again() {
+    let dir = tempfile::TempDir::new().expect("make a temp home");
+    let home = dir.path().to_path_buf();
+    std::fs::create_dir_all(home.join(".claude")).expect("claude dir");
+    std::fs::create_dir_all(home.join(".codex")).expect("codex dir");
+    let run_setup = || -> Output {
+        let mut command = common::command(binary());
+        command.arg("setup");
+        clean_home_env(&mut command, &home);
+        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.output().expect("run chattrs setup")
+    };
+    let config = home.join(".config/chattrs/config.toml");
+    let skill = home.join(".claude/skills/chattrs/SKILL.md");
+    let user_files = [".claude/settings.json", ".codex/hooks.json"];
+
+    let first = run_setup();
+    assert_eq!(first.status.code(), Some(0), "first setup: {first:?}");
+    let stderr = String::from_utf8_lossy(&first.stderr).into_owned();
+    assert!(stderr.contains("/hooks in Codex") && stderr.contains("Claude Code"), "{stderr}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&config).expect("config exists").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the config is private");
+    }
+
+    // The user edits the config; an upgrade leaves an old skill text behind.
+    std::fs::write(&config, "server = \"10.0.0.5:4646\"\n").expect("edit the config");
+    std::fs::write(&skill, "old skill text\n").expect("age the skill");
+    let before = snapshot(&home, &user_files);
+    let second = run_setup();
+    assert_eq!(second.status.code(), Some(0), "second setup: {second:?}");
+    assert_eq!(snapshot(&home, &user_files), before, "user settings are untouched");
+    assert_eq!(
+        std::fs::read_to_string(&config).expect("read the config"),
+        "server = \"10.0.0.5:4646\"\n",
+        "an existing config is kept"
+    );
+    let bundled = std::fs::read(home.join(".codex/skills/chattrs/SKILL.md")).expect("codex skill");
+    assert_eq!(std::fs::read(&skill).expect("claude skill"), bundled, "the skill is refreshed");
+}
+
+#[test]
+fn setup_skips_an_agent_that_is_not_installed() {
+    let dir = tempfile::TempDir::new().expect("make a temp home");
+    let home = dir.path().to_path_buf();
+    std::fs::create_dir_all(home.join(".claude")).expect("claude dir");
+    let mut command = common::command(binary());
+    command.arg("setup");
+    clean_home_env(&mut command, &home);
+    // An empty PATH hides any real `codex` binary from detection.
+    command.env("PATH", "");
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = command.output().expect("run chattrs setup");
+    assert_eq!(output.status.code(), Some(0), "setup: {output:?}");
+    assert!(home.join(".claude/skills/chattrs/SKILL.md").is_file());
+    assert!(!home.join(".codex").exists(), "codex dir is not created");
+}
+
+#[test]
+fn env_with_token_picks_the_token_for_the_address() {
+    let dir = tempfile::TempDir::new().expect("make a temp home");
+    let home = dir.path().to_path_buf();
+    let write_token = |name: &str| -> PathBuf {
+        let path = home.join(name);
+        std::fs::write(&path, format!("tok-{name}\n")).expect("write a token");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+        }
+        path
+    };
+    let (plain, lead, host) = (write_token("plain"), write_token("lead"), write_token("host"));
+    let config_dir = home.join(".config/chattrs");
+    std::fs::create_dir_all(&config_dir).expect("config dir");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "token_file = \"{}\"\n[tokens]\n\"*@mac\" = \"{}\"\n\"lead@mac\" = \"{}\"\n",
+            plain.display(),
+            host.display(),
+            lead.display()
+        ),
+    )
+    .expect("write the config");
+    let token_for = |address: &str, token_env: Option<&str>| -> Option<String> {
+        let mut command = common::command(binary());
+        command.args(["env", "--as", address, "--with-token"]);
+        clean_home_env(&mut command, &home);
+        if let Some(token) = token_env {
+            command.env("CHATTRS_TOKEN", token);
+        }
+        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let output = command.output().expect("run chattrs env");
+        assert_eq!(output.status.code(), Some(0), "env: {output:?}");
+        parse_exports(&stdout_text(&output)).remove("CHATTRS_TOKEN")
+    };
+    assert_eq!(token_for("lead@mac", None).as_deref(), Some("tok-lead"));
+    assert_eq!(token_for("w1@mac", None).as_deref(), Some("tok-host"));
+    assert_eq!(token_for("w1@box", None).as_deref(), Some("tok-plain"));
+    assert_eq!(token_for("lead@mac", Some("explicit")).as_deref(), Some("explicit"));
 }

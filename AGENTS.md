@@ -40,6 +40,7 @@ CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to
 | `src/server.rs` | The broker: one dispatch per frame, one broadcast push, `watch`/`wait` as connection state; tests in `src/server/tests/` |
 | `src/client.rs` | One connection per command, returns data and prints nothing; `watch` streams and acks through a `Watcher` on its own connection, `ask` sends, waits, and acks on one connection, `log` pages history |
 | `src/autostart.rs` | On-demand broker: loopback check, detached spawn, pidfile, `stop` |
+| `src/setup.rs` | `chattrs setup`: detect agents, install hooks (via `hook_install`) and the skill, write a missing config |
 | `src/skill.rs` | Embedded agent skill text printed by `chattrs skill` |
 | `skills/chattrs/SKILL.md` | Agent skill: `send`, `ask`, `reply`, no polling |
 

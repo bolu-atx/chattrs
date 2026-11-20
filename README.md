@@ -31,13 +31,18 @@ Install chattrs, then set up the agents once.
 
 ```bash
 brew install bolu-atx/tap/chattrs      # or: npm install -g chattrs
-chattrs hooks install                  # Claude Code and Codex
-mkdir -p ~/.claude/skills/chattrs && chattrs skill > ~/.claude/skills/chattrs/SKILL.md
+chattrs setup                          # hooks and skill for each agent found
 ```
 
-Open Codex once and run `/hooks` to trust the new hooks. Codex gets the
-skill through the session-start hook, which tells it to run `chattrs skill`.
-It needs no skill file.
+`setup` finds Claude Code and Codex. For each one it installs the hooks and
+writes the skill (`~/.claude/skills/chattrs/SKILL.md`,
+`$CODEX_HOME/skills/chattrs/SKILL.md`, default `~/.codex`). It writes
+`~/.config/chattrs/config.toml` (mode 0600, all comments) only when none
+exists. It is safe to run again: it never overwrites your settings or config,
+and it refreshes the skill text after an upgrade.
+
+Then follow the printed trust steps. Open Codex once and run `/hooks` to
+trust the new hooks. Claude Code may ask you to review the hooks.
 
 Now start a lead and a worker in two terminals. Each line sets the
 address, a session, and the lead. Nothing else is needed.
@@ -127,7 +132,7 @@ that holds `</agent-message` is escaped, so it cannot close the wrapper.
 
 ## Commands
 
-Every command except `serve`, `stop`, `skill`, `env`, and `hooks` takes the
+Every command except `serve`, `stop`, `skill`, `env`, `setup`, and `hooks` takes the
 [common flags](#environment-and-config). Every one except `status`, `projects`,
 `hook`, and `watch` first prints unread messages, then its own output, and
 acks them (MSG-5). Announcements never reach an inbox.
@@ -146,6 +151,7 @@ acks them (MSG-5). Announcements never reach an inbox.
 | `projects [--json]` | List every project with its agent and message counts. Read-only. |
 | `status working\|idle\|waiting` | Report the own state. Best effort: it never starts a broker, gives up after about 2 s, and always exits 0. |
 | `env --as ADDR [--project P] [--lead ADDR] [--server S] [--tags T] [--token T] [--with-token]` | Print `export` lines for one session: `eval "$(chattrs env --as a@h)"`. It makes a new `CHATTRS_SESSION` on every run. It omits the token unless `--with-token`. |
+| `setup` | Install the hooks and the skill for each agent found (Claude Code, Codex). Write a starter `config.toml` only if missing. Safe to run again. |
 | `hooks install\|remove [--agent claude\|codex\|all] [--project]` | Edit the hook entries in the agent configs. See [Hooks](#hooks-claude-code-and-codex). |
 | `hook EVENT` | Run as a hook. Reads hook JSON on stdin. Not for direct use. |
 | `skill` | Print the bundled agent skill. Needs no connection or address. |
@@ -177,6 +183,24 @@ is an error that names the file and line. The repo file holds no secrets: a
 `token` or `token_file` key there is an error. `token_file` names a file
 that holds only the token. On unix it must have mode 0600 or tighter. The
 token applies when neither `CHATTRS_TOKEN` nor `--token` is set.
+
+One host can hold several identities (SETUP-4). A `[tokens]` table in the
+user config maps an address or a glob to its own token file:
+
+```toml
+token_file = "/home/me/.config/chattrs/token"          # fallback
+[tokens]
+"lead@mac" = "/home/me/.config/chattrs/lead-token"
+"*@mac" = "/home/me/.config/chattrs/mac-token"
+```
+
+The token for an address comes from the first of these that applies:
+`CHATTRS_TOKEN` or `--token`; the `[tokens]` entry that matches the address
+(an exact address beats a glob, and among globs the longest pattern wins);
+the plain `token_file`. The address is `--as`, `--address`, or `--agent`,
+then `CHATTRS_ADDRESS`, then `CHATTRS_AGENT`. `chattrs env --as ADDR
+--with-token` prints the token for ADDR. The table is only in the user
+config, never in `.chattrs.toml`.
 
 ```toml
 # ~/.config/chattrs/config.toml
@@ -214,13 +238,15 @@ Tags come from the latest `hello`. A command run from another shell without
 ## Teach workers the skill
 
 `chattrs skill` prints the worker skill (`skills/chattrs/SKILL.md`).
+`chattrs setup` installs it for Claude Code and Codex. To install it by
+hand:
 
 ```bash
 mkdir -p ~/.claude/skills/chattrs && chattrs skill > ~/.claude/skills/chattrs/SKILL.md
 ```
 
-For pi, pass that directory with `--skill`. Codex and Muse have no skill
-directory. The lead puts `$(chattrs skill)` in the worker's prompt.
+For pi, pass that directory with `--skill`. Muse has no skill directory:
+the lead puts `$(chattrs skill)` in the worker's prompt.
 
 Give each worker a unique address. Two agents on one address share an
 inbox. There is no default agent name.

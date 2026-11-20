@@ -55,12 +55,7 @@ impl Agent {
         Ok(match (self, project) {
             (Agent::Claude, _) => base.join(".claude/settings.json"),
             (Agent::Codex, true) => base.join(".codex/hooks.json"),
-            (Agent::Codex, false) => match std::env::var_os("CODEX_HOME") {
-                Some(codex_home) if !codex_home.is_empty() => {
-                    PathBuf::from(codex_home).join("hooks.json")
-                }
-                _ => base.join(".codex/hooks.json"),
-            },
+            (Agent::Codex, false) => codex_home(&base).join("hooks.json"),
         })
     }
 
@@ -79,7 +74,15 @@ impl Agent {
     }
 }
 
-fn home() -> Result<PathBuf, String> {
+/// The Codex home: `CODEX_HOME` when set, else `.codex` under `home`.
+pub(crate) fn codex_home(home: &Path) -> PathBuf {
+    match std::env::var_os("CODEX_HOME") {
+        Some(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => home.join(".codex"),
+    }
+}
+
+pub(crate) fn home() -> Result<PathBuf, String> {
     match std::env::var_os("HOME") {
         Some(home) if !home.is_empty() => Ok(PathBuf::from(home)),
         _ => Err("HOME is not set".to_string()),
