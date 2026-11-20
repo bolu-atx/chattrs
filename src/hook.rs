@@ -16,6 +16,8 @@ use crate::client::{self, Client, Endpoint};
 use crate::model::{LoggedMessage, Message, DEFAULT_PROJECT};
 use crate::output;
 
+pub(crate) mod install;
+
 /// Total time for connect plus exchange. The agent waits on the hook, so a
 /// slow broker costs a skipped delivery, not a stalled turn.
 const BUDGET: Duration = Duration::from_millis(300);

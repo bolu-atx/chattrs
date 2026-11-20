@@ -36,16 +36,18 @@ CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to
 | `src/main.rs` | Thin entry: parse `cli`, dispatch to one small function per command, map the result to an exit code |
 | `src/cli.rs` | Clap `Args` + subcommand structs, connection flags |
 | `src/model.rs` | Wire types (`Inbound`, `Outbound`), limits, address validation, serde shapes |
-| `src/exec_host.rs` | `exec --host`: `sh_quote` and the pure builder of the ssh argv (plain and `--detach` tmux script) |
+| `src/exec.rs` | `exec` module root (the command itself still lives in `main.rs`) |
+| `src/exec/host.rs` | `exec --host`: `sh_quote` and the pure builder of the ssh argv (plain and `--detach` tmux script) |
 | `src/output.rs` | Every line the CLI writes to stdout: text rendering, JSON lines, timestamps, the stdout writer |
 | `src/protocol.rs` | Line-JSON framing: `encode`/`decode` |
 | `src/store.rs` | SQLite storage: one `Connection` in `Arc<Mutex<_>>`, blocking calls |
 | `src/server.rs` | The broker: one dispatch per frame, one broadcast push, `watch`/`wait` as connection state; tests in `src/server/tests/` |
 | `src/client.rs` | One connection per command, returns data and prints nothing; `watch` streams and acks through a `Watcher` on its own connection, `ask` sends, waits, and acks on one connection, `log` pages history |
 | `src/autostart.rs` | On-demand broker: loopback check, detached spawn, pidfile, `stop` |
-| `src/setup.rs` | `chattrs setup`: detect agents, install hooks (via `hook_install`) and the skill, write a missing config |
-| `src/setup_broker.rs` | `chattrs setup --broker`: write the broker `tokens.toml` (0600) and a systemd or launchd unit, print join strings |
-| `src/setup_join.rs` | `chattrs setup --join`: parse join strings, write token files, edit `[tokens]` in `config.toml` |
+| `src/setup.rs` | `chattrs setup`: detect agents, install hooks (via `hook/install.rs`) and the skill, write a missing config |
+| `src/setup/broker.rs` | `chattrs setup --broker`: write the broker `tokens.toml` (0600) and a systemd or launchd unit, print join strings |
+| `src/setup/join.rs` | `chattrs setup --join`: parse join strings, write token files, edit `[tokens]` in `config.toml` |
+| `src/hook/install.rs` | `chattrs hooks install` and `hooks remove`: edit the agent hook config files (`hook.rs` holds the hook runtime) |
 | `src/backup.rs` | `chattrs backup`: online copy of the database with the SQLite backup API, temp file then rename, mode 0600 |
 | `src/doctor.rs` | `chattrs doctor`: read-only host check, one `ok`/`FAIL` line per check; probes the broker with an observer `hello` so no agent is recorded |
 | `src/project.rs` | The client project resolver: env, config, git repo name, `default`; runs `git` with a 2 s timeout |

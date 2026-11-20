@@ -10,7 +10,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::cli::{HooksAction, HooksAgent, HooksTarget, SetupArgs};
-use crate::{hook_install, skill};
+use crate::{hook, skill};
+
+mod broker;
+mod join;
 
 /// The starter config. Every line is a comment, so it changes nothing until
 /// the user edits it.
@@ -74,7 +77,7 @@ pub(crate) struct Target {
 /// Claude Code and Codex for the user `home`, each marked found or not.
 pub(crate) fn targets(home: &Path) -> [Target; 2] {
     let claude_dir = home.join(".claude");
-    let codex_dir = hook_install::codex_home(home);
+    let codex_dir = hook::install::codex_home(home);
     [
         Target {
             name: "claude",
@@ -93,7 +96,7 @@ pub(crate) fn targets(home: &Path) -> [Target; 2] {
 
 /// Install the hooks and the skill for one agent.
 fn setup_agent(target: &Target) -> Result<(), String> {
-    hook_install::run(HooksAction::Install(HooksTarget { agent: target.agent, project: false }))?;
+    hook::install::run(HooksAction::Install(HooksTarget { agent: target.agent, project: false }))?;
     let path = target.skills_dir.join("chattrs/SKILL.md");
     let verb = if write_if_changed(&path, skill::text())? { "wrote" } else { "kept" };
     eprintln!("chattrs: {verb} the {} skill {}", target.name, path.display());
@@ -104,17 +107,17 @@ fn setup_agent(target: &Target) -> Result<(), String> {
 /// `--join` stores the tokens first, then the host setup runs as usual.
 pub fn run(args: SetupArgs) -> Result<(), String> {
     if args.broker {
-        return crate::setup_broker::run(&args);
+        return broker::run(&args);
     }
     if !args.join.is_empty() {
-        crate::setup_join::run(&args)?;
+        join::run(&args)?;
     }
     run_host()
 }
 
 /// Hooks, skill, and config for this host.
 fn run_host() -> Result<(), String> {
-    let home = hook_install::home()?;
+    let home = hook::install::home()?;
     let targets = targets(&home);
     for target in targets.iter().filter(|target| !target.detected) {
         eprintln!("chattrs: {} not found, skipped", target.name);

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::SetupArgs;
 use crate::tokens::{is_valid_pattern, parse_pair};
-use crate::{hook_install, setup_broker};
+use crate::{hook, setup::broker};
 
 const SCHEME: &str = "chattrs://";
 
@@ -268,11 +268,11 @@ fn store(home: &Path, joins: &[(Join, String)], force: bool) -> Result<(), Strin
         }
     }
     for (join, pattern, path) in &files {
-        setup_broker::write_file(path, &format!("{}\n", join.token), 0o600, force)?;
-        setup_broker::restrict(path)?;
+        broker::write_file(path, &format!("{}\n", join.token), 0o600, force)?;
+        broker::restrict(path)?;
         eprintln!("chattrs: stored the token for {pattern} in {}", path.display());
     }
-    setup_broker::write_file(&config, &edited, 0o600, true)?;
+    broker::write_file(&config, &edited, 0o600, true)?;
     eprintln!("chattrs: updated {}", config.display());
     Ok(())
 }
@@ -281,7 +281,7 @@ fn store(home: &Path, joins: &[(Join, String)], force: bool) -> Result<(), Strin
 pub fn run(args: &SetupArgs) -> Result<(), String> {
     let strings = collect(&args.join, &mut std::io::stdin())?;
     let joins = resolve(&strings, args.join_as.as_deref())?;
-    store(&hook_install::home()?, &joins, args.force)
+    store(&hook::install::home()?, &joins, args.force)
 }
 
 #[cfg(test)]
