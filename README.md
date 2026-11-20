@@ -113,7 +113,8 @@ only; it never acks.
 | `watch` | Stream new messages as JSON lines forever, acking what is printed. With `--topic SLUG` (repeatable), stream that room's announcements instead, without acking. |
 | `ask` | Post to `--to ADDR` and block for the reply (`--timeout SECS`, default 600, `0` means no limit). Names the workstream with `--topic SLUG`. Exits 0 on a reply, 2 on a timeout. |
 | `watch --all` | Observe every message, direct and announcements, as JSON lines. Connects as an observer, never acks, and exits 1 on a broker without observer support. |
-| `agents` | List known agent addresses, `online` while an agent has a live inbox `watch`, else when it was last seen, then the reported state and the tags. |
+| `agents` | List the known agent addresses of the own project, `online` while an agent has a live inbox `watch`, else when it was last seen, then the reported state and the tags. Hides agents offline for over 7 days with no messages in that time; `--all` shows them. Nothing is deleted. |
+| `projects` | List every project with its agent and message counts. Read-only. Connects as a `*` observer, so it prints no unread messages first. |
 | `status` | Report the own state (`working`, `idle`, or `waiting`) and exit 0. Never starts a broker, gives up after about 2 s, and on a failure prints one stderr line and still exits 0. |
 | `log` | Show the full message history, oldest first. With `--about ADDR`, keep only messages that ADDR sent or received. |
 | `skill` | Print the bundled agent skill (`skills/chattrs/SKILL.md`) to stdout. Opens no connection, needs no address. |
@@ -126,6 +127,9 @@ Common flags:
   address defaults to `<agent>@<hostname>` from `--agent`.
 - `--agent AGENT` — agent name for the default address (`CHATTRS_AGENT`).
   Needs one of address or agent: with neither, the command exits 1.
+- `CHATTRS_PROJECT` — the project of every command, such as `alpha`
+  (default `default`). It has no flag. Valid names follow the topic rule:
+  lowercase letters, digits, and hyphens. See [Projects](#projects).
 - `--token TOKEN` — fleet token (`CHATTRS_TOKEN`). `serve` needs it for a
   non-loopback bind; every other command sends it in `hello`.
 - `--json` — print JSON lines; every line carries a `type`, and
@@ -179,7 +183,9 @@ coordinator, who puts `$(chattrs skill)` in the worker's prompt.
 Run one broker on an always-on machine. Other hosts connect to it over
 a private network (Tailscale or a LAN) with the shared token. The
 broker host can run an agent too. This is "Claude Code-style swarms
-for any agent": a lead and its workers share one broker.
+for any agent": a lead and its workers share one broker. One broker
+serves every project, so a second swarm needs a new `CHATTRS_PROJECT`,
+not a second broker.
 
 Install the same binary on every host:
 
@@ -300,7 +306,31 @@ A loopback server that is down gets a second, auto-started broker
 Limits: there is no TLS, so the token and the messages travel as
 clear text inside the private network. One token covers the whole
 fleet. Addresses are self-asserted: the token proves fleet
-membership, not which address is yours.
+membership, not which address is yours. Until signed tokens land, the
+shared `CHATTRS_TOKEN` reaches every project: a project keeps agents
+apart by accident, not by access control.
+
+### Projects
+
+A project is a namespace on the broker. Messages, inboxes, agents, the
+log, topics, and the online count all belong to one project. An agent
+sees and sends only inside its own project, and a `send` to an address
+that exists only in another project lands in the sender's project, with
+`known:false`. The same address in two projects is two agents. A client
+with no project uses `default`, so old clients keep working.
+
+Set the project with `CHATTRS_PROJECT` in the launch environment. Name it
+explicitly. Never derive it from the git directory name: two checkouts of
+one repo, or a renamed directory, would split or merge swarms by accident.
+
+```bash
+export CHATTRS_PROJECT=alpha
+chattrs projects          # every project with agent and message counts
+chattrs agents --all      # include agents quiet for over 7 days
+```
+
+The hooks need no setup: they read `CHATTRS_PROJECT` like every command,
+and the session-start context names the project when it is not `default`.
 
 ### Start a worker
 
@@ -314,6 +344,7 @@ ssh <host> 'tmux new -d -s worker1 \
   ". ~/.config/chattrs/env; \
    export CHATTRS_ADDRESS=worker1@<host> \
           CHATTRS_SERVER=<broker-ip>:4646 \
+          CHATTRS_PROJECT=<project> \
           CHATTRS_TAGS=gpu; \
    mkdir -p ~/.claude/skills/chattrs && \
      chattrs skill > ~/.claude/skills/chattrs/SKILL.md; \
@@ -340,7 +371,8 @@ each host to check.
 
 ### Watch the swarm
 
-`chattrs watch --all` shows every message live. See
+`chattrs watch --all` shows every message of the own project live. With
+`CHATTRS_PROJECT='*'` it shows every project. See
 [Monitoring API (observer)](#monitoring-api-observer) for the wire
 form. `chattrs agents` shows who is online, with tags.
 
@@ -357,6 +389,8 @@ Run this checklist once on a new swarm.
    lost.
 5. `chattrs watch --all` shows every message live.
 6. `chattrs agents` shows both workers online, with their tags.
+7. An agent in another project cannot see or send to these workers, and a
+   `*` observer sees both projects.
 
 ## Hooks (Claude Code and Codex)
 
@@ -428,27 +462,32 @@ Client → broker:
 {"type":"watch", "topics":["release-26"]}
 {"type":"hello", "v":1, "address":"codex@box1", "state":"working"}
 {"type":"hello", "v":1, "address":"viewer@mac", "observer":true}
+{"type":"hello", "v":1, "address":"viewer@mac", "observer":true, "project":"*"}
+{"type":"hello", "v":1, "address":"codex@box1", "project":"alpha"}
 {"type":"watch", "all":true}
 {"type":"wait",  "reply_to":12}
 {"type":"agents"}
+{"type":"agents", "all":true}
+{"type":"agents", "projects":true}
 {"type":"log",   "address":"codex@box1", "after":0, "limit":500}
 ```
 
 Broker → client:
 
 ```json
-{"type":"welcome", "server":"chattrs", "v":1, "address":"codex@box1"}
+{"type":"welcome", "server":"chattrs", "v":1, "address":"codex@box1", "project":"alpha"}
 {"type":"sent",    "id":12}   // optional "known":false: `to` never said hello
 {"type":"inbox",   "messages":[
   {"id":12,"from":"codex@box1","to":"opus@mac",
-   "body":"hi","ts":1763200000000,"reply_to":null,"topic":null}]}
+   "body":"hi","ts":1763200000000,"reply_to":null,"topic":null,"project":"alpha"}]}
 {"type":"message", "id":13,"from":"opus@mac","to":"codex@box1",
- "body":"hi","ts":1763200000001,"reply_to":12,"topic":null}
+ "body":"hi","ts":1763200000001,"reply_to":12,"topic":null,"project":"alpha"}
 {"type":"acked",   "ids":[12, 13]}
-{"type":"agents",  "agents":[{"address":"codex@box1","last_seen":1763200000000,"online":true,"tags":["os:linux","gpu"],"state":"working","state_at":1763200000000}]}
+{"type":"agents",  "agents":[{"project":"alpha","address":"codex@box1","last_seen":1763200000000,"online":true,"tags":["os:linux","gpu"],"state":"working","state_at":1763200000000}]}
 {"type":"log",     "messages":[
   {"id":12,"from":"codex@box1","to":"opus@mac",
-   "body":"hi","ts":1763200000000,"reply_to":null,"topic":null,"acked_at":null}]}
+   "body":"hi","ts":1763200000000,"reply_to":null,"topic":null,"project":"alpha","acked_at":null}]}
+{"type":"agents",  "agents":[…], "projects":[{"project":"alpha","agents":2,"messages":14}]}
 {"type":"error",   "code":"empty_body", "message":"body is empty"}
 ```
 
@@ -470,6 +509,25 @@ announcement to that room: the wire message carries `"to":null`, it is
 stored with no owning inbox, and a `send` with no `to` and no `topic` is
 rejected with `bad_address`. A direct message with a topic stays direct:
 its topic is only a label, and topic watchers never receive it.
+
+`hello` may carry an optional `project`, which the client reads from
+`CHATTRS_PROJECT`. It is validated like a topic name; an invalid name gets
+`bad_project`. Without it the project is `default`, and `welcome` echoes the
+effective `project` (an older broker omits it). Every frame is scoped to the
+connection's project: `send` (`to` is always in the sender's project),
+`inbox`, `wait`, `ack`, `agents`, `log`, `watch` with and without topics,
+topic backlogs, `known`, and the online count, which is keyed by project and
+address. Message and agent JSON carry `project`; a frame from an older
+broker without it reads as `default`. Only an observer may send
+`"project":"*"`; any other `hello` with `*` gets `bad_project`. A `*` observer's
+`watch` with `all`, its `log`, and its `agents` span every project, and each
+message and agent row carries its `project`. An observer with a named
+project sees only that project. `agents` leaves out an agent that is
+offline, last seen over 7 days ago, and has sent or received nothing for 7
+days, unless the request sets `"all":true`; nothing is deleted. With
+`"projects":true`, the `agents` answer adds `projects`, the agent and message
+count of each project the connection can see (one for a named project, every
+project for `*`); `chattrs projects` is that request from a `*` observer.
 
 `inbox` returns every message for the `hello` address with no ack yet, in
 id order. `ack` marks the listed ids read when they belong to that address
@@ -518,6 +576,8 @@ A monitor, such as a tray, uses only the wire protocol:
    announcements, as `message` frames. It sends no backlog and acks nothing.
    `all` on a connection that did not say `observer` gets `not_observer`.
 4. `agents` gives presence, tags, and state. `log` gives history.
+5. `"project":"*"` on the observer `hello` streams and lists every project;
+   without it the observer sees only its own project.
 
 An observer connection is read-only: `send`, `ack`, `wait`, and `inbox` get
 `observer_read_only`. A slow observer that falls behind is disconnected, so
@@ -536,6 +596,9 @@ stays CLI only, with no TUI or GUI. The swarm needs nothing from any viewer.
   `"all":true` first, then read `log` after the last id you hold, and drop
   duplicates by id. Use `agents` for presence, tags, and state. An observer
   is read-only.
+- Messages and agent rows carry `project`. A viewer that observes `*`
+  groups by it. Until signed tokens land, the shared token reaches every
+  project.
 - An interactive viewer, a GUI or TUI that sends or replies, connects as a
   normal agent with its own address, such as `operator@mac`, and uses the
   normal frames.
@@ -594,7 +657,7 @@ message it answers; an explicit `topic` always wins. An invalid slug is
 rejected with `bad_topic`.
 
 Error codes: `bad_frame`, `hello_required`, `bad_version` (v ≠ 1),
-`bad_address`, `bad_token`, `bad_tags`, `bad_topic`, `empty_body`, `too_large`,
+`bad_address`, `bad_token`, `bad_tags`, `bad_project`, `bad_topic`, `empty_body`, `too_large`,
 `unknown_message`, `not_recipient`. After `hello`, an error does not
 close the connection, except `bad_token`, which always closes it.
 
