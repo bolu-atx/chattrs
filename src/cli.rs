@@ -32,6 +32,8 @@ pub enum Command {
     Ask(AskArgs),
     /// List known agent addresses and when each was last seen.
     Agents(AgentsArgs),
+    /// List the projects with their agent and message counts. Read-only.
+    Projects(ProjectsArgs),
     /// Show the full message history, oldest first.
     Log(LogArgs),
     /// Report the own state to the broker. Best effort: always exits 0.
@@ -291,6 +293,21 @@ pub struct AgentsArgs {
     pub client: ClientArgs,
 
     /// Print one JSON object per agent instead of a text line.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Also list agents that went offline over 7 days ago and have sent or
+    /// received nothing since.
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ProjectsArgs {
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Print one JSON object per project instead of a text line.
     #[arg(long)]
     pub json: bool,
 }

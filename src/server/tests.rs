@@ -8,6 +8,7 @@ mod helpers;
 mod log;
 mod mailbox;
 mod observer;
+mod projects;
 mod retry;
 mod state;
 mod tags;

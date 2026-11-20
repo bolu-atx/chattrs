@@ -42,7 +42,7 @@ async fn observer_watch_does_not_make_the_address_online() {
     assert!(matches!(welcome, Outbound::Welcome { watching: false, .. }));
     raw_send(&mut other, "{\"type\":\"agents\"}\n").await;
     match raw_recv(&mut other).await.unwrap() {
-        Outbound::Agents { agents } => {
+        Outbound::Agents { agents, .. } => {
             let tray = agents.iter().find(|agent| agent.address == "tray@h").unwrap();
             assert!(!tray.online);
         }

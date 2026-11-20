@@ -36,6 +36,7 @@ mod tests {
                 tags: vec![],
                 observer: false,
                 state: None,
+                project: None,
             },
             Inbound::Hello {
                 v: 1,
@@ -44,6 +45,7 @@ mod tests {
                 tags: vec!["os:linux".into(), "gpu".into()],
                 observer: false,
                 state: None,
+                project: None,
             },
             Inbound::Send {
                 to: Some("opus@mac".into()),
@@ -63,7 +65,7 @@ mod tests {
             Inbound::Watch { topics: vec![], all: false },
             Inbound::Watch { topics: vec!["release-26".into()], all: false },
             Inbound::Wait { reply_to: 12 },
-            Inbound::Agents,
+            Inbound::Agents { all: false, projects: false },
             Inbound::Log { address: None, after: 0, limit: 500 },
             Inbound::Log { address: Some("codex@box1".into()), after: 12, limit: 500 },
         ];
@@ -85,6 +87,7 @@ mod tests {
                 ts: 1763200000000,
                 reply_to: None,
                 topic: None,
+                project: "default".into(),
             },
             acked_at: None,
         };
@@ -96,6 +99,7 @@ mod tests {
             ts: 1763200000000,
             reply_to: None,
             topic: None,
+            project: "default".into(),
         };
         let frames = vec![
             Outbound::Welcome {
@@ -104,6 +108,7 @@ mod tests {
                 address: "codex@box1".into(),
                 watching: false,
                 observer: false,
+                project: None,
             },
             Outbound::Sent { id: 12, known: None },
             Outbound::Inbox { messages: vec![message.clone()] },
@@ -116,8 +121,9 @@ mod tests {
                 ts: 1763200000000,
                 reply_to: None,
                 topic: Some("release-26".into()),
+                project: "default".into(),
             }),
-            Outbound::Agents { agents: vec![] },
+            Outbound::Agents { agents: vec![], projects: None },
             Outbound::Log { messages: vec![logged] },
             Outbound::Acked { ids: vec![12, 13] },
             Outbound::Error { code: "empty_body".into(), message: "body is empty".into() },
@@ -141,7 +147,8 @@ mod tests {
                 token: None,
                 tags: vec![],
                 observer: false,
-                state: None
+                state: None,
+                project: None,
             }
         );
         let line = encode(&Inbound::Hello {
@@ -151,6 +158,7 @@ mod tests {
             tags: vec![],
             observer: false,
             state: None,
+            project: None,
         })
         .unwrap();
         assert!(!line.contains("tags"), "empty tags are omitted: {line}");
@@ -165,6 +173,7 @@ mod tests {
             tags: vec![],
             observer: false,
             state: state.map(str::to_string),
+            project: None,
         };
         let line = encode(&hello(None)).unwrap();
         assert!(!line.contains("state"), "no state is omitted: {line}");
@@ -183,6 +192,7 @@ mod tests {
                 tags: vec![],
                 observer: false,
                 state: None,
+                project: None,
             })
             .unwrap(),
             serde_json::to_value(Inbound::Send {
@@ -200,14 +210,15 @@ mod tests {
                 address: "a@h".into(),
                 watching: false,
                 observer: false,
+                project: None,
             })
             .unwrap(),
             serde_json::to_value(Outbound::Sent { id: 1, known: None }).unwrap(),
             serde_json::to_value(Inbound::Inbox).unwrap(),
             serde_json::to_value(Inbound::Ack { ids: vec![1] }).unwrap(),
             serde_json::to_value(Outbound::Inbox { messages: vec![] }).unwrap(),
-            serde_json::to_value(Outbound::Agents { agents: vec![] }).unwrap(),
-            serde_json::to_value(Inbound::Agents).unwrap(),
+            serde_json::to_value(Outbound::Agents { agents: vec![], projects: None }).unwrap(),
+            serde_json::to_value(Inbound::Agents { all: false, projects: false }).unwrap(),
             serde_json::to_value(Inbound::Log { address: None, after: 0, limit: 500 }).unwrap(),
             serde_json::to_value(Outbound::Log { messages: vec![] }).unwrap(),
             serde_json::to_value(Outbound::Acked { ids: vec![1] }).unwrap(),
@@ -272,6 +283,7 @@ mod tests {
             tags: vec![],
             observer: false,
             state: None,
+            project: None,
         })
         .unwrap();
         let watch_line = encode(&Inbound::Watch { topics: vec![], all: false }).unwrap();
@@ -281,6 +293,7 @@ mod tests {
             address: "a@h".into(),
             watching: false,
             observer: false,
+            project: None,
         })
         .unwrap();
         for line in [hello_line, watch_line, welcome_line] {

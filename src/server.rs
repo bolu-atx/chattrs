@@ -26,7 +26,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::autostart;
 use crate::model::{self, Inbound, Message, Outbound};
 use crate::protocol;
-use crate::store::Store;
+use crate::store::{self, Store};
 
 /// One broker error: a machine-readable code and a human message.
 #[derive(Debug)]
@@ -51,24 +51,32 @@ pub struct Broker {
     store: Store,
     pushed: broadcast::Sender<Arc<Message>>,
     token: Option<String>,
-    /// Live inbox `watch` connections per address. In memory only.
-    watchers: Arc<Mutex<HashMap<String, usize>>>,
+    /// Live inbox `watch` connections per (project, address). In memory
+    /// only.
+    watchers: Arc<Mutex<Watchers>>,
 }
+
+/// The live inbox watch count for each (project, address).
+type Watchers = HashMap<(String, String), usize>;
+
+/// Agents offline longer than this, with no messages in the same time,
+/// are hidden from `agents` unless the request sets `all`.
+const AGENT_STALE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 /// One live inbox watch in the broker's count. Dropping it removes the
 /// watch, so EOF, errors, panics, and shutdown all decrement.
 struct WatchGuard {
-    watchers: Arc<Mutex<HashMap<String, usize>>>,
-    address: String,
+    watchers: Arc<Mutex<Watchers>>,
+    key: (String, String),
 }
 
 impl Drop for WatchGuard {
     fn drop(&mut self) {
         let mut watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(count) = watchers.get_mut(&self.address) {
+        if let Some(count) = watchers.get_mut(&self.key) {
             *count -= 1;
             if *count == 0 {
-                watchers.remove(&self.address);
+                watchers.remove(&self.key);
             }
         }
     }
@@ -97,6 +105,9 @@ pub(crate) fn set_keepalive(stream: &TcpStream) {
 #[derive(Default)]
 struct ConnState {
     address: Option<String>,
+    /// The effective project after `hello`: a name, or `*` for an
+    /// observer that sees every project.
+    project: String,
     /// True after an observer `hello`: never recorded, never online.
     observer: bool,
     /// True after an observer `watch` with `all`: every new message.
@@ -122,6 +133,9 @@ impl ConnState {
     /// the highest id sent and dropping a satisfied `wait` id.
     fn pushed(&mut self, message: &Message) -> Option<Outbound> {
         let address = self.address.as_deref()?;
+        if self.project != model::ALL_PROJECTS && message.project != self.project {
+            return None;
+        }
         if self.watch_all {
             return Some(Outbound::Message(message.clone()));
         }
@@ -258,6 +272,7 @@ struct Hello {
     tags: Vec<String>,
     observer: bool,
     state: Option<String>,
+    project: Option<String>,
 }
 
 /// One event for the connection loop: a line from the peer or a push.
@@ -344,7 +359,7 @@ impl Broker {
         }
         self.count_watch(&mut conn, false);
         if let Some(address) = conn.address.clone().filter(|_| !conn.observer) {
-            let _ = self.store.touch_agent(address, Vec::new(), None).await;
+            let _ = self.store.touch_agent(conn.project.clone(), address, Vec::new(), None).await;
         }
         let _ = writer.shutdown().await;
     }
@@ -357,8 +372,8 @@ impl Broker {
     ) -> Result<Vec<Outbound>, WireError> {
         if conn.address.is_none() {
             return match frame {
-                Inbound::Hello { v, address, token, tags, observer, state } => {
-                    let hello = Hello { v, address, token, tags, observer, state };
+                Inbound::Hello { v, address, token, tags, observer, state, project } => {
+                    let hello = Hello { v, address, token, tags, observer, state, project };
                     self.on_hello(conn, hello).await
                 }
                 _ => Err(WireError::new("hello_required", "hello must be the first frame")),
@@ -384,8 +399,10 @@ impl Broker {
             Inbound::Ack { ids } => self.on_ack(conn, ids).await,
             Inbound::Watch { topics, all } => self.on_watch(conn, topics, all).await,
             Inbound::Wait { reply_to } => self.on_wait(conn, reply_to).await,
-            Inbound::Agents => self.on_agents().await,
-            Inbound::Log { address, after, limit } => self.on_log(address, after, limit).await,
+            Inbound::Agents { all, projects } => self.on_agents(conn, all, projects).await,
+            Inbound::Log { address, after, limit } => {
+                self.on_log(conn, address, after, limit).await
+            }
         }
     }
 
@@ -394,7 +411,7 @@ impl Broker {
         conn: &mut ConnState,
         hello: Hello,
     ) -> Result<Vec<Outbound>, WireError> {
-        let Hello { v, address, token, tags, observer, state } = hello;
+        let Hello { v, address, token, tags, observer, state, project } = hello;
         if !self.token_ok(token.as_deref()) {
             return Err(WireError::new("bad_token", "token is missing or incorrect"));
         }
@@ -403,6 +420,15 @@ impl Broker {
         }
         if !model::is_valid_address(&address) {
             return Err(WireError::new("bad_address", "address is invalid"));
+        }
+        let project = project.unwrap_or_else(|| model::DEFAULT_PROJECT.to_string());
+        let project_ok =
+            if project == model::ALL_PROJECTS { observer } else { model::is_valid_topic(&project) };
+        if !project_ok {
+            return Err(WireError::new(
+                "bad_project",
+                "project is invalid, or `*` without an observer hello",
+            ));
         }
         if tags.len() > model::MAX_TAGS || tags.iter().any(|tag| tag.len() > model::MAX_TAG_BYTES) {
             return Err(WireError::new("bad_tags", "too many tags or a tag is too long"));
@@ -414,17 +440,19 @@ impl Broker {
             return Err(WireError::new("observer_read_only", "an observer cannot set a state"));
         }
         if !observer {
-            self.store.touch_agent(address.clone(), tags, state).await?;
+            self.store.touch_agent(project.clone(), address.clone(), tags, state).await?;
         }
-        let watching = !observer && self.is_watched(&address);
+        let watching = !observer && self.is_watched(&project, &address);
         conn.observer = observer;
         conn.address = Some(address.clone());
+        conn.project = project.clone();
         Ok(vec![Outbound::Welcome {
             server: protocol::SERVER_NAME.to_string(),
             v: model::PROTOCOL_VERSION,
             address,
             watching,
             observer,
+            project: Some(project),
         }])
     }
 
@@ -454,12 +482,15 @@ impl Broker {
         }
         let from = conn.address.clone().unwrap_or_default();
         let known = match to.clone() {
-            Some(to) => Some(self.store.is_known_agent(to).await?),
+            Some(to) => Some(self.store.is_known_agent(conn.project.clone(), to).await?),
             None => None,
         };
-        let (recipient, parent_topic) = self.resolve(&from, to, reply_to, &topic).await?;
+        let (recipient, parent_topic) = self.resolve(conn, to, reply_to, &topic).await?;
         let stored_topic = topic.or(parent_topic);
-        let message = self.store.insert(from, recipient, body, reply_to, stored_topic).await?;
+        let message = self
+            .store
+            .insert(conn.project.clone(), from, recipient, body, reply_to, stored_topic)
+            .await?;
         let id = message.id;
         let _ = self.pushed.send(Arc::new(message));
         Ok(vec![Outbound::Sent { id, known }])
@@ -468,15 +499,17 @@ impl Broker {
     /// Work out who a send goes to and the topic it inherits, if any.
     async fn resolve(
         &self,
-        from: &str,
+        conn: &ConnState,
         to: Option<String>,
         reply_to: Option<u64>,
         topic: &Option<String>,
     ) -> Result<(Option<String>, Option<String>), WireError> {
+        let from = conn.address.as_deref().unwrap_or_default();
+        let project = &conn.project;
         match (to, reply_to) {
             (Some(to), Some(id)) => {
                 let original =
-                    self.store.get(id).await?.ok_or_else(|| {
+                    self.store.get(project.clone(), id).await?.ok_or_else(|| {
                         WireError::new("unknown_message", "no message has that id")
                     })?;
                 Ok((Some(to), original.topic))
@@ -484,7 +517,7 @@ impl Broker {
             (Some(to), None) => Ok((Some(to), None)),
             (None, Some(id)) => {
                 let original =
-                    self.store.get(id).await?.ok_or_else(|| {
+                    self.store.get(project.clone(), id).await?.ok_or_else(|| {
                         WireError::new("unknown_message", "no message has that id")
                     })?;
                 if original.to.as_deref() != Some(from) {
@@ -506,13 +539,13 @@ impl Broker {
 
     async fn on_inbox(&self, conn: &ConnState) -> Result<Vec<Outbound>, WireError> {
         let from = conn.address.clone().unwrap_or_default();
-        let messages = self.store.inbox(from).await?;
+        let messages = self.store.inbox(conn.project.clone(), from).await?;
         Ok(vec![Outbound::Inbox { messages }])
     }
 
     async fn on_ack(&self, conn: &ConnState, ids: Vec<u64>) -> Result<Vec<Outbound>, WireError> {
         let from = conn.address.clone().unwrap_or_default();
-        let ids = self.store.ack(from, ids).await?;
+        let ids = self.store.ack(conn.project.clone(), from, ids).await?;
         Ok(vec![Outbound::Acked { ids }])
     }
 
@@ -537,9 +570,9 @@ impl Broker {
         self.count_watch(conn, topics.is_empty());
         let from = conn.address.clone().unwrap_or_default();
         let backlog = if topics.is_empty() {
-            self.store.inbox(from).await?
+            self.store.inbox(conn.project.clone(), from).await?
         } else {
-            self.store.topic_backlog(topics).await?
+            self.store.topic_backlog(conn.project.clone(), topics).await?
         };
         conn.highest = backlog.iter().map(|message| message.id).max().unwrap_or(0);
         Ok(backlog.into_iter().map(Outbound::Message).collect())
@@ -552,7 +585,7 @@ impl Broker {
     ) -> Result<Vec<Outbound>, WireError> {
         conn.subscribe(&self.pushed);
         let from = conn.address.clone().unwrap_or_default();
-        if let Some(message) = self.store.find_reply(from, reply_to).await? {
+        if let Some(message) = self.store.find_reply(conn.project.clone(), from, reply_to).await? {
             return Ok(vec![Outbound::Message(message)]);
         }
         conn.waits.insert(reply_to);
@@ -569,29 +602,53 @@ impl Broker {
             return;
         }
         if inbox_watch {
+            let key = (conn.project.clone(), address);
             let mut watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
-            *watchers.entry(address.clone()).or_insert(0) += 1;
-            conn.watch_guard = Some(WatchGuard { watchers: Arc::clone(&self.watchers), address });
+            *watchers.entry(key.clone()).or_insert(0) += 1;
+            conn.watch_guard = Some(WatchGuard { watchers: Arc::clone(&self.watchers), key });
         } else {
             conn.watch_guard = None;
         }
     }
 
-    /// True when the address has at least one live inbox watch.
-    fn is_watched(&self, address: &str) -> bool {
-        self.watchers.lock().unwrap_or_else(|e| e.into_inner()).contains_key(address)
+    /// True when the address has at least one live inbox watch in the
+    /// project.
+    fn is_watched(&self, project: &str, address: &str) -> bool {
+        let key = (project.to_string(), address.to_string());
+        self.watchers.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&key)
     }
 
-    async fn on_agents(&self) -> Result<Vec<Outbound>, WireError> {
-        let mut agents = self.store.agents().await?;
+    /// The agents of the connection's project (every project for `*`).
+    /// Unless `all`, agents that are offline, last seen over 7 days ago,
+    /// and silent for 7 days are left out; nothing is deleted. With
+    /// `projects`, the answer also carries the counts per project.
+    async fn on_agents(
+        &self,
+        conn: &ConnState,
+        all: bool,
+        projects: bool,
+    ) -> Result<Vec<Outbound>, WireError> {
+        let mut agents = self.store.agents(conn.project.clone()).await?;
         for agent in &mut agents {
-            agent.online = self.is_watched(&agent.address);
+            agent.online = self.is_watched(&agent.project, &agent.address);
         }
-        Ok(vec![Outbound::Agents { agents }])
+        if !all {
+            let cutoff = store::now_ms().saturating_sub(AGENT_STALE_MS);
+            let active = self.store.active_since(conn.project.clone(), cutoff).await?;
+            agents.retain(|agent| {
+                agent.online
+                    || agent.last_seen >= cutoff
+                    || active.contains(&(agent.project.clone(), agent.address.clone()))
+            });
+        }
+        let projects =
+            if projects { Some(self.store.projects(conn.project.clone()).await?) } else { None };
+        Ok(vec![Outbound::Agents { agents, projects }])
     }
 
     async fn on_log(
         &self,
+        conn: &ConnState,
         address: Option<String>,
         after: u64,
         limit: u64,
@@ -602,7 +659,7 @@ impl Broker {
             }
         }
         let limit = limit.min(model::MAX_LOG_LIMIT);
-        let messages = self.store.log(address, after, limit).await?;
+        let messages = self.store.log(conn.project.clone(), address, after, limit).await?;
         Ok(vec![Outbound::Log { messages }])
     }
 }

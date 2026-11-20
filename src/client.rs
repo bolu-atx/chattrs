@@ -10,7 +10,7 @@ use std::fmt;
 use std::io::ErrorKind;
 
 use crate::autostart;
-use crate::model::{self, Agent, Inbound, LoggedMessage, Message, Outbound};
+use crate::model::{self, Agent, Inbound, LoggedMessage, Message, Outbound, ProjectInfo};
 use crate::protocol;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -119,13 +119,22 @@ fn hello_tags(custom: Option<&str>) -> Vec<String> {
     tags
 }
 
+/// The project from `CHATTRS_PROJECT`, or `None` when it is unset or
+/// blank. The one place the variable is read: the `hello` and the hook
+/// context both use it. Never derive a project from the directory.
+pub fn env_project() -> Option<String> {
+    let value = std::env::var("CHATTRS_PROJECT").ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 impl Client {
     /// Connect to `endpoint` and say `hello`. When the first connect
     /// fails with connection refused on a loopback server, start a
     /// broker on demand and retry once on a fresh connection. Any
     /// other failure returns the original connect error.
     pub async fn connect(endpoint: &Endpoint) -> Result<Client, ClientError> {
-        Client::open(endpoint, true, false, None).await
+        Client::open(endpoint, true, false, None, None).await
     }
 
     /// Connect again after a drop. A reconnect never starts a broker:
@@ -133,12 +142,18 @@ impl Client {
     /// under a waiting `ask` or `watch` is not replaced behind the
     /// operator's back, possibly on another database.
     pub async fn reconnect(endpoint: &Endpoint) -> Result<Client, ClientError> {
-        Client::open(endpoint, false, false, None).await
+        Client::open(endpoint, false, false, None, None).await
     }
 
     /// Reconnect and report `state` in the `hello`. Never starts a broker.
     pub async fn reconnect_with(endpoint: &Endpoint, state: &str) -> Result<Client, ClientError> {
-        Client::open(endpoint, false, false, Some(state)).await
+        Client::open(endpoint, false, false, Some(state), None).await
+    }
+
+    /// Connect as an observer of every project (`*`), which is how
+    /// `projects` reads the counts. The observer is not recorded.
+    async fn observe_all(endpoint: &Endpoint) -> Result<Client, ClientError> {
+        Client::open(endpoint, true, true, None, Some(model::ALL_PROJECTS)).await
     }
 
     async fn open(
@@ -146,6 +161,7 @@ impl Client {
         may_start: bool,
         observer: bool,
         state: Option<&str>,
+        project: Option<&str>,
     ) -> Result<Client, ClientError> {
         let stream = match connect_stream(&endpoint.server).await {
             Ok(stream) => stream,
@@ -178,6 +194,7 @@ impl Client {
                 },
                 observer,
                 state: state.map(str::to_string),
+                project: project.map(str::to_string).or_else(env_project),
             })
             .await?;
         match frame {
@@ -325,14 +342,27 @@ impl Client {
         }
     }
 
-    /// List every address that ever said `hello`, sorted by address.
-    pub async fn agents(&mut self) -> Result<Vec<Agent>, ClientError> {
-        match self.request(&Inbound::Agents).await? {
-            Outbound::Agents { agents } => Ok(agents),
+    /// List the agents of this project, sorted by address. Without `all`,
+    /// the broker leaves out agents that went quiet over 7 days ago.
+    pub async fn agents(&mut self, all: bool) -> Result<Vec<Agent>, ClientError> {
+        match self.request(&Inbound::Agents { all, projects: false }).await? {
+            Outbound::Agents { agents, .. } => Ok(agents),
             _ => Err(ClientError::Protocol(
                 "server sent an unexpected frame instead of agents".to_string(),
             )),
         }
+    }
+}
+
+/// List every project with its agent and message counts. It connects as a
+/// `*` observer and asks `agents` for the counts, so no new frame exists.
+pub async fn projects(endpoint: &Endpoint) -> Result<Vec<ProjectInfo>, ClientError> {
+    let mut client = Client::observe_all(endpoint).await?;
+    match client.request(&Inbound::Agents { all: true, projects: true }).await? {
+        Outbound::Agents { projects: Some(projects), .. } => Ok(projects),
+        _ => Err(ClientError::Protocol(
+            "the broker does not report projects, upgrade the broker".to_string(),
+        )),
     }
 }
 
@@ -426,7 +456,7 @@ pub async fn report_state(
 ) -> Result<(), ClientError> {
     let attempts = async {
         loop {
-            match Client::open(endpoint, false, false, Some(state)).await {
+            match Client::open(endpoint, false, false, Some(state), None).await {
                 Ok(_) => return Ok(()),
                 Err(ClientError::Io(_)) => tokio::time::sleep(STATUS_RETRY_PAUSE).await,
                 Err(error) => return Err(error),
@@ -547,7 +577,7 @@ pub async fn fetch_log(
 /// List every address that ever said `hello`, sorted by address.
 #[cfg(test)]
 pub async fn fetch_agents(endpoint: &Endpoint) -> Result<Vec<Agent>, ClientError> {
-    Client::connect(endpoint).await?.agents().await
+    Client::connect(endpoint).await?.agents(true).await
 }
 
 /// Ack message ids and return the ids that changed to read.
@@ -610,7 +640,8 @@ impl Watcher {
     /// Connect and send the `watch` frame. An I/O failure is returned for
     /// the caller to retry; any other failure ends the stream.
     async fn connect(&mut self) -> Result<(), ClientError> {
-        let mut client = Client::open(&self.endpoint, !self.connected_once, self.all, None).await?;
+        let mut client =
+            Client::open(&self.endpoint, !self.connected_once, self.all, None, None).await?;
         self.connected_once = true;
         if client.watching && self.topics.is_empty() {
             eprintln!(

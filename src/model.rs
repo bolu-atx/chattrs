@@ -36,6 +36,18 @@ pub const MAX_TAG_BYTES: usize = 64;
 /// The states an agent can report in `hello`.
 pub const STATES: [&str; 3] = ["working", "idle", "waiting"];
 
+/// The project of every client that sets none.
+pub const DEFAULT_PROJECT: &str = "default";
+
+/// The project name an observer uses to see every project. It is never a
+/// valid project name for anything else.
+pub const ALL_PROJECTS: &str = "*";
+
+/// The project of a frame from an older peer that omits `project`.
+fn default_project() -> String {
+    DEFAULT_PROJECT.to_string()
+}
+
 /// The `log` page size when the frame omits `limit`.
 fn default_log_limit() -> u64 {
     MAX_LOG_LIMIT
@@ -96,12 +108,18 @@ pub struct Message {
     pub ts: u64,
     pub reply_to: Option<u64>,
     pub topic: Option<String>,
+    /// The project the message belongs to. Older brokers omit it.
+    #[serde(default = "default_project")]
+    pub project: String,
 }
 
 /// One known agent: an address that completed a `hello`, and when the
 /// broker last saw it, in ms since the epoch on the broker clock.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Agent {
+    /// The project the agent belongs to. Older brokers omit it.
+    #[serde(default = "default_project")]
+    pub project: String,
     pub address: String,
     pub last_seen: u64,
     /// True while the address has a live inbox `watch` connection. The
@@ -119,6 +137,14 @@ pub struct Agent {
     /// When `state` was set, in ms since the epoch on the broker clock.
     #[serde(default)]
     pub state_at: Option<u64>,
+}
+
+/// One project with its agent and message counts, for `chattrs projects`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProjectInfo {
+    pub project: String,
+    pub agents: u64,
+    pub messages: u64,
 }
 
 /// One message in `log` history: the message plus when it was read, if
@@ -154,6 +180,11 @@ pub enum Inbound {
         /// no state; a hello without it keeps the stored one.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         state: Option<String>,
+        /// The project the connection belongs to, validated like a topic.
+        /// Absent means `default`. An observer may send `*` to see every
+        /// project.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
     },
     /// Store a message for the `to` address. The broker fills in `from`.
     /// With no `to`, the broker answers `reply_to` to its sender instead.
@@ -170,8 +201,16 @@ pub enum Inbound {
     },
     /// Ask for every unread message addressed to the `hello` address.
     Inbox,
-    /// Ask for every address that ever said `hello`, sorted by address.
-    Agents,
+    /// Ask for every address in the project that ever said `hello`, sorted
+    /// by address. Without `all`, agents offline for over 7 days with no
+    /// messages in that time are left out. With `projects`, the answer also
+    /// carries the project counts.
+    Agents {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        all: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        projects: bool,
+    },
     /// List message history with id above `after`, in id order, at most
     /// `limit` rows. With `address`, only messages it sent or received.
     Log {
@@ -218,6 +257,10 @@ pub enum Outbound {
         /// and from an older broker, which never echoes it.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         observer: bool,
+        /// The effective project of the connection. Absent from an older
+        /// broker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
     },
     /// Confirms a stored message with its id. `known` is `false` when the
     /// `to` address never said `hello`. It is absent when the send has no
@@ -234,6 +277,9 @@ pub enum Outbound {
     /// Every address that ever said `hello`, sorted by address.
     Agents {
         agents: Vec<Agent>,
+        /// Counts per project, only when the request set `projects`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        projects: Option<Vec<ProjectInfo>>,
     },
     /// Message history in id order. Each row carries `acked_at`, which is
     /// `None` for an unread message. Reading history never acks.
