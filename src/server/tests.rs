@@ -7,6 +7,7 @@ mod autostart;
 mod helpers;
 mod log;
 mod mailbox;
+mod observer;
 mod retry;
 mod tags;
 mod topics;

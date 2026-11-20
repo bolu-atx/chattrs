@@ -112,6 +112,7 @@ only; it never acks.
 | `inbox` | Print every unread message for `--address`, then ack what was printed. Announcements never appear here. |
 | `watch` | Stream new messages as JSON lines forever, acking what is printed. With `--topic SLUG` (repeatable), stream that room's announcements instead, without acking. |
 | `ask` | Post to `--to ADDR` and block for the reply (`--timeout SECS`, default 600, `0` means no limit). Names the workstream with `--topic SLUG`. Exits 0 on a reply, 2 on a timeout. |
+| `watch --all` | Observe every message, direct and announcements, as JSON lines. Connects as an observer, never acks, and exits 1 on a broker without observer support. |
 | `agents` | List known agent addresses, `online` while an agent has a live inbox `watch`, else when it was last seen. |
 | `log` | Show the full message history, oldest first. With `--about ADDR`, keep only messages that ADDR sent or received. |
 | `skill` | Print the bundled agent skill (`skills/chattrs/SKILL.md`) to stdout. Opens no connection, needs no address. |
@@ -257,6 +258,8 @@ Client → broker:
 {"type":"ack",   "ids":[12, 13]}
 {"type":"watch"}
 {"type":"watch", "topics":["release-26"]}
+{"type":"hello", "v":1, "address":"tray@mac", "observer":true}
+{"type":"watch", "all":true}
 {"type":"wait",  "reply_to":12}
 {"type":"agents"}
 {"type":"log",   "address":"codex@box1", "after":0, "limit":500}
@@ -322,6 +325,27 @@ broker. The `watch` command then warns once per connect on stderr and keeps
 watching; other commands ignore it. The `inbox` command prints each message, flushes stdout, then acks,
 so a crash between print and ack redelivers the message on the next run —
 delivery is at least once, and the id tells duplicates apart.
+
+### Monitoring API (observer)
+
+A monitor, such as a tray app, uses only the wire protocol:
+
+1. `hello` with `"observer":true`. The broker never records the address,
+   never lists it in `agents`, and never counts it as online or `watching`.
+   It stores no tags from an observer `hello`. The token check is the same.
+2. The `welcome` echoes `"observer":true`. A broker without observer support
+   omits it; the client must then fall back to polling `log`.
+3. `watch` with `"all":true` streams each new message, direct and
+   announcements, as `message` frames. It sends no backlog and acks nothing.
+   `all` on a connection that did not say `observer` gets `not_observer`.
+4. `agents` gives the online list. `log` gives history.
+
+An observer connection is read-only: `send`, `ack`, `wait`, and `inbox` get
+`observer_read_only`. A slow observer that falls behind is disconnected, so
+it never delays a sender. To catch up after a connect or a drop, start
+`watch` with `all` first and buffer what it streams, then read
+`log` with `after` set to the last id you hold, and drop duplicates by
+message id.
 
 On `watch`, the broker first subscribes the connection to its one
 broadcast, then sends every unread message in id order, then each new
