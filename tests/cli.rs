@@ -927,3 +927,17 @@ fn hooks_install_writes_the_agent_flag_into_each_config() {
     assert!(codex.contains("chattrs hook stop --agent codex"));
     assert!(!claude.contains("--agent codex") && !codex.contains("--agent claude"));
 }
+
+#[test]
+fn log_tail_prints_only_the_newest_messages() {
+    let broker = Broker::start();
+    for body in ["one", "two", "three", "four"] {
+        let sent = run_client(&broker.addr, "a@h", "send", &["--to", "b@h", body]);
+        assert_eq!(sent.status.code(), Some(0));
+    }
+    let output = run_client(&broker.addr, "observer@h", "log", &["--tail", "2"]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(!stdout.contains("one") && !stdout.contains("two"), "{stdout:?}");
+    assert!(stdout.find("three").unwrap() < stdout.find("four").unwrap(), "{stdout:?}");
+}

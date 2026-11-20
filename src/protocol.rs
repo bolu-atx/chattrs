@@ -66,8 +66,13 @@ mod tests {
             Inbound::Watch { topics: vec!["release-26".into()], all: false },
             Inbound::Wait { reply_to: 12 },
             Inbound::Agents { all: false, projects: false },
-            Inbound::Log { address: None, after: 0, limit: 500 },
-            Inbound::Log { address: Some("codex@box1".into()), after: 12, limit: 500 },
+            Inbound::Log { address: None, after: 0, limit: 500, tail: None },
+            Inbound::Log {
+                address: Some("codex@box1".into()),
+                after: 12,
+                limit: 500,
+                tail: Some(10),
+            },
         ];
         for frame in frames {
             let line = encode(&frame).unwrap();
@@ -222,7 +227,8 @@ mod tests {
             serde_json::to_value(Outbound::Inbox { messages: vec![] }).unwrap(),
             serde_json::to_value(Outbound::Agents { agents: vec![], projects: None }).unwrap(),
             serde_json::to_value(Inbound::Agents { all: false, projects: false }).unwrap(),
-            serde_json::to_value(Inbound::Log { address: None, after: 0, limit: 500 }).unwrap(),
+            serde_json::to_value(Inbound::Log { address: None, after: 0, limit: 500, tail: None })
+                .unwrap(),
             serde_json::to_value(Outbound::Log { messages: vec![] }).unwrap(),
             serde_json::to_value(Outbound::Acked { ids: vec![1] }).unwrap(),
             serde_json::to_value(Outbound::error("bad_frame", "nope")).unwrap(),
@@ -248,6 +254,19 @@ mod tests {
         let frame = Outbound::Sent { id: 7, known: None };
         let line = encode(&frame).unwrap();
         assert_eq!(decode::<Outbound>(line.trim_end()).unwrap(), frame);
+    }
+
+    #[test]
+    fn log_tail_is_optional_on_the_wire() {
+        let frame: Inbound = decode("{\"type\":\"log\"}\n").unwrap();
+        assert_eq!(frame, Inbound::Log { address: None, after: 0, limit: 500, tail: None });
+        let line = encode(&frame).unwrap();
+        assert_eq!(
+            line.trim_end(),
+            "{\"type\":\"log\",\"address\":null,\"after\":0,\"limit\":500}"
+        );
+        let tailed: Inbound = decode("{\"type\":\"log\",\"tail\":10}\n").unwrap();
+        assert_eq!(tailed, Inbound::Log { address: None, after: 0, limit: 500, tail: Some(10) });
     }
 
     #[test]

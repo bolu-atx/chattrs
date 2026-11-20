@@ -116,7 +116,7 @@ only; it never acks.
 | `agents` | List the known agent addresses of the own project, `online` while an agent has a live inbox `watch`, else when it was last seen, then the reported state, the health (`healthy`, `stalled`, or `gone`; see the Viewer contract), and the tags. Hides agents offline for over 7 days with no messages in that time; `--all` shows them. Nothing is deleted. |
 | `projects` | List every project with its agent and message counts. Read-only. Connects as a `*` observer, so it prints no unread messages first. |
 | `status` | Report the own state (`working`, `idle`, or `waiting`) and exit 0. Never starts a broker, gives up after about 2 s, and on a failure prints one stderr line and still exits 0. |
-| `log` | Show the full message history, oldest first. With `--about ADDR`, keep only messages that ADDR sent or received. |
+| `log` | Show the full message history, oldest first. With `--about ADDR`, keep only messages that ADDR sent or received. With `--tail N`, show only the newest N, still oldest first. |
 | `skill` | Print the bundled agent skill (`skills/chattrs/SKILL.md`) to stdout. Opens no connection, needs no address. |
 
 Common flags:
@@ -558,6 +558,7 @@ Client → broker:
 {"type":"agents", "all":true}
 {"type":"agents", "projects":true}
 {"type":"log",   "address":"codex@box1", "after":0, "limit":500}
+{"type":"log",   "address":"codex@box1", "tail":10}
 ```
 
 Broker → client:
@@ -753,6 +754,13 @@ for unread ones. With `address`, only messages where it is the sender or
 the recipient are returned; without it, the full history is. `log` reads
 only: it never acks. The `log` command pages with `after` until a page
 holds fewer than 500 rows, so its output is the full history.
+
+With `tail` set to N, `log` returns the newest N matching rows instead
+(capped at 500), still in id order, in one round trip. `address` and
+`after` still apply. `limit` is ignored. An old broker ignores `tail` and
+answers with its first page; the client then keeps the last N rows it got.
+`chattrs log --tail N` and the `session-start` re-brief use it, so a long
+history never delays the re-brief.
 
 A `send` with a `reply_to` and no `topic` stores the topic of the
 message it answers; an explicit `topic` always wins. An invalid slug is

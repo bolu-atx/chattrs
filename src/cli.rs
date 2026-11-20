@@ -355,6 +355,10 @@ pub struct LogArgs {
     #[arg(long)]
     pub about: Option<String>,
 
+    /// Print only the newest N messages, oldest first.
+    #[arg(long, value_name = "N")]
+    pub tail: Option<u32>,
+
     /// Print one JSON object per message instead of a text line.
     #[arg(long)]
     pub json: bool,

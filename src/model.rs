@@ -224,6 +224,10 @@ pub enum Inbound {
         after: u64,
         #[serde(default = "default_log_limit")]
         limit: u64,
+        /// The newest `tail` matching rows instead of the oldest `limit`,
+        /// still in id order. Capped like `limit`. An old broker ignores it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tail: Option<u32>,
     },
     /// Stream every unread message, then each new one, as `message` frames.
     /// With topics, stream announcements to those rooms instead of the

@@ -332,3 +332,30 @@ async fn cli_reads_chattrs_project_and_projects_command_lists_them() {
         stdout_lines(&agents).iter().map(|line| serde_json::from_str(line).unwrap()).collect();
     assert!(rows.iter().all(|row| row["project"] == "alpha"), "{rows:?}");
 }
+
+#[tokio::test]
+async fn log_tail_stays_inside_the_project() {
+    let (addr, _dir, handle) = spawn().await;
+    let mut a = join(&addr, "a@h", "alpha").await;
+    let mut b = join(&addr, "a@h", "beta").await;
+    let (a1, _) = send_to(&mut a, "x@h", "one").await;
+    let (a2, _) = send_to(&mut a, "x@h", "two").await;
+    let (_b1, _) = send_to(&mut b, "x@h", "other project").await;
+
+    let frame = "{\"type\":\"log\",\"tail\":1,\"address\":\"a@h\"}";
+    match ask(&mut a, frame).await {
+        Outbound::Log { messages } => {
+            let ids: Vec<u64> = messages.iter().map(|m| m.message.id).collect();
+            assert_eq!(ids, vec![a2]);
+        }
+        other => panic!("{other:?}"),
+    }
+    match ask(&mut a, "{\"type\":\"log\",\"tail\":5}").await {
+        Outbound::Log { messages } => {
+            let ids: Vec<u64> = messages.iter().map(|m| m.message.id).collect();
+            assert_eq!(ids, vec![a1, a2]);
+        }
+        other => panic!("{other:?}"),
+    }
+    handle.abort();
+}

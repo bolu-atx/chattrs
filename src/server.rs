@@ -421,8 +421,8 @@ impl Broker {
             Inbound::Watch { topics, all } => self.on_watch(conn, topics, all).await,
             Inbound::Wait { reply_to } => self.on_wait(conn, reply_to).await,
             Inbound::Agents { all, projects } => self.on_agents(conn, all, projects).await,
-            Inbound::Log { address, after, limit } => {
-                self.on_log(conn, address, after, limit).await
+            Inbound::Log { address, after, limit, tail } => {
+                self.on_log(conn, address, after, limit, tail).await
             }
         }
     }
@@ -676,6 +676,7 @@ impl Broker {
         address: Option<String>,
         after: u64,
         limit: u64,
+        tail: Option<u32>,
     ) -> Result<Vec<Outbound>, WireError> {
         if let Some(wanted) = address.as_deref() {
             if !model::is_valid_address(wanted) {
@@ -683,7 +684,14 @@ impl Broker {
             }
         }
         let limit = limit.min(model::MAX_LOG_LIMIT);
-        let messages = self.store.log(conn.project.clone(), address, after, limit).await?;
+        let project = conn.project.clone();
+        let messages = match tail {
+            Some(n) => {
+                let n = u64::from(n).min(model::MAX_LOG_LIMIT);
+                self.store.log_tail(project, address, after, n).await?
+            }
+            None => self.store.log(project, address, after, limit).await?,
+        };
         Ok(vec![Outbound::Log { messages }])
     }
 }

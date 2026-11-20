@@ -28,6 +28,11 @@ const SESSION_START_BUDGET: Duration = Duration::from_millis(800);
 /// shows.
 const REBRIEF_LIMIT: usize = 10;
 
+/// How many of the newest rows for the address the re-brief reads, in one
+/// request. The last `REBRIEF_LIMIT` are the history; all are scanned for
+/// unanswered messages.
+const REBRIEF_SCAN: u32 = 200;
+
 /// Run one hook event. Does nothing without an own address, because the
 /// hooks live in the user-level config and fire in every session.
 pub async fn run(event: HookEvent, client: &ClientArgs) {
@@ -204,11 +209,11 @@ struct Brief<'a> {
 /// Mark the agent idle and read its history, oldest first. Any failure
 /// gives an empty history. `log` never acks, so nothing here changes
 /// what is unread.
-async fn rebrief_history(endpoint: &Endpoint, address: &str) -> Vec<LoggedMessage> {
+pub(crate) async fn rebrief_history(endpoint: &Endpoint, address: &str) -> Vec<LoggedMessage> {
     let Ok(mut client) = Client::reconnect_with(endpoint, "idle").await else {
         return Vec::new();
     };
-    client.log(Some(address.to_string())).await.unwrap_or_default()
+    client.log_tail(Some(address.to_string()), REBRIEF_SCAN).await.unwrap_or_default()
 }
 
 /// The messages to `address` that `address` has not answered, most recent
