@@ -4,6 +4,8 @@ use crate::cli;
 use crate::client;
 use crate::model;
 use crate::output;
+use crate::project::ProjectSource;
+use crate::settings::Settings;
 use crate::skill;
 use crate::store::Store;
 use crate::{autostart, server, RunError};
@@ -20,12 +22,22 @@ pub(crate) fn write(text: &str) -> Result<(), RunError> {
     })
 }
 
-/// Build the one endpoint for a client command from its flags.
-pub(crate) fn endpoint(client: &cli::ClientArgs) -> Result<client::Endpoint, RunError> {
+/// Build the one endpoint for a client command from its flags and the
+/// settings. The project comes from the environment, the config, or the repo
+/// at the current directory.
+pub(crate) fn endpoint(
+    client: &cli::ClientArgs,
+    settings: &Settings,
+) -> Result<client::Endpoint, RunError> {
+    let address = client.resolve_address()?;
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let (project, source) = settings.project(None, &cwd);
     Ok(client::Endpoint {
         server: client.server.clone(),
-        address: client.resolve_address()?,
+        address,
         token: client.token.clone(),
+        project: (source != ProjectSource::Default).then_some(project),
+        tags: settings.tags.clone(),
     })
 }
 
@@ -64,8 +76,8 @@ pub(crate) async fn cmd_serve(c: cli::ServeArgs) -> Result<(), RunError> {
         .map_err(RunError::Message)
 }
 
-pub(crate) async fn cmd_send(c: cli::SendArgs) -> Result<(), RunError> {
-    let endpoint = endpoint(&c.client)?;
+pub(crate) async fn cmd_send(c: cli::SendArgs, settings: &Settings) -> Result<(), RunError> {
+    let endpoint = endpoint(&c.client, settings)?;
     if c.to.is_none() && c.topic.is_none() {
         return Err(RunError::Message("send needs --to or --topic".to_string()));
     }
@@ -91,8 +103,8 @@ pub(crate) async fn cmd_send(c: cli::SendArgs) -> Result<(), RunError> {
     }
 }
 
-pub(crate) async fn cmd_reply(c: cli::ReplyArgs) -> Result<(), RunError> {
-    let endpoint = endpoint(&c.client)?;
+pub(crate) async fn cmd_reply(c: cli::ReplyArgs, settings: &Settings) -> Result<(), RunError> {
+    let endpoint = endpoint(&c.client, settings)?;
     let mut conn = client::connect_for_publish(&endpoint, "reply").await?;
     deliver_unread(&mut conn, c.json).await?;
     let (id, _) = conn
@@ -110,8 +122,8 @@ pub(crate) async fn cmd_reply(c: cli::ReplyArgs) -> Result<(), RunError> {
     }
 }
 
-pub(crate) async fn cmd_watch(c: cli::WatchArgs) -> Result<(), RunError> {
-    let endpoint = endpoint(&c.client)?;
+pub(crate) async fn cmd_watch(c: cli::WatchArgs, settings: &Settings) -> Result<(), RunError> {
+    let endpoint = endpoint(&c.client, settings)?;
     if let Some(bad) = c.topic.iter().find(|topic| !model::is_valid_topic(topic)) {
         return Err(RunError::Message(format!("topic is invalid: {bad}")));
     }
@@ -141,8 +153,8 @@ pub(crate) async fn cmd_watch(c: cli::WatchArgs) -> Result<(), RunError> {
     }
 }
 
-pub(crate) async fn cmd_ask(c: cli::AskArgs) -> Result<(), RunError> {
-    let endpoint = endpoint(&c.client)?;
+pub(crate) async fn cmd_ask(c: cli::AskArgs, settings: &Settings) -> Result<(), RunError> {
+    let endpoint = endpoint(&c.client, settings)?;
     let mut conn = client::Client::connect(&endpoint).await?;
     deliver_unread(&mut conn, c.json).await?;
     let (id, known) = conn
@@ -177,8 +189,8 @@ pub(crate) async fn cmd_ask(c: cli::AskArgs) -> Result<(), RunError> {
     }
 }
 
-pub(crate) async fn cmd_inbox(c: cli::InboxArgs) -> Result<(), RunError> {
-    let endpoint = endpoint(&c.client)?;
+pub(crate) async fn cmd_inbox(c: cli::InboxArgs, settings: &Settings) -> Result<(), RunError> {
+    let endpoint = endpoint(&c.client, settings)?;
     let mut conn = client::Client::connect(&endpoint).await?;
     deliver_unread(&mut conn, c.json).await
 }
@@ -187,8 +199,8 @@ pub(crate) fn cmd_skill() -> Result<(), RunError> {
     write(skill::text())
 }
 
-pub(crate) async fn cmd_log(c: cli::LogArgs) -> Result<(), RunError> {
-    let endpoint = endpoint(&c.client)?;
+pub(crate) async fn cmd_log(c: cli::LogArgs, settings: &Settings) -> Result<(), RunError> {
+    let endpoint = endpoint(&c.client, settings)?;
     if let Some(about) = c.about.as_deref() {
         if !model::is_valid_address(about) {
             return Err(RunError::Message(format!("address is invalid: {about}")));
@@ -215,8 +227,8 @@ pub(crate) async fn cmd_log(c: cli::LogArgs) -> Result<(), RunError> {
 
 /// Report a state and always succeed: a failure is one stderr line, never
 /// an exit code, so a hook calling `status` cannot break an agent.
-pub(crate) async fn cmd_status(c: cli::StatusArgs) -> Result<(), RunError> {
-    let result = match endpoint(&c.client) {
+pub(crate) async fn cmd_status(c: cli::StatusArgs, settings: &Settings) -> Result<(), RunError> {
+    let result = match endpoint(&c.client, settings) {
         Ok(endpoint) => {
             client::report_status(&endpoint, c.state.as_str()).await.map_err(|e| e.to_string())
         }
@@ -229,8 +241,8 @@ pub(crate) async fn cmd_status(c: cli::StatusArgs) -> Result<(), RunError> {
     Ok(())
 }
 
-pub(crate) async fn cmd_agents(c: cli::AgentsArgs) -> Result<(), RunError> {
-    let endpoint = endpoint(&c.client)?;
+pub(crate) async fn cmd_agents(c: cli::AgentsArgs, settings: &Settings) -> Result<(), RunError> {
+    let endpoint = endpoint(&c.client, settings)?;
     let mut conn = client::Client::connect(&endpoint).await?;
     deliver_unread(&mut conn, c.json).await?;
     let agents = conn.agents(c.all).await?;
@@ -246,8 +258,11 @@ pub(crate) async fn cmd_agents(c: cli::AgentsArgs) -> Result<(), RunError> {
 
 /// List the projects. The `*` observer behind it cannot hold an inbox, so
 /// this command prints no unread messages first.
-pub(crate) async fn cmd_projects(c: cli::ProjectsArgs) -> Result<(), RunError> {
-    let endpoint = endpoint(&c.client)?;
+pub(crate) async fn cmd_projects(
+    c: cli::ProjectsArgs,
+    settings: &Settings,
+) -> Result<(), RunError> {
+    let endpoint = endpoint(&c.client, settings)?;
     for project in &client::projects(&endpoint).await? {
         if c.json {
             write(&output::project_json(project))?;

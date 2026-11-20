@@ -12,9 +12,11 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use crate::cli::{ClientArgs, HookEvent};
-use crate::client::{self, Client, Endpoint};
+use crate::client::{Client, Endpoint};
 use crate::model::{LoggedMessage, Message, DEFAULT_PROJECT};
 use crate::output;
+use crate::project::ProjectSource;
+use crate::settings::Settings;
 
 pub(crate) mod install;
 
@@ -37,24 +39,32 @@ const REBRIEF_SCAN: u32 = 200;
 
 /// Run one hook event. Does nothing without an own address, because the
 /// hooks live in the user-level config and fire in every session.
-pub async fn run(event: HookEvent, client: &ClientArgs) {
+pub async fn run(event: HookEvent, client: &ClientArgs, settings: &Settings) {
     let Some(address) = client.address.as_deref().filter(|address| !address.is_empty()) else {
         return;
     };
     let input = read_input();
     // The project resolves from where the agent works, not from where the
     // hook command started.
-    let mut lead = client::env_lead();
-    if let Some(cwd) = input["cwd"].as_str().filter(|cwd| !cwd.is_empty()) {
-        if std::env::set_current_dir(cwd).is_ok() {
-            lead = resolve_from(std::path::Path::new(cwd));
+    let mut cwd = std::env::current_dir().unwrap_or_default();
+    let mut lead = trimmed(settings.lead.as_deref());
+    let mut project = None;
+    if let Some(dir) = input["cwd"].as_str().filter(|cwd| !cwd.is_empty()) {
+        if std::env::set_current_dir(dir).is_ok() {
+            cwd = std::path::PathBuf::from(dir);
+            let (found_project, found_lead) = resolve_from(settings, &cwd);
+            project = Some(found_project);
+            lead = found_lead;
         }
     }
+    let project = project.unwrap_or_else(|| settings.project(None, &cwd));
     let mut trace = Trace::new(event, input.clone());
     let endpoint = Endpoint {
         server: client.server.clone(),
         address: address.to_string(),
         token: client.token.clone(),
+        project: (project.1 != ProjectSource::Default).then(|| project.0.clone()),
+        tags: settings.tags.clone(),
     };
     if event == HookEvent::Stop && input["stop_hook_active"].as_bool() == Some(true) {
         // This stop follows a block, so the agent is now really done.
@@ -69,7 +79,7 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
                 .unwrap_or_default();
         let brief = Brief {
             address,
-            project: Some(crate::project::current().0.clone()),
+            project: Some(project.0),
             lead,
             codex: client.agent.as_deref() == Some("codex"),
         };
@@ -82,29 +92,26 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
 }
 
 /// Resolve the project and the lead from the session `cwd`: its
-/// `.chattrs.toml` and, for the project, its git repo. The config that `main`
-/// exported came from the process cwd, so it must not win over the one found
-/// here. An explicit `CHATTRS_PROJECT` or `CHATTRS_LEAD` still wins. A bad
-/// config file keeps what `main` exported. Sets the project and returns the
-/// lead.
-fn resolve_from(cwd: &std::path::Path) -> Option<String> {
-    let (explicit, applied) = crate::project::split_applied(std::env::var("CHATTRS_PROJECT").ok());
-    let env_lead = client::env_lead();
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let (project, lead) = match crate::config::load_from(home.as_deref(), cwd) {
-        Ok(config) => {
-            let explicit_lead = env_lead.filter(|_| !crate::config::lead_from_config());
-            let config_lead = config.lead.map(|lead| lead.trim().to_string());
-            (config.project, explicit_lead.or(config_lead.filter(|lead| !lead.is_empty())))
+/// `.chattrs.toml` and, for the project, its git repo. The settings that
+/// `main` resolved came from the process cwd, so they must not win over the
+/// config found here. An explicit `CHATTRS_PROJECT` or `CHATTRS_LEAD` still
+/// wins. A bad config file keeps the settings that `main` resolved.
+fn resolve_from(
+    settings: &Settings,
+    cwd: &std::path::Path,
+) -> ((String, ProjectSource), Option<String>) {
+    match crate::config::load_at(cwd) {
+        Ok(files) => {
+            let found = Settings::resolve(&crate::settings::process_env, &files);
+            (found.project(None, cwd), trimmed(found.lead.as_deref()))
         }
-        Err(_) => (applied, env_lead),
-    };
-    crate::project::set_current(crate::project::resolve(
-        explicit.as_deref(),
-        project.as_deref(),
-        cwd,
-    ));
-    lead
+        Err(_) => (settings.project(None, cwd), trimmed(settings.lead.as_deref())),
+    }
+}
+
+/// The value without surrounding blanks, or `None` when nothing is left.
+fn trimmed(value: Option<&str>) -> Option<String> {
+    value.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string)
 }
 
 /// One debug record per hook run, written when `CHATTRS_HOOK_DEBUG` names a

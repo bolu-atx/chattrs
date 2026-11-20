@@ -85,7 +85,13 @@ pub(crate) fn outgoing(to: &str, body: &str) -> client::Outgoing {
 
 /// The endpoint for `address` on the broker at `server`, with no token.
 pub(crate) fn endpoint(server: &str, address: &str) -> client::Endpoint {
-    client::Endpoint { server: server.to_string(), address: address.to_string(), token: None }
+    client::Endpoint {
+        server: server.to_string(),
+        address: address.to_string(),
+        token: None,
+        project: None,
+        tags: None,
+    }
 }
 
 pub(crate) async fn spawn_with_token(

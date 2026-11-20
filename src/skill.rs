@@ -29,7 +29,8 @@ mod tests {
     #[tokio::test]
     async fn skill_command_needs_no_broker() {
         let args = crate::cli::Args { command: crate::cli::Command::Skill };
-        crate::run(args).await.unwrap();
+        let settings = crate::settings::Settings::resolve(&|_| None, &Default::default());
+        crate::run(args, &settings).await.unwrap();
     }
 
     #[test]

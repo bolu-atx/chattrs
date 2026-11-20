@@ -63,6 +63,8 @@ async fn hello_with_right_token_is_welcomed() {
         server: addr.clone(),
         address: address.to_string(),
         token: Some("s3".to_string()),
+        project: None,
+        tags: None,
     };
     let id = client::publish(&token_endpoint("a@h"), outgoing("b@h", "hi")).await.unwrap();
     let messages = client::fetch_inbox(&token_endpoint("b@h")).await.unwrap();

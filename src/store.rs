@@ -368,16 +368,23 @@ impl Store {
     /// else `$XDG_DATA_HOME/chattrs/chattrs.db`, else
     /// `~/.local/share/chattrs/chattrs.db`.
     pub fn default_path() -> PathBuf {
+        Store::default_path_in(&|name| std::env::var(name).ok())
+    }
+
+    /// The default path for the variables `env` reports.
+    fn default_path_in(env: &dyn Fn(&str) -> Option<String>) -> PathBuf {
         #[cfg(windows)]
         {
-            nonempty_env("APPDATA").unwrap_or_else(|| PathBuf::from(".")).join("chattrs/chattrs.db")
+            nonempty_env(env, "APPDATA")
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("chattrs/chattrs.db")
         }
         #[cfg(not(windows))]
         {
-            if let Some(dir) = nonempty_env("XDG_DATA_HOME") {
+            if let Some(dir) = nonempty_env(env, "XDG_DATA_HOME") {
                 dir.join("chattrs/chattrs.db")
             } else {
-                let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+                let home = env("HOME").unwrap_or_else(|| ".".to_string());
                 PathBuf::from(home).join(".local/share/chattrs/chattrs.db")
             }
         }
@@ -508,8 +515,8 @@ fn add_from_role(conn: &Connection) -> Result<(), String> {
 }
 
 /// Read an env var, treating a missing or blank value as absent.
-fn nonempty_env(name: &str) -> Option<PathBuf> {
-    let value = std::env::var(name).ok()?;
+fn nonempty_env(env: &dyn Fn(&str) -> Option<String>, name: &str) -> Option<PathBuf> {
+    let value = env(name)?;
     if value.trim().is_empty() {
         return None;
     }
@@ -584,26 +591,46 @@ mod tests {
             .unwrap()
     }
 
+    fn env_of(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+        let map: std::collections::HashMap<String, String> =
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        move |name: &str| map.get(name).cloned()
+    }
+
     #[test]
     fn nonempty_env_ignores_missing_and_blank_values() {
-        std::env::remove_var("CHATTRS_TEST_PROBE_DIR");
-        assert_eq!(nonempty_env("CHATTRS_TEST_PROBE_DIR"), None);
-        std::env::set_var("CHATTRS_TEST_PROBE_DIR", "   ");
-        assert_eq!(nonempty_env("CHATTRS_TEST_PROBE_DIR"), None);
-        std::env::set_var("CHATTRS_TEST_PROBE_DIR", "/tmp/probe");
-        assert_eq!(nonempty_env("CHATTRS_TEST_PROBE_DIR"), Some(PathBuf::from("/tmp/probe")));
-        std::env::remove_var("CHATTRS_TEST_PROBE_DIR");
+        assert_eq!(nonempty_env(&env_of(&[]), "PROBE_DIR"), None);
+        assert_eq!(nonempty_env(&env_of(&[("PROBE_DIR", "   ")]), "PROBE_DIR"), None);
+        assert_eq!(
+            nonempty_env(&env_of(&[("PROBE_DIR", "/tmp/probe")]), "PROBE_DIR"),
+            Some(PathBuf::from("/tmp/probe"))
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn default_path_prefers_xdg_data_home_then_home() {
+        let env = env_of(&[("XDG_DATA_HOME", "/x"), ("HOME", "/h")]);
+        assert_eq!(Store::default_path_in(&env), PathBuf::from("/x/chattrs/chattrs.db"));
+        let env = env_of(&[("XDG_DATA_HOME", " "), ("HOME", "/h")]);
+        assert_eq!(
+            Store::default_path_in(&env),
+            PathBuf::from("/h/.local/share/chattrs/chattrs.db")
+        );
+        assert_eq!(
+            Store::default_path_in(&env_of(&[])),
+            PathBuf::from("./.local/share/chattrs/chattrs.db")
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn default_path_uses_appdata_on_windows() {
-        std::env::set_var("APPDATA", "C:\\Users\\tester\\AppData\\Roaming");
+        let env = env_of(&[("APPDATA", "C:\\Users\\tester\\AppData\\Roaming")]);
         assert_eq!(
-            Store::default_path(),
+            Store::default_path_in(&env),
             PathBuf::from("C:\\Users\\tester\\AppData\\Roaming").join("chattrs/chattrs.db")
         );
-        std::env::remove_var("APPDATA");
     }
 
     #[tokio::test]

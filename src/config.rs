@@ -7,12 +7,11 @@
 //! 2. `.chattrs.toml` in the current directory or the nearest parent, up to
 //!    a `.git` boundary: `project`, `lead`. It holds no secrets.
 //!
-//! `apply_env` fills a variable only when the environment leaves it unset,
-//! so clap and the `env_*` readers see one merged view. The files use the
-//! flat subset of TOML that `tokens::parse_pair` reads.
+//! `settings::Settings` merges these values with the variables; this module
+//! only reads the files. The files use the flat subset of TOML that
+//! `tokens::parse_pair` reads.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::tokens::{glob_matches, parse_pair};
 
@@ -168,11 +167,16 @@ pub fn load_from(home: Option<&Path>, cwd: &Path) -> Result<Config, String> {
     Ok(config)
 }
 
+/// Load the config for the real home and the working directory `cwd`.
+pub fn load_at(cwd: &Path) -> Result<Config, String> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    load_from(home.as_deref(), cwd)
+}
+
 /// Load the config for the real home and the current directory.
 pub fn load() -> Result<Config, String> {
-    let home = std::env::var_os("HOME").map(PathBuf::from);
     let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
-    load_from(home.as_deref(), &cwd)
+    load_at(&cwd)
 }
 
 /// The address a command will use, read before clap runs: a flag in `args`
@@ -250,7 +254,7 @@ impl Config {
 
     /// Replace the fallback `token` with the token of the `[tokens]` entry
     /// that fits `address`, if one does. The caller skips this when
-    /// `CHATTRS_TOKEN` is set, so the variable keeps winning.
+    /// `CHATTRS_TOKEN` is set, so the variable keeps winning (`Settings`).
     pub fn select_token(&mut self, address: Option<&str>) -> Result<(), String> {
         let Some(path) = address.and_then(|address| self.mapped_token_file(address)) else {
             return Ok(());
@@ -258,60 +262,6 @@ impl Config {
         self.token = Some(read_token_file(path)?);
         Ok(())
     }
-
-    /// The `(variable, value)` pairs to add: only variables `is_set`
-    /// reports as unset in the environment.
-    pub fn missing_env(&self, is_set: impl Fn(&str) -> bool) -> Vec<(&'static str, &str)> {
-        [
-            ("CHATTRS_SERVER", &self.server),
-            ("CHATTRS_TAGS", &self.tags),
-            ("CHATTRS_PROJECT", &self.project),
-            ("CHATTRS_LEAD", &self.lead),
-            ("CHATTRS_TOKEN", &self.token),
-        ]
-        .into_iter()
-        .filter_map(|(name, value)| value.as_deref().map(|v| (name, v)))
-        .filter(|(name, _)| !is_set(name))
-        .collect()
-    }
-
-    /// Export the config as the variables clap and the readers look at.
-    /// Call it once, before parsing arguments.
-    pub fn apply_env(&self) {
-        for (name, value) in self.missing_env(|name| std::env::var_os(name).is_some()) {
-            match name {
-                "CHATTRS_PROJECT" => PROJECT_FROM_CONFIG.store(true, Ordering::Relaxed),
-                "CHATTRS_LEAD" => LEAD_FROM_CONFIG.store(true, Ordering::Relaxed),
-                "CHATTRS_TOKEN" => TOKEN_FROM_CONFIG.store(true, Ordering::Relaxed),
-                _ => {}
-            }
-            std::env::set_var(name, value);
-        }
-    }
-}
-
-/// Set when `apply_env` exported the config `project` as `CHATTRS_PROJECT`.
-static PROJECT_FROM_CONFIG: AtomicBool = AtomicBool::new(false);
-
-/// Set when `apply_env` exported the config `lead` as `CHATTRS_LEAD`.
-static LEAD_FROM_CONFIG: AtomicBool = AtomicBool::new(false);
-
-/// Set when `apply_env` exported a config token as `CHATTRS_TOKEN`.
-static TOKEN_FROM_CONFIG: AtomicBool = AtomicBool::new(false);
-
-/// Whether `CHATTRS_TOKEN` holds a config token and not an explicit one.
-pub fn token_from_config() -> bool {
-    TOKEN_FROM_CONFIG.load(Ordering::Relaxed)
-}
-
-/// Whether `CHATTRS_PROJECT` holds the config project and not an explicit one.
-pub fn project_from_config() -> bool {
-    PROJECT_FROM_CONFIG.load(Ordering::Relaxed)
-}
-
-/// Whether `CHATTRS_LEAD` holds the config lead and not an explicit one.
-pub fn lead_from_config() -> bool {
-    LEAD_FROM_CONFIG.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
@@ -353,18 +303,6 @@ mod tests {
         assert_eq!(config.project.as_deref(), Some("alpha"));
         assert_eq!(config.lead.as_deref(), Some("o@m"));
         assert_eq!(config.token.as_deref(), Some("s3cret"));
-    }
-
-    #[test]
-    fn config_fills_only_what_the_environment_leaves_unset() {
-        let config = Config {
-            server: Some("file:1".into()),
-            project: Some("repo".into()),
-            ..Config::default()
-        };
-        let added = config.missing_env(|name| name == "CHATTRS_SERVER");
-        assert_eq!(added, vec![("CHATTRS_PROJECT", "repo")]);
-        assert_eq!(config.missing_env(|_| false).len(), 2);
     }
 
     #[test]
@@ -478,14 +416,6 @@ mod tests {
         assert_eq!(config.token.as_deref(), Some("tok-plain"));
         let (_dir, mut config) = mapped_config(false, &[("lead@mac", "exact")]);
         assert_eq!(token_for(&mut config, "w1@mac"), None);
-    }
-
-    #[test]
-    fn an_explicit_token_variable_beats_the_map() {
-        let (_dir, mut config) = mapped_config(true, &[("lead@mac", "exact")]);
-        config.select_token(Some("lead@mac")).unwrap();
-        let added = config.missing_env(|name| name == "CHATTRS_TOKEN");
-        assert!(added.iter().all(|(name, _)| *name != "CHATTRS_TOKEN"), "{added:?}");
     }
 
     #[test]
