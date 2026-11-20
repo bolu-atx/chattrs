@@ -279,6 +279,31 @@ fn log_json_lines_have_type_log() {
 }
 
 #[test]
+fn first_run_creates_the_data_directory() {
+    // On a new machine the data directory does not exist yet. Autostart
+    // opens its log there before the broker creates the DB, so it must
+    // create the directory itself.
+    let dir = tempfile::TempDir::new().expect("make a temp dir");
+    let db = dir.path().join("new").join("data").join("c.db");
+    let closed = format!("127.0.0.1:{}", free_port());
+    let mut command = Command::new(binary());
+    command.arg("inbox").arg("--server").arg(&closed);
+    command.env("CHATTRS_ADDRESS", "a@h");
+    command.env("CHATTRS_DB", &db);
+    command.env_remove("CHATTRS_TOKEN").env_remove("CHATTRS_AGENT").env_remove("CHATTRS_SERVER");
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let output = command.output().expect("run the client");
+    assert_eq!(output.status.code(), Some(0), "first run auto-starts a broker: {output:?}");
+    assert!(db.parent().expect("db dir").join("chattrs.log").exists(), "the log is created");
+
+    let mut stop = Command::new(binary());
+    stop.arg("stop").env("CHATTRS_DB", &db);
+    stop.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let stopped = stop.output().expect("stop the broker");
+    assert_eq!(stopped.status.code(), Some(0), "stop exits zero: {stopped:?}");
+}
+
+#[test]
 fn errors_go_to_stderr_with_exit_one() {
     // A loopback server with no broker starts one on demand (CLI-11):
     // the command then runs against it. The DB is a temp path, so the
