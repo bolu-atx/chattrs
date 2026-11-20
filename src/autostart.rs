@@ -2,8 +2,8 @@
 //!
 //! A client command whose first connect fails with connection refused, on
 //! a loopback server, spawns the same binary as `serve --listen` on that
-//! address, detached with its log next to the DB, waits until the port
-//! answers, and retries once on a fresh connection. A remote server is
+//! address, detached with its log next to the DB, then the caller retries on a fresh
+//! connection until the broker answers. A remote server is
 //! never started: the original connect error returns.
 
 use std::path::{Path, PathBuf};
@@ -81,32 +81,25 @@ fn spawn_broker(server: &str, db: &Path, token: Option<&str>) -> Result<(), Stri
     Ok(())
 }
 
-/// True once `server` accepts a connection, waiting up to five seconds.
-async fn wait_until_serving(server: &str) -> bool {
-    let end = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        if tokio::net::TcpStream::connect(server).await.is_ok() {
-            return true;
-        }
-        if tokio::time::Instant::now() >= end {
-            return false;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
+/// How long a client waits for a starting broker to answer.
+const WAIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Pause between connect attempts while a broker starts.
+pub const RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// The instant the wait for a starting broker ends.
+pub fn wait_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + WAIT_WINDOW
 }
 
-/// Start a loopback broker on demand and wait until it answers. The race
-/// loser fails its bind and exits, so parallel callers still end with
-/// one broker on the same DB file.
+/// Start a loopback broker on demand. The caller retries its connect
+/// until the broker answers. The race loser fails its bind and exits, so
+/// parallel callers still end with one broker on the same DB file.
 pub async fn ensure_started(server: &str, token: Option<&str>) -> Result<(), String> {
     let db = client_db_path();
     spawn_broker(server, &db, token)?;
     eprintln!("chattrs: started a broker for {server}, see {}", log_path(&db).display());
-    if wait_until_serving(server).await {
-        Ok(())
-    } else {
-        Err(format!("broker did not start, see {}", log_path(&db).display()))
-    }
+    Ok(())
 }
 
 /// Record this broker's pid next to the DB. Written after the bind
