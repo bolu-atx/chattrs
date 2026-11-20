@@ -18,8 +18,33 @@ fn read_test_pid(db: &std::path::Path) -> Option<u32> {
 
 /// Run a client command with `CHATTRS_DB` pointing at `db`, so an
 /// auto-start uses this test's database.
+///
+/// The client's output goes to anonymous files, not pipes. On macOS std
+/// creates a pipe and marks it close-on-exec in two steps. A parallel
+/// spawn from another thread can inherit the pipe in that gap. The
+/// client then passes it on to the broker it auto-starts, and the broker
+/// holds the pipe open until it exits, so `Command::output` never sees
+/// end-of-file and the test hangs. Files are opened close-on-exec in one
+/// step, so they cannot leak.
 fn run_client(bin: &std::path::Path, db: &std::path::Path, args: &[&str]) -> std::process::Output {
-    std::process::Command::new(bin).args(args).env("CHATTRS_DB", db).output().expect("run chattrs")
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut out = tempfile::tempfile().expect("stdout file");
+    let mut err = tempfile::tempfile().expect("stderr file");
+    let status = std::process::Command::new(bin)
+        .args(args)
+        .env("CHATTRS_DB", db)
+        .stdin(std::process::Stdio::null())
+        .stdout(out.try_clone().expect("clone stdout file"))
+        .stderr(err.try_clone().expect("clone stderr file"))
+        .status()
+        .expect("run chattrs");
+    let read = |file: &mut std::fs::File| {
+        let mut bytes = Vec::new();
+        file.seek(SeekFrom::Start(0)).expect("rewind");
+        file.read_to_end(&mut bytes).expect("read output file");
+        bytes
+    };
+    std::process::Output { status, stdout: read(&mut out), stderr: read(&mut err) }
 }
 
 fn run_stop(bin: &std::path::Path, db: &std::path::Path) -> std::process::Output {

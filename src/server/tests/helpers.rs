@@ -8,6 +8,9 @@ use tokio::io::AsyncBufReadExt as _;
 use tokio::io::BufReader as TokioBufReader;
 use tokio::net::TcpStream as TokioTcpStream;
 
+#[path = "../../../tests/common/mod.rs"]
+mod ports;
+
 pub(crate) async fn spawn() -> (String, TempDir, tokio::task::JoinHandle<()>) {
     let dir = TempDir::new().unwrap();
     let store = Store::open(dir.path().join("chattrs.db")).await.unwrap();
@@ -195,9 +198,9 @@ impl Drop for ProcChild {
     }
 }
 
+/// A loopback address nothing listens on, for a broker that binds it later.
 pub(crate) fn free_addr() -> String {
-    let probe = std::net::TcpListener::bind("127.0.0.1:0").expect("probe bind");
-    probe.local_addr().expect("probe addr").to_string()
+    format!("127.0.0.1:{}", ports::free_port())
 }
 
 pub(crate) fn start_server(bin: &std::path::Path, addr: &str, db: &std::path::Path) -> ProcChild {
