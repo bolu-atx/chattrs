@@ -10,6 +10,7 @@ mod mailbox;
 mod observer;
 mod projects;
 mod retry;
+mod session;
 mod state;
 mod tags;
 mod tokens;

@@ -137,6 +137,15 @@ pub fn env_lead() -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// The session from `CHATTRS_SESSION`, or `None` when it is unset or
+/// blank. The one place the variable is read. The launch environment
+/// sets it, so it survives `/clear`.
+pub fn env_session() -> Option<String> {
+    let value = std::env::var("CHATTRS_SESSION").ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 impl Client {
     /// Connect to `endpoint` and say `hello`. When the first connect
     /// fails with connection refused on a loopback server, start a
@@ -204,6 +213,7 @@ impl Client {
                 observer,
                 state: state.map(str::to_string),
                 project: project.map(str::to_string).or_else(env_project),
+                session: env_session(),
             })
             .await?;
         match frame {

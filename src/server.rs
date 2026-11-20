@@ -57,6 +57,49 @@ pub struct Broker {
     /// Live inbox `watch` connections per (project, address). In memory
     /// only.
     watchers: Arc<Mutex<Watchers>>,
+    /// The session that holds each (project, address), with its live
+    /// connection count. In memory only: a broker restart clears it.
+    sessions: Arc<Mutex<Sessions>>,
+}
+
+/// The holder of one (project, address).
+struct Holder {
+    session: String,
+    /// Live connections of the holder.
+    connections: usize,
+    /// When the holder's connections last sent a frame, in ms.
+    last_ms: u64,
+}
+
+type Sessions = HashMap<(String, String), Holder>;
+
+/// One live connection of a session holder. Dropping it decrements the
+/// count and frees the address at zero, on every exit path.
+struct SessionGuard {
+    sessions: Arc<Mutex<Sessions>>,
+    key: (String, String),
+}
+
+impl SessionGuard {
+    /// Record activity on the holder.
+    fn touch(&self) {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(holder) = sessions.get_mut(&self.key) {
+            holder.last_ms = store::now_ms();
+        }
+    }
+}
+
+impl Drop for SessionGuard {
+    fn drop(&mut self) {
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(holder) = sessions.get_mut(&self.key) {
+            holder.connections -= 1;
+            if holder.connections == 0 {
+                sessions.remove(&self.key);
+            }
+        }
+    }
 }
 
 /// The live inbox watch count for each (project, address).
@@ -122,6 +165,9 @@ struct ConnState {
     /// Held while this connection counts in `Broker::watchers`. Its drop
     /// decrements, on every exit path.
     watch_guard: Option<WatchGuard>,
+    /// Held while this connection counts for its session. `None` for an
+    /// observer or a hello with no session.
+    session_guard: Option<SessionGuard>,
     highest: u64,
     waits: HashSet<u64>,
     push_rx: Option<broadcast::Receiver<Arc<Message>>>,
@@ -279,6 +325,7 @@ struct Hello {
     observer: bool,
     state: Option<String>,
     project: Option<String>,
+    session: Option<String>,
 }
 
 /// One event for the connection loop: a line from the peer or a push.
@@ -296,7 +343,14 @@ impl Broker {
     /// that falls further behind is dropped.
     fn with_capacity(store: Store, token: Option<String>, capacity: usize) -> Broker {
         let (pushed, _) = broadcast::channel(capacity);
-        Broker { store, pushed, token, tokens: None, watchers: Arc::default() }
+        Broker {
+            store,
+            pushed,
+            token,
+            tokens: None,
+            watchers: Arc::default(),
+            sessions: Arc::default(),
+        }
     }
 
     /// Use a token table in place of the shared token.
@@ -351,7 +405,12 @@ impl Broker {
             };
             let result = match event {
                 Event::Line(Some(LineRead::Line(line))) => match protocol::decode(&line) {
-                    Ok(frame) => self.dispatch(&mut conn, frame).await,
+                    Ok(frame) => {
+                        if let Some(guard) = &conn.session_guard {
+                            guard.touch();
+                        }
+                        self.dispatch(&mut conn, frame).await
+                    }
                     Err(e) => Err(WireError::new("bad_frame", format!("bad frame: {e}"))),
                 },
                 Event::Line(Some(LineRead::TooLarge)) => {
@@ -393,8 +452,9 @@ impl Broker {
     ) -> Result<Vec<Outbound>, WireError> {
         if conn.address.is_none() {
             return match frame {
-                Inbound::Hello { v, address, token, tags, observer, state, project } => {
-                    let hello = Hello { v, address, token, tags, observer, state, project };
+                Inbound::Hello { v, address, token, tags, observer, state, project, session } => {
+                    let hello =
+                        Hello { v, address, token, tags, observer, state, project, session };
                     self.on_hello(conn, hello).await
                 }
                 _ => Err(WireError::new("hello_required", "hello must be the first frame")),
@@ -432,7 +492,7 @@ impl Broker {
         conn: &mut ConnState,
         hello: Hello,
     ) -> Result<Vec<Outbound>, WireError> {
-        let Hello { v, address, token, tags, observer, state, project } = hello;
+        let Hello { v, address, token, tags, observer, state, project, session } = hello;
         let entry = self.authenticate(token.as_deref())?;
         let role = entry.map(|entry| entry.role);
         if v != model::PROTOCOL_VERSION {
@@ -460,9 +520,11 @@ impl Broker {
         if observer && state.is_some() {
             return Err(WireError::new("observer_read_only", "an observer cannot set a state"));
         }
+        let guard = self.claim_session(&project, &address, session.filter(|_| !observer))?;
         if !observer {
             self.store.touch_agent(project.clone(), address.clone(), tags, state).await?;
         }
+        conn.session_guard = guard;
         let watching = !observer && self.is_watched(&project, &address);
         conn.observer = observer;
         conn.role = role;
@@ -633,6 +695,45 @@ impl Broker {
         } else {
             conn.watch_guard = None;
         }
+    }
+
+    /// Validate the session of a non-observer hello and register it.
+    /// `None` when the hello has no session.
+    fn claim_session(
+        &self,
+        project: &str,
+        address: &str,
+        session: Option<String>,
+    ) -> Result<Option<SessionGuard>, WireError> {
+        let Some(session) = session else {
+            return Ok(None);
+        };
+        if !model::is_valid_session(&session) {
+            return Err(WireError::new(
+                "bad_session",
+                "session must be 1 to 128 printable ASCII characters with no spaces",
+            ));
+        }
+        let key = (project.to_string(), address.to_string());
+        let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let now = store::now_ms();
+        match sessions.get_mut(&key) {
+            Some(holder) if holder.session != session => {
+                let age = now.saturating_sub(holder.last_ms) / 1000;
+                return Err(WireError::new(
+                    "address_in_use",
+                    format!("address in use by another session, last active {age} s ago"),
+                ));
+            }
+            Some(holder) => {
+                holder.connections += 1;
+                holder.last_ms = now;
+            }
+            None => {
+                sessions.insert(key.clone(), Holder { session, connections: 1, last_ms: now });
+            }
+        }
+        Ok(Some(SessionGuard { sessions: Arc::clone(&self.sessions), key }))
     }
 
     /// True when the address has at least one live inbox watch in the

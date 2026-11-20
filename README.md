@@ -135,6 +135,10 @@ Common flags:
   Optional. Set it only in the launch environment, with `CHATTRS_ADDRESS`
   and `CHATTRS_PROJECT`. Never set these in a shell rc file: every session
   would share one identity.
+- `CHATTRS_SESSION` — the id of one agent session, such as the output of
+  `uuidgen`. Optional. Set it only in the launch environment. The broker
+  lets one session use an address at a time (see
+  [One session per address](#one-session-per-address)).
 - `--token TOKEN` — fleet token (`CHATTRS_TOKEN`). `serve` needs it for a
   non-loopback bind; every other command sends it in `hello`.
 - `serve --tokens PATH` — token table file (`CHATTRS_TOKENS`). It replaces
@@ -418,6 +422,29 @@ chattrs agents --all      # include agents quiet for over 7 days
 The hooks need no setup: they read `CHATTRS_PROJECT` like every command,
 and the session-start context names the project when it is not `default`.
 
+### One session per address
+
+`hello` may carry an optional `session`, which the client reads from
+`CHATTRS_SESSION`. It must be 1 to 128 bytes of printable ASCII with no
+spaces, or the broker answers `bad_session`. The broker keeps an in-memory
+record of which session holds each (project, address), with its live
+connection count and last activity. A restart of the broker clears it.
+
+- A `hello` from a different session, while the holder has a live
+  connection, gets `address_in_use`. The message says how long ago the
+  holder was last active, such as `address in use by another session, last
+  active 12 s ago`. The client does not retry it: wait, or use another
+  address.
+- The same session may open more connections: `watch`, `send`, and the
+  hooks all do.
+- The address is free when the holder's last connection closes. A holder
+  that died without a close clears through TCP keepalive in about 1
+  minute.
+- An old client sends no session. It is never refused and never
+  registered, so it does not block a session holder. The broker only warns
+  about a second live watch.
+- An observer never registers and is never refused.
+
 ### Start a worker
 
 The lead starts each worker over ssh, in a detached tmux session. The
@@ -432,6 +459,7 @@ ssh <host> 'tmux new -d -s worker1 \
           CHATTRS_SERVER=<broker-ip>:4646 \
           CHATTRS_PROJECT=<project> \
           CHATTRS_LEAD=opus@mac \
+          CHATTRS_SESSION=$(uuidgen) \
           CHATTRS_TAGS=gpu; \
    mkdir -p ~/.claude/skills/chattrs && \
      chattrs skill > ~/.claude/skills/chattrs/SKILL.md; \
@@ -439,7 +467,9 @@ ssh <host> 'tmux new -d -s worker1 \
 Run chattrs watch under the Monitor tool now.\""'
 ```
 
-`CHATTRS_LEAD` survives `/clear`; the launch prompt does not. The prompt
+`CHATTRS_LEAD` and `CHATTRS_SESSION` survive `/clear`; the launch prompt
+does not. `CHATTRS_SESSION` is new for each launch, because the env stays
+the same inside one session. The prompt
 names the worker's address and its lead. It also starts
 `chattrs watch` under Monitor, so a message wakes the worker. See the
 `chattrs-fleet` skill for the same wording. `CHATTRS_TAGS` is optional
@@ -767,7 +797,7 @@ message it answers; an explicit `topic` always wins. An invalid slug is
 rejected with `bad_topic`.
 
 Error codes: `bad_frame`, `hello_required`, `bad_version` (v ≠ 1),
-`bad_address`, `bad_token`, `bad_tags`, `bad_project`, `bad_topic`, `empty_body`, `too_large`,
+`bad_address`, `bad_token`, `bad_tags`, `bad_project`, `bad_session`, `address_in_use`, `bad_topic`, `empty_body`, `too_large`,
 `unknown_message`, `not_recipient`. After `hello`, an error does not
 close the connection, except `bad_token`, which always closes it.
 
