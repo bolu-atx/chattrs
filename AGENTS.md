@@ -47,6 +47,7 @@ CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to
 | `src/setup_join.rs` | `chattrs setup --join`: parse join strings, write token files, edit `[tokens]` in `config.toml` |
 | `src/backup.rs` | `chattrs backup`: online copy of the database with the SQLite backup API, temp file then rename, mode 0600 |
 | `src/doctor.rs` | `chattrs doctor`: read-only host check, one `ok`/`FAIL` line per check; probes the broker with an observer `hello` so no agent is recorded |
+| `src/project.rs` | The client project resolver: env, config, git repo name, `default`; runs `git` with a 2 s timeout |
 | `src/skill.rs` | Embedded agent skill text printed by `chattrs skill` |
 | `skills/chattrs/SKILL.md` | Agent skill: `send`, `ask`, `reply`, no polling |
 

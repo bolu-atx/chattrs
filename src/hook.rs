@@ -40,6 +40,11 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
         return;
     };
     let input = read_input();
+    // The project resolves from where the agent works, not from where the
+    // hook command started.
+    if let Some(cwd) = input["cwd"].as_str().filter(|cwd| !cwd.is_empty()) {
+        let _ = std::env::set_current_dir(cwd);
+    }
     let mut trace = Trace::new(event, input.clone());
     let endpoint = Endpoint {
         server: client.server.clone(),
@@ -59,7 +64,7 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
                 .unwrap_or_default();
         let brief = Brief {
             address,
-            project: client::env_project(),
+            project: Some(crate::project::current().0.clone()),
             lead: client::env_lead(),
             codex: client.agent.as_deref() == Some("codex"),
         };

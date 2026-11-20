@@ -22,6 +22,7 @@ mod hook;
 mod hook_install;
 mod model;
 mod output;
+mod project;
 mod protocol;
 mod server;
 mod setup;
@@ -325,14 +326,19 @@ fn cmd_env(c: cli::EnvArgs) -> Result<(), RunError> {
         ("CHATTRS_ADDRESS", c.address),
         ("CHATTRS_SESSION", new_session_id()),
     ];
+    let (explicit, from_config) = project::split_applied(c.project);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let (project, source) = project::resolve(explicit.as_deref(), from_config.as_deref(), &cwd);
+    let project = (source != project::ProjectSource::Default).then_some(project);
     let optional = [
-        ("CHATTRS_PROJECT", c.project),
+        ("CHATTRS_PROJECT", project),
         ("CHATTRS_LEAD", c.lead),
         ("CHATTRS_TAGS", c.tags),
         ("CHATTRS_TOKEN", c.token.filter(|_| c.with_token)),
     ];
     pairs.extend(optional.into_iter().filter_map(|(name, value)| Some((name, value?))));
-    write(&output::export_lines(&pairs))
+    let source = format!("# project source: {}\n", source.word());
+    write(&(output::export_lines(&pairs) + &source))
 }
 
 fn cmd_skill() -> Result<(), RunError> {

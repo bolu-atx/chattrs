@@ -272,7 +272,13 @@ async fn check_probes(
     server: &str,
     address: &str,
 ) {
-    let project = args.project.clone().filter(|p| !p.trim().is_empty()).or(config.project.clone());
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let (explicit, from_config) = crate::project::split_applied(args.project.clone());
+    let from_config = from_config.or(config.project.clone());
+    let (project, source) =
+        crate::project::resolve(explicit.as_deref(), from_config.as_deref(), &cwd);
+    report.pass("project", format!("{project} ({})", source.word()));
+    let hello_project = (source != crate::project::ProjectSource::Default).then_some(project);
     let own_token = match args.token.clone().filter(|token| !token.is_empty()) {
         Some(token) => Some(token),
         None => token_source(config, address).and_then(|p| config::read_token_file(&p).ok()),
@@ -282,14 +288,15 @@ async fn check_probes(
     let who = Hello {
         address,
         token: own_token.as_deref(),
-        project: project.as_deref(),
+        project: hello_project.as_deref(),
         session: session.as_deref(),
         observer,
     };
     let result = probe(server, who).await;
     report_protocol(report, &result);
     report_broker(report, &result);
-    report_token(report, address, &result, observer, config.project.as_deref());
+    let sent = hello_project.as_deref().unwrap_or(model::DEFAULT_PROJECT);
+    report_token(report, address, &result, observer, config.project.as_deref(), (sent, source));
     for (pattern, _) in config.token_map.iter().filter(|(pattern, _)| pattern != address) {
         report
             .pass("token", format!("{pattern}: not probed (only the current address is checked)"));
@@ -337,6 +344,7 @@ fn report_token(
     result: &Result<Probe, String>,
     observer: bool,
     repo: Option<&str>,
+    chosen: (&str, crate::project::ProjectSource),
 ) {
     let (project, how) = match result {
         Err(error) => return report.fail("token", format!("{who}: {error}")),
@@ -363,7 +371,11 @@ fn report_token(
         Ok(Probe::Rejected { code, message }) if code == "forbidden" => {
             return report.fail(
                 "token",
-                format!("{who}: {message}; check the [tokens] entry, the address, and the project"),
+                format!(
+                    "{who}: token not valid for project {} ({}): {message}; check the [tokens] entry, the address, and the project",
+                    chosen.0,
+                    chosen.1.how()
+                ),
             )
         }
         Ok(Probe::Rejected { code, message }) => {

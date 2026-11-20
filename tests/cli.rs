@@ -1406,3 +1406,38 @@ fn help_never_prints_the_token() {
         assert!(!text.contains(secret), "`chattrs {name} --help` printed the token");
     }
 }
+
+#[test]
+fn env_says_where_the_project_came_from() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path();
+    let env_out =
+        |envs: &[(&str, &str)]| stdout_text(&run_in(cwd, cwd, envs, &["env", "--as", "w@h"]));
+    let out = env_out(&[]);
+    assert!(out.contains("# project source: default\n"), "{out}");
+    assert!(!out.contains("CHATTRS_PROJECT"), "{out}");
+    let out = env_out(&[("CHATTRS_PROJECT", "fromenv")]);
+    assert!(out.contains("# project source: env\n"), "{out}");
+    std::fs::write(cwd.join(".chattrs.toml"), "project = \"repo\"\n").unwrap();
+    let out = env_out(&[]);
+    assert!(out.contains("# project source: config\n"), "{out}");
+}
+
+#[test]
+fn env_derives_the_project_from_a_repo() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path().join("My_Repo");
+    std::fs::create_dir(&cwd).unwrap();
+    let status = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .arg(&cwd)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env_remove("GIT_DIR")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let out = stdout_text(&run_in(dir.path(), &cwd, &[], &["env", "--as", "w@h"]));
+    assert!(out.contains("export CHATTRS_PROJECT='my-repo'\n"), "{out}");
+    assert!(out.contains("# project source: git\n"), "{out}");
+}

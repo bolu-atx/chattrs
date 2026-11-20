@@ -249,9 +249,21 @@ impl Config {
     /// Call it once, before parsing arguments.
     pub fn apply_env(&self) {
         for (name, value) in self.missing_env(|name| std::env::var_os(name).is_some()) {
+            if name == "CHATTRS_PROJECT" {
+                PROJECT_FROM_CONFIG.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
             std::env::set_var(name, value);
         }
     }
+}
+
+/// Set when `apply_env` exported the config `project` as `CHATTRS_PROJECT`.
+static PROJECT_FROM_CONFIG: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether `CHATTRS_PROJECT` holds the config project and not an explicit one.
+pub fn project_from_config() -> bool {
+    PROJECT_FROM_CONFIG.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 #[cfg(test)]
