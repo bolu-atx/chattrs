@@ -90,6 +90,9 @@ pub fn render_message(message: &Message) -> String {
         attr(&message.from),
         recipient
     );
+    if let Some(role) = message.from_role.as_deref() {
+        open.push_str(&format!(" from-role=\"{}\"", attr(role)));
+    }
     if let Some(topic) = message.topic.as_deref() {
         open.push_str(&format!(" topic=\"{}\"", attr(topic)));
     }
@@ -120,6 +123,9 @@ pub fn render_log_line(message: &LoggedMessage) -> String {
     };
     let mut line =
         format!("{} [{}{}] {} → {}", format_ts(inner.ts), inner.id, unread, inner.from, recipient);
+    if let Some(role) = inner.from_role.as_deref() {
+        line.push_str(&format!(" (from {role})"));
+    }
     if inner.to.is_some() {
         if let Some(topic) = inner.topic.as_deref() {
             line.push_str(&format!(" (topic {topic})"));
@@ -420,6 +426,7 @@ pub(crate) mod tests {
             reply_to: Some(12),
             topic: None,
             project: "default".into(),
+            from_role: None,
         };
         let expected = concat!(
             "<agent-message id=\"13\" from=\"codex@box1\" to=\"opus@mac\" ",
@@ -443,6 +450,7 @@ pub(crate) mod tests {
             reply_to: None,
             topic: None,
             project: "default".into(),
+            from_role: None,
         };
         let text = render_message(&message);
         assert!(!text.contains("reply-to"), "no reply-to without a reply: {text}");
@@ -463,6 +471,7 @@ pub(crate) mod tests {
             reply_to: None,
             topic: None,
             project: "default".into(),
+            from_role: None,
         };
         let text = render_message(&message);
         assert_eq!(text.matches("</agent-message>").count(), 1, "only the wrapper closes: {text}");
@@ -485,6 +494,7 @@ pub(crate) mod tests {
                 reply_to: Some(12),
                 topic: None,
                 project: "default".into(),
+                from_role: None,
             },
             acked_at: Some(1763200000500),
         };
@@ -506,6 +516,7 @@ pub(crate) mod tests {
                 reply_to: None,
                 topic: None,
                 project: "default".into(),
+                from_role: None,
             },
             acked_at: None,
         };
@@ -527,6 +538,7 @@ pub(crate) mod tests {
                 reply_to: None,
                 topic: Some("release-26".into()),
                 project: "default".into(),
+                from_role: None,
             },
             acked_at: None,
         };
@@ -548,6 +560,7 @@ pub(crate) mod tests {
                 reply_to: Some(12),
                 topic: None,
                 project: "default".into(),
+                from_role: None,
             },
             acked_at: None,
         };
@@ -585,6 +598,7 @@ pub(crate) mod tests {
             reply_to: None,
             topic: None,
             project: "default".into(),
+            from_role: None,
         }
     }
 

@@ -111,6 +111,10 @@ pub struct Message {
     /// The project the message belongs to. Older brokers omit it.
     #[serde(default = "default_project")]
     pub project: String,
+    /// The role of the sender's token (`lead`, `agent`, or `observer`),
+    /// set by the broker from its token table. Absent without a table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_role: Option<String>,
 }
 
 /// One known agent: an address that completed a `hello`, and when the

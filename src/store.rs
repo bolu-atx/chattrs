@@ -22,12 +22,22 @@ pub struct Store {
 /// the tables without the `topic` column; version 2 adds it; version 3 adds
 /// the `tags` column to `agents`; version 4 adds `state` and
 /// `state_at`; version 5 adds `project` to both tables and keys `agents`
-/// by (project, address).
-const SCHEMA_VERSION: i64 = 5;
+/// by (project, address); version 6 adds `from_role` to `messages`.
+const SCHEMA_VERSION: i64 = 6;
 
 /// The columns of one stored message. Every query that returns messages
 /// selects this list and maps it with `message_from_row`.
-const MESSAGE_COLUMNS: &str = "id, sender, recipient, body, ts, reply_to, topic, project";
+const MESSAGE_COLUMNS: &str =
+    "id, sender, recipient, body, ts, reply_to, topic, project, from_role";
+
+/// Who sends a message: the project and address of the connection, and
+/// the role its token carries, if the broker has a token table.
+#[derive(Debug, Clone)]
+pub struct Sender {
+    pub project: String,
+    pub address: String,
+    pub role: Option<String>,
+}
 
 impl Store {
     /// Open (creating parent directories) or create the database at `path`.
@@ -55,8 +65,7 @@ impl Store {
     /// A `None` topic is the general chat; a `None` recipient announces.
     pub async fn insert(
         &self,
-        project: String,
-        sender: String,
+        sender: Sender,
         recipient: Option<String>,
         body: String,
         reply_to: Option<u64>,
@@ -64,9 +73,10 @@ impl Store {
     ) -> Result<Message, String> {
         self.with(move |conn| {
             let ts = now_ms();
+            let Sender { project, address: sender, role: from_role } = sender;
             conn.execute(
-                "INSERT INTO messages (sender, recipient, body, ts, reply_to, topic, project)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO messages (sender, recipient, body, ts, reply_to, topic, project, from_role)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     sender,
                     recipient.as_deref().unwrap_or(""),
@@ -74,7 +84,8 @@ impl Store {
                     ts as i64,
                     reply_to.map(|id| id as i64),
                     topic,
-                    project
+                    project,
+                    from_role
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -87,6 +98,7 @@ impl Store {
                 reply_to,
                 topic,
                 project,
+                from_role,
             })
         })
         .await
@@ -226,7 +238,7 @@ impl Store {
                 |row| {
                     Ok(LoggedMessage {
                         message: message_from_row(row)?,
-                        acked_at: row.get::<_, Option<i64>>(8)?.map(|ts| ts as u64),
+                        acked_at: row.get::<_, Option<i64>>(9)?.map(|ts| ts as u64),
                     })
                 },
             )
@@ -396,6 +408,9 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if version < 5 {
         add_project(conn)?;
     }
+    if version < 6 {
+        add_from_role(conn)?;
+    }
     conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -457,6 +472,14 @@ fn add_project(conn: &Connection) -> Result<(), String> {
     tx.commit().map_err(|e| e.to_string())
 }
 
+/// The version-6 step: add `from_role` to `messages`. NULL means the
+/// broker had no token table when it stored the message.
+fn add_from_role(conn: &Connection) -> Result<(), String> {
+    conn.execute("ALTER TABLE messages ADD COLUMN from_role TEXT", [])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 /// Read an env var, treating a missing or blank value as absent.
 fn nonempty_env(name: &str) -> Option<PathBuf> {
     let value = std::env::var(name).ok()?;
@@ -506,6 +529,7 @@ fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
         reply_to: row.get::<_, Option<i64>>(5)?.map(|id| id as u64),
         topic: row.get(6)?,
         project: row.get(7)?,
+        from_role: row.get(8)?,
     })
 }
 
@@ -517,6 +541,10 @@ pub(crate) fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sender(project: &str, address: &str) -> Sender {
+        Sender { project: project.into(), address: address.into(), role: None }
+    }
 
     fn read_row(db: &Path, id: u64) -> (String, String, String) {
         rusqlite::Connection::open(db)
@@ -557,17 +585,17 @@ mod tests {
         let db = dir.path().join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
         let first = store
-            .insert("default".into(), "a@h".into(), Some("b@h".into()), "one".into(), None, None)
+            .insert(sender("default", "a@h"), Some("b@h".into()), "one".into(), None, None)
             .await
             .unwrap()
             .id;
         let second = store
-            .insert("default".into(), "a@h".into(), Some("b@h".into()), "two".into(), None, None)
+            .insert(sender("default", "a@h"), Some("b@h".into()), "two".into(), None, None)
             .await
             .unwrap()
             .id;
         let other = store
-            .insert("default".into(), "a@h".into(), Some("c@h".into()), "other".into(), None, None)
+            .insert(sender("default", "a@h"), Some("c@h".into()), "other".into(), None, None)
             .await
             .unwrap()
             .id;
@@ -595,7 +623,7 @@ mod tests {
         let db = dir.path().join("sub").join("chattrs.db");
         let store = Store::open(db.clone()).await.unwrap();
         let stored = store
-            .insert("default".into(), "a@h".into(), Some("b@h".into()), "hi".into(), None, None)
+            .insert(sender("default", "a@h"), Some("b@h".into()), "hi".into(), None, None)
             .await
             .unwrap();
         let id = stored.id;
@@ -609,7 +637,7 @@ mod tests {
 
         let store = Store::open(db.clone()).await.unwrap();
         let next = store
-            .insert("default".into(), "b@h".into(), Some("a@h".into()), "yo".into(), Some(id), None)
+            .insert(sender("default", "b@h"), Some("a@h".into()), "yo".into(), Some(id), None)
             .await
             .unwrap()
             .id;
@@ -626,8 +654,7 @@ mod tests {
         for i in 0..crate::model::MAX_TOPIC_BACKLOG + 5 {
             let id = store
                 .insert(
-                    "default".into(),
-                    "a@h".into(),
+                    sender("default", "a@h"),
                     None,
                     format!("note {i}"),
                     None,
@@ -645,8 +672,7 @@ mod tests {
         }
         let other = store
             .insert(
-                "default".into(),
-                "a@h".into(),
+                sender("default", "a@h"),
                 None,
                 "other room".into(),
                 None,
@@ -657,8 +683,7 @@ mod tests {
             .id;
         let direct = store
             .insert(
-                "default".into(),
-                "a@h".into(),
+                sender("default", "a@h"),
                 Some("b@h".into()),
                 "direct".into(),
                 None,
@@ -720,8 +745,7 @@ mod tests {
             assert_eq!(old.topic, None, "old rows read back with no topic");
             let id = store
                 .insert(
-                    "default".into(),
-                    "a@h".into(),
+                    sender("default", "a@h"),
                     Some("b@h".into()),
                     "new".into(),
                     None,
@@ -736,7 +760,7 @@ mod tests {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 5, "open stamps the latest version");
+            assert_eq!(version, 6, "open stamps the latest version");
         }
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -795,7 +819,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     #[tokio::test]
@@ -833,7 +857,7 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
     }
 
     #[tokio::test]
@@ -883,6 +907,39 @@ mod tests {
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
+    }
+
+    #[tokio::test]
+    async fn version_five_database_migrates_to_from_role() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, body TEXT NOT NULL, ts INTEGER NOT NULL, reply_to INTEGER, topic TEXT, acked_at INTEGER, project TEXT NOT NULL DEFAULT 'default');
+                 CREATE TABLE agents (project TEXT NOT NULL DEFAULT 'default', address TEXT NOT NULL, last_seen INTEGER NOT NULL, tags TEXT, state TEXT, state_at INTEGER, PRIMARY KEY (project, address));
+                 INSERT INTO messages (sender, recipient, body, ts) VALUES ('a@h', 'b@h', 'old', 1763200000000);
+                 PRAGMA user_version = 5;",
+            )
+            .unwrap();
+        }
+        let store = Store::open(db.clone()).await.unwrap();
+        let old = store.get("default".into(), 1).await.unwrap().expect("old row survives");
+        assert_eq!(old.from_role, None, "an old row has no role");
+        let sender =
+            Sender { project: "default".into(), address: "a@h".into(), role: Some("lead".into()) };
+        let id =
+            store.insert(sender, Some("b@h".into()), "new".into(), None, None).await.unwrap().id;
+        let fresh = store.get("default".into(), id).await.unwrap().unwrap();
+        assert_eq!(fresh.from_role.as_deref(), Some("lead"));
+        let logged = store.log("default".into(), None, 0, 10).await.unwrap();
+        assert_eq!(logged[1].message.from_role.as_deref(), Some("lead"));
+        assert_eq!(logged[1].acked_at, None);
+        let version: i64 = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 6);
     }
 }
