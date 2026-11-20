@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::cli::SetupArgs;
 use crate::tokens::{is_valid_pattern, parse_pair};
-use crate::{hook, setup::broker};
+use crate::{hook, setup::broker, setup::SetupError};
 
 const SCHEME: &str = "chattrs://";
 
@@ -62,8 +62,8 @@ pub fn format(token: &str, server: SocketAddr, pattern: &str) -> String {
 }
 
 /// Parse a join string. The errors never include the input.
-pub fn parse(text: &str) -> Result<Join, String> {
-    let bad = |why: &str| format!("bad join string: {why}");
+pub fn parse(text: &str) -> Result<Join, SetupError> {
+    let bad = |why: &str| SetupError::BadJoin(why.to_string());
     let rest =
         text.trim().strip_prefix(SCHEME).ok_or_else(|| bad("it must start with chattrs://"))?;
     let (token, rest) = rest.split_once('@').ok_or_else(|| bad("expected <token>@<ip>:<port>"))?;
@@ -115,7 +115,7 @@ fn edit_config(
     server: &str,
     entries: &[(String, String)],
     force: bool,
-) -> Result<String, String> {
+) -> Result<String, SetupError> {
     let mut lines: Vec<String> = text.lines().map(String::from).collect();
     let first_table = lines.iter().position(|l| l.trim().starts_with('[')).unwrap_or(lines.len());
     let current = lines[..first_table]
@@ -125,7 +125,9 @@ fn edit_config(
         .map(|(_, value)| value);
     match current {
         Some(value) if value != server => {
-            return Err(format!("config.toml has server = \"{value}\", not \"{server}\""));
+            return Err(SetupError::Invalid(format!(
+                "config.toml has server = \"{value}\", not \"{server}\""
+            )));
         }
         Some(_) => {}
         None => lines.insert(0, format!("server = \"{server}\"")),
@@ -149,9 +151,9 @@ fn edit_config(
         });
         match found {
             Some(_) if !force => {
-                return Err(format!(
+                return Err(SetupError::Invalid(format!(
                     "config.toml already has a token entry for {pattern}; use --force to replace it"
-                ));
+                )));
             }
             Some(i) => lines[i] = line,
             None => lines.insert(header + 1, line),
@@ -178,61 +180,70 @@ fn token_entries(text: &str) -> Vec<(String, String)> {
 /// pattern and file path of each join. Two patterns of one run may not
 /// share a file, and a file that config.toml lists for a different
 /// pattern is never replaced, with or without `--force`.
-fn check_collisions(config: &str, files: &[(String, String)]) -> Result<(), String> {
+fn check_collisions(config: &str, files: &[(String, String)]) -> Result<(), SetupError> {
     let existing = token_entries(config);
     for (i, (pattern, path)) in files.iter().enumerate() {
         if let Some((other, _)) = files[..i].iter().find(|(_, other)| other == path) {
-            return Err(format!("{pattern} and {other} map to the same token file {path}"));
+            return Err(SetupError::Invalid(format!(
+                "{pattern} and {other} map to the same token file {path}"
+            )));
         }
         if let Some((other, _)) = existing.iter().find(|(p, v)| v == path && p != pattern) {
-            return Err(format!("{path} already holds the token for {other}, not {pattern}"));
+            return Err(SetupError::Invalid(format!(
+                "{path} already holds the token for {other}, not {pattern}"
+            )));
         }
     }
     Ok(())
 }
 
 /// The join strings from `--join` values; `-` expands to the lines of stdin.
-fn collect(values: &[String], stdin: &mut dyn Read) -> Result<Vec<String>, String> {
+fn collect(values: &[String], stdin: &mut dyn Read) -> Result<Vec<String>, SetupError> {
     let mut all = Vec::new();
     for value in values {
         if value == "-" {
             let mut text = String::new();
-            stdin.read_to_string(&mut text).map_err(|e| format!("read stdin: {e}"))?;
+            stdin.read_to_string(&mut text).map_err(SetupError::Stdin)?;
             all.extend(text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from));
         } else {
             all.push(value.clone());
         }
     }
     if all.is_empty() {
-        return Err("no join string given".to_string());
+        return Err(SetupError::Invalid("no join string given".to_string()));
     }
     Ok(all)
 }
 
 /// Parse the strings and settle each pattern from `?as=` and `--as`.
-fn resolve(strings: &[String], flag: Option<&str>) -> Result<Vec<(Join, String)>, String> {
+fn resolve(strings: &[String], flag: Option<&str>) -> Result<Vec<(Join, String)>, SetupError> {
+    let invalid = |message: String| SetupError::Invalid(message);
     if flag.is_some() && strings.len() != 1 {
-        return Err("--as works with exactly one join string".to_string());
+        return Err(invalid("--as works with exactly one join string".to_string()));
     }
     let mut out: Vec<(Join, String)> = Vec::new();
     for text in strings {
         let join = parse(text)?;
         let pattern = match (&join.pattern, flag) {
             (Some(inside), Some(flag)) if inside != flag => {
-                return Err(format!("--as {flag} differs from the join string's ?as={inside}"));
+                return Err(invalid(format!(
+                    "--as {flag} differs from the join string's ?as={inside}"
+                )));
             }
             (Some(inside), _) => inside.clone(),
             (None, Some(flag)) if is_valid_pattern(flag) => flag.to_string(),
-            (None, Some(_)) => return Err("--as is not an address pattern".to_string()),
+            (None, Some(_)) => return Err(invalid("--as is not an address pattern".to_string())),
             (None, None) => {
-                return Err("a join string has no ?as= pattern; give --as PATTERN".to_string())
+                return Err(invalid(
+                    "a join string has no ?as= pattern; give --as PATTERN".to_string(),
+                ))
             }
         };
         if out.iter().any(|(other, _)| other.server != join.server) {
-            return Err("the join strings name different servers".to_string());
+            return Err(invalid("the join strings name different servers".to_string()));
         }
         if out.iter().any(|(_, seen)| *seen == pattern) {
-            return Err(format!("the pattern {pattern} is given twice"));
+            return Err(invalid(format!("the pattern {pattern} is given twice")));
         }
         out.push((join, pattern));
     }
@@ -240,11 +251,15 @@ fn resolve(strings: &[String], flag: Option<&str>) -> Result<Vec<(Join, String)>
 }
 
 /// Store the tokens and edit the config under `home`.
-fn store(home: &Path, joins: &[(Join, String)], force: bool) -> Result<(), String> {
+fn store(home: &Path, joins: &[(Join, String)], force: bool) -> Result<(), SetupError> {
     let dir = home.join(".config/chattrs");
     let config = dir.join("config.toml");
     let text = if config.exists() {
-        fs::read_to_string(&config).map_err(|e| format!("read {}: {e}", config.display()))?
+        fs::read_to_string(&config).map_err(|source| SetupError::Fs {
+            verb: "read",
+            path: config.clone(),
+            source,
+        })?
     } else {
         String::new()
     };
@@ -255,16 +270,16 @@ fn store(home: &Path, joins: &[(Join, String)], force: bool) -> Result<(), Strin
         .map(|(_, pattern, path)| ((*pattern).clone(), path.display().to_string()))
         .collect();
     if joins.iter().any(|(join, _)| join.server != joins[0].0.server) {
-        return Err("the join strings name different servers".to_string());
+        return Err(SetupError::Invalid("the join strings name different servers".to_string()));
     }
     check_collisions(&text, &entries)?;
     let edited = edit_config(&text, &joins[0].0.server.to_string(), &entries, force)?;
     for (_, pattern, path) in &files {
         if path.exists() && !force {
-            return Err(format!(
+            return Err(SetupError::Invalid(format!(
                 "{} exists, so {pattern} was not joined; use --force to replace it",
                 path.display()
-            ));
+            )));
         }
     }
     for (join, pattern, path) in &files {
@@ -278,7 +293,7 @@ fn store(home: &Path, joins: &[(Join, String)], force: bool) -> Result<(), Strin
 }
 
 /// Run `setup --join`.
-pub fn run(args: &SetupArgs) -> Result<(), String> {
+pub fn run(args: &SetupArgs) -> Result<(), SetupError> {
     let strings = collect(&args.join, &mut std::io::stdin())?;
     let joins = resolve(&strings, args.join_as.as_deref())?;
     store(&hook::install::home()?, &joins, args.force)
@@ -326,7 +341,7 @@ mod tests {
             "chattrs://secret@1.2.3.4:1?as=nope",
             "chattrs://secret@1.2.3.4:1?as=a%2Fb%40c",
         ] {
-            let error = parse(text).unwrap_err();
+            let error = parse(text).unwrap_err().to_string();
             assert!(!error.contains("secret"), "{text}: {error}");
         }
     }
@@ -357,7 +372,8 @@ mod tests {
     fn config_edit_refuses_conflicts() {
         let old = format!("server = \"{SERVER}\"\n[tokens]\n\"lead@mac\" = \"/l\"\n");
         assert!(edit_config(&old, SERVER, &entry("*@mac", "/m"), false).is_ok());
-        let err = edit_config(&old, SERVER, &entry("lead@mac", "/l"), false).unwrap_err();
+        let err =
+            edit_config(&old, SERVER, &entry("lead@mac", "/l"), false).unwrap_err().to_string();
         assert!(err.contains("--force"), "{err}");
         let forced = edit_config(&old, SERVER, &entry("lead@mac", "/new"), true).unwrap();
         assert!(forced.contains("\"lead@mac\" = \"/new\"") && !forced.contains("\"/l\""));
@@ -380,7 +396,7 @@ mod tests {
     fn different_servers_are_refused() {
         let one = format("t1", addr(), "lead@mac");
         let two = format("t2", "10.0.0.9:4646".parse().unwrap(), "*@bobox");
-        let error = resolve(&[one, two], None).unwrap_err();
+        let error = resolve(&[one, two], None).unwrap_err().to_string();
         assert!(error.contains("different servers") && !error.contains("t1"), "{error}");
     }
 
@@ -389,10 +405,10 @@ mod tests {
         let pair = |pattern: &str| (pattern.to_string(), format!("/c/{}", file_name(pattern)));
         let both = [pair("a-b@c"), pair("a@b-c")];
         assert_eq!(both[0].1, both[1].1);
-        assert!(check_collisions("", &both).unwrap_err().contains("same token file"));
+        assert!(check_collisions("", &both).unwrap_err().to_string().contains("same token file"));
         // config.toml lists the file for another pattern: no replacing it.
         let config = format!("[tokens]\n\"a-b@c\" = \"{}\"\n", both[0].1);
-        let err = check_collisions(&config, &both[1..]).unwrap_err();
+        let err = check_collisions(&config, &both[1..]).unwrap_err().to_string();
         assert!(err.contains("a-b@c"), "{err}");
         // The same pattern may be replaced; an unrelated one is fine.
         assert!(check_collisions(&config, &both[..1]).is_ok());

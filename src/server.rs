@@ -888,7 +888,7 @@ pub async fn serve(
     token: Option<String>,
     tokens: Option<&Path>,
 ) -> Result<(), String> {
-    let tokens = tokens.map(Tokens::load).transpose()?;
+    let tokens = tokens.map(Tokens::load).transpose().map_err(|e| e.to_string())?;
     check_listen(listen, token.is_some() || tokens.is_some())?;
     // Open the store before the bind: a broker that fails here never
     // listens, so no client connects to it and gets a reset.

@@ -6,9 +6,126 @@
 //! dependency. This module is pure apart from `Tokens::load`, which reads
 //! the file and checks its mode.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::model;
+
+/// Why the token table could not be loaded. `Display` gives the text the
+/// broker prints at start. Line numbers count from 1.
+#[derive(Debug)]
+pub enum TokensError {
+    /// The file could not be read.
+    Read {
+        file: PathBuf,
+        source: std::io::Error,
+    },
+    /// The file is wider than 0600.
+    Mode {
+        file: PathBuf,
+        mode: u32,
+    },
+    /// The file has a bad table; `source` says where.
+    File {
+        file: PathBuf,
+        source: Box<TokensError>,
+    },
+    /// An entry lacks a required key. `line` is the entry header.
+    MissingKey {
+        line: usize,
+        key: &'static str,
+    },
+    BadRole {
+        line: usize,
+    },
+    /// `project = "*"` on a role other than observer.
+    WildcardProject {
+        line: usize,
+    },
+    BadProject {
+        line: usize,
+    },
+    BadAddr {
+        line: usize,
+    },
+    UnknownKey {
+        line: usize,
+        key: String,
+    },
+    DuplicateKey {
+        line: usize,
+        key: String,
+    },
+    EmptyToken {
+        line: usize,
+    },
+    /// A line is neither `[[token]]` nor `key = "value"`.
+    Syntax {
+        line: usize,
+    },
+    KeyBeforeHeader {
+        line: usize,
+    },
+    NoEntries,
+    /// Entry number `entry` (from 1) repeats a token; `project` is the
+    /// project that the earlier copy already covers.
+    Duplicate {
+        entry: usize,
+        project: Option<String>,
+    },
+}
+
+impl std::fmt::Display for TokensError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TokensError::Read { file, source } => {
+                write!(f, "tokens file {}: {source}", file.display())
+            }
+            TokensError::Mode { file, mode } => write!(
+                f,
+                "tokens file {} has mode {mode:o}, wider than 600; run chmod 600",
+                file.display()
+            ),
+            TokensError::File { file, source } => {
+                write!(f, "tokens file {}: {source}", file.display())
+            }
+            TokensError::MissingKey { line, key } => {
+                write!(f, "line {line}: entry has no `{key}`")
+            }
+            TokensError::BadRole { line } => {
+                write!(f, "line {line}: role must be lead, agent, or observer")
+            }
+            TokensError::WildcardProject { line } => {
+                write!(f, "line {line}: project `*` is only for the observer role")
+            }
+            TokensError::BadProject { line } => {
+                write!(f, "line {line}: project is not a valid project name")
+            }
+            TokensError::BadAddr { line } => {
+                write!(f, "line {line}: addr is not an address or a `*` pattern")
+            }
+            TokensError::UnknownKey { line, key } => write!(f, "line {line}: unknown key `{key}`"),
+            TokensError::DuplicateKey { line, key } => {
+                write!(f, "line {line}: duplicate key `{key}`")
+            }
+            TokensError::EmptyToken { line } => write!(f, "line {line}: token is empty"),
+            TokensError::Syntax { line } => {
+                write!(f, "line {line}: expected [[token]] or key = \"value\"")
+            }
+            TokensError::KeyBeforeHeader { line } => {
+                write!(f, "line {line}: key before the first [[token]]")
+            }
+            TokensError::NoEntries => write!(f, "no [[token]] entries"),
+            TokensError::Duplicate { entry, project: Some(project) } => {
+                write!(f, "entry {entry} repeats a token that already covers project {project}")
+            }
+            TokensError::Duplicate { entry, project: None } => {
+                write!(f, "entry {entry} repeats a token; a token with no project must appear once")
+            }
+        }
+    }
+}
+
+impl std::error::Error for TokensError {}
 
 /// What a token may do on the broker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,48 +238,47 @@ pub(crate) fn is_valid_pattern(addr: &str) -> bool {
 
 impl Draft {
     /// Turn a finished block into an entry, or say which line is wrong.
-    fn finish(self) -> Result<Entry, String> {
+    fn finish(self) -> Result<Entry, TokensError> {
         let line = self.line;
-        let field = |value: Option<String>, name: &str| {
-            value.ok_or_else(|| format!("line {line}: entry has no `{name}`"))
+        let field = |value: Option<String>, key: &'static str| {
+            value.ok_or(TokensError::MissingKey { line, key })
         };
         let token = field(self.token, "token")?;
         let addr = field(self.addr, "addr")?;
         let role_text = field(self.role, "role")?;
-        let role = Role::parse(&role_text)
-            .ok_or_else(|| format!("line {line}: role must be lead, agent, or observer"))?;
+        let role = Role::parse(&role_text).ok_or(TokensError::BadRole { line })?;
         // `*` is the old spelling of "no project", for observers only.
         let project = match self.project {
             Some(project) if project == model::ALL_PROJECTS => {
                 if role != Role::Observer {
-                    return Err(format!("line {line}: project `*` is only for the observer role"));
+                    return Err(TokensError::WildcardProject { line });
                 }
                 None
             }
             Some(project) if !model::is_valid_topic(&project) => {
-                return Err(format!("line {line}: project is not a valid project name"));
+                return Err(TokensError::BadProject { line });
             }
             other => other,
         };
         if !is_valid_pattern(&addr) {
-            return Err(format!("line {line}: addr is not an address or a `*` pattern"));
+            return Err(TokensError::BadAddr { line });
         }
         Ok(Entry { token, project, addr, role })
     }
 
-    fn set(&mut self, line: usize, key: &str, value: String) -> Result<(), String> {
+    fn set(&mut self, line: usize, key: &str, value: String) -> Result<(), TokensError> {
         let slot = match key {
             "token" => &mut self.token,
             "project" => &mut self.project,
             "addr" => &mut self.addr,
             "role" => &mut self.role,
-            _ => return Err(format!("line {line}: unknown key `{key}`")),
+            _ => return Err(TokensError::UnknownKey { line, key: key.to_string() }),
         };
         if slot.is_some() {
-            return Err(format!("line {line}: duplicate key `{key}`"));
+            return Err(TokensError::DuplicateKey { line, key: key.to_string() });
         }
         if key == "token" && value.is_empty() {
-            return Err(format!("line {line}: token is empty"));
+            return Err(TokensError::EmptyToken { line });
         }
         *slot = Some(value);
         Ok(())
@@ -193,22 +309,22 @@ fn is_header(text: &str) -> bool {
 impl Tokens {
     /// Read and parse the file at `path`. On unix, a file with any group
     /// or other permission bit set (wider than 0600) is refused.
-    pub fn load(path: &Path) -> Result<Tokens, String> {
-        let shown = path.display();
+    pub fn load(path: &Path) -> Result<Tokens, TokensError> {
+        let file = || path.to_path_buf();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let meta = std::fs::metadata(path).map_err(|e| format!("tokens file {shown}: {e}"))?;
+            let meta = std::fs::metadata(path)
+                .map_err(|source| TokensError::Read { file: file(), source })?;
             let mode = meta.permissions().mode() & 0o777;
             if mode & 0o177 != 0 {
-                return Err(format!(
-                    "tokens file {shown} has mode {mode:o}, wider than 600; run chmod 600"
-                ));
+                return Err(TokensError::Mode { file: file(), mode });
             }
         }
-        let text =
-            std::fs::read_to_string(path).map_err(|e| format!("tokens file {shown}: {e}"))?;
-        Tokens::parse(&text).map_err(|e| format!("tokens file {shown}: {e}"))
+        let text = std::fs::read_to_string(path)
+            .map_err(|source| TokensError::Read { file: file(), source })?;
+        Tokens::parse(&text)
+            .map_err(|source| TokensError::File { file: file(), source: Box::new(source) })
     }
 
     /// Parse the table. The accepted subset of TOML is: blank lines, `#`
@@ -216,7 +332,7 @@ impl Tokens {
     /// an optional trailing `# comment`. Keys are `token`, `project`,
     /// `addr`, `role`; each appears once per entry. Values are
     /// double-quoted strings without escapes. Nothing else is accepted.
-    pub fn parse(text: &str) -> Result<Tokens, String> {
+    pub fn parse(text: &str) -> Result<Tokens, TokensError> {
         let mut entries: Vec<Entry> = Vec::new();
         let mut draft: Option<Draft> = None;
         for (index, raw) in text.lines().enumerate() {
@@ -231,16 +347,16 @@ impl Tokens {
                 continue;
             }
             let Some((key, value)) = parse_pair(trimmed) else {
-                return Err(format!("line {line}: expected [[token]] or key = \"value\""));
+                return Err(TokensError::Syntax { line });
             };
             let Some(current) = draft.as_mut() else {
-                return Err(format!("line {line}: key before the first [[token]]"));
+                return Err(TokensError::KeyBeforeHeader { line });
             };
             current.set(line, key, value)?;
         }
         entries.extend(draft.map(Draft::finish).transpose()?);
         if entries.is_empty() {
-            return Err("no [[token]] entries".to_string());
+            return Err(TokensError::NoEntries);
         }
         Tokens::check_unique(&entries)?;
         Ok(Tokens { entries })
@@ -249,7 +365,7 @@ impl Tokens {
     /// The same token may appear again only when every copy names a
     /// distinct project (one lead token for several projects). A copy with
     /// no project overlaps every other copy.
-    fn check_unique(entries: &[Entry]) -> Result<(), String> {
+    fn check_unique(entries: &[Entry]) -> Result<(), TokensError> {
         for (i, entry) in entries.iter().enumerate() {
             let clash = entries[..i].iter().any(|other| {
                 other.token == entry.token
@@ -258,15 +374,9 @@ impl Tokens {
                         || other.project == entry.project)
             });
             if clash {
-                return Err(match &entry.project {
-                    Some(project) => format!(
-                        "entry {} repeats a token that already covers project {project}",
-                        i + 1
-                    ),
-                    None => format!(
-                        "entry {} repeats a token; a token with no project must appear once",
-                        i + 1
-                    ),
+                return Err(TokensError::Duplicate {
+                    entry: i + 1,
+                    project: entry.project.clone(),
                 });
             }
         }
@@ -395,11 +505,11 @@ role = "observer"
             ("[[token]]\ntoken = \"a\" junk\n", "line 2: expected"),
         ];
         for (text, want) in cases {
-            let err = Tokens::parse(text).unwrap_err();
+            let err = Tokens::parse(text).unwrap_err().to_string();
             assert!(err.contains(want), "{text:?} gave {err:?}, wanted {want:?}");
         }
         let dup = "[[token]]\ntoken=\"a\"\nproject=\"p\"\naddr=\"a@h\"\nrole=\"agent\"\n";
-        let err = Tokens::parse(&format!("{dup}{dup}")).unwrap_err();
+        let err = Tokens::parse(&format!("{dup}{dup}")).unwrap_err().to_string();
         assert!(err.contains("repeats a token that already covers project p"), "{err}");
     }
 
@@ -424,7 +534,7 @@ role = "observer"
         for other in
             [block("t-l", "beta", "other@h", "lead"), block("t-l", "beta", "lead@h", "agent")]
         {
-            let err = Tokens::parse(&format!("{text}{other}")).unwrap_err();
+            let err = Tokens::parse(&format!("{text}{other}")).unwrap_err().to_string();
             assert!(
                 err.contains("entry 4 repeats a token that already covers project beta"),
                 "{err}"
@@ -480,7 +590,7 @@ role = "observer"
     fn duplicate_tokens_need_distinct_projects() {
         let un = block("t", None, "*@h", "agent");
         let sc = block("t", Some("alpha"), "*@h", "agent");
-        let err = Tokens::parse(&format!("{un}{un}")).unwrap_err();
+        let err = Tokens::parse(&format!("{un}{un}")).unwrap_err().to_string();
         assert!(err.contains("entry 2 repeats a token"), "{err}");
         assert!(Tokens::parse(&format!("{un}{sc}")).is_err());
         assert!(Tokens::parse(&format!("{sc}{un}")).is_err());
@@ -580,7 +690,7 @@ role = "observer"
             assert_eq!(result.is_ok(), ok, "mode {mode:o}: {result:?}");
         }
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let err = Tokens::load(&path).unwrap_err();
+        let err = Tokens::load(&path).unwrap_err().to_string();
         assert!(err.contains("chmod 600") && !err.contains("t-lead"), "{err}");
     }
 }
