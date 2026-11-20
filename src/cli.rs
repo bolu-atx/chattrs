@@ -155,10 +155,6 @@ pub struct ExecArgs {
     #[arg(long, env = "CHATTRS_TAGS")]
     pub tags: Option<String>,
 
-    /// Token for the program. Default: the one for the address.
-    #[arg(long, env = "CHATTRS_TOKEN", hide_env_values = true)]
-    pub token: Option<String>,
-
     /// The program and its arguments. Everything after the program is its own.
     #[arg(
         required = true,

@@ -381,7 +381,8 @@ pub(crate) fn exec_default_address(program: &str) -> String {
 /// On Unix this replaces the chattrs process.
 fn cmd_exec(c: cli::ExecArgs) -> Result<(), RunError> {
     let program = c.command[0].clone();
-    let has_token = c.token.is_some();
+    // Only a token the user exported passes on; exec never adds one.
+    let has_token = std::env::var_os("CHATTRS_TOKEN").is_some_and(|t| !t.is_empty());
     let address = match c.address {
         Some(address) => address,
         None => {
@@ -400,7 +401,7 @@ fn cmd_exec(c: cli::ExecArgs) -> Result<(), RunError> {
         lead: c.lead,
         server: c.server,
         tags: c.tags,
-        token: c.token,
+        token: None,
     };
     let (pairs, _) = session_pairs(session, false)?;
     let address = pairs.iter().find(|(name, _)| *name == "CHATTRS_ADDRESS").map(|p| p.1.clone());
