@@ -128,6 +128,15 @@ pub fn env_project() -> Option<String> {
     (!value.is_empty()).then(|| value.to_string())
 }
 
+/// The lead from `CHATTRS_LEAD`, or `None` when it is unset or blank. The
+/// one place the variable is read. It names the address an agent takes
+/// orders from, and only the launch environment sets it.
+pub fn env_lead() -> Option<String> {
+    let value = std::env::var("CHATTRS_LEAD").ok()?;
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 impl Client {
     /// Connect to `endpoint` and say `hello`. When the first connect
     /// fails with connection refused on a loopback server, start a

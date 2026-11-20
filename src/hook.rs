@@ -13,12 +13,20 @@ use serde_json::{json, Value};
 
 use crate::cli::{ClientArgs, HookEvent};
 use crate::client::{self, Client, Endpoint};
-use crate::model::{Message, DEFAULT_PROJECT};
+use crate::model::{LoggedMessage, Message, DEFAULT_PROJECT};
 use crate::output;
 
 /// Total time for connect plus exchange. The agent waits on the hook, so a
 /// slow broker costs a skipped delivery, not a stalled turn.
 const BUDGET: Duration = Duration::from_millis(300);
+
+/// Total time for the session-start exchange. It runs once per session and
+/// reads the history, so it gets more room than the per-tool hooks.
+const SESSION_START_BUDGET: Duration = Duration::from_millis(800);
+
+/// How many recent messages, and how many unanswered ones, the re-brief
+/// shows.
+const REBRIEF_LIMIT: usize = 10;
 
 /// Run one hook event. Does nothing without an own address, because the
 /// hooks live in the user-level config and fire in every session.
@@ -39,10 +47,18 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
         return;
     }
     if event == HookEvent::SessionStart {
-        // The context prints even when the broker cannot be reached.
-        let _ = tokio::time::timeout(BUDGET, Client::reconnect_with(&endpoint, "idle")).await;
-        let codex = client.agent.as_deref() == Some("codex");
-        print_json(&session_start_output(address, client::env_project().as_deref(), codex));
+        // The static context prints even when the broker cannot be reached.
+        let history =
+            tokio::time::timeout(SESSION_START_BUDGET, rebrief_history(&endpoint, address))
+                .await
+                .unwrap_or_default();
+        let brief = Brief {
+            address,
+            project: client::env_project(),
+            lead: client::env_lead(),
+            codex: client.agent.as_deref() == Some("codex"),
+        };
+        print_json(&session_start_output(&brief, &history));
         return;
     }
     // A timeout drops the exchange; unacked messages stay unread.
@@ -177,16 +193,75 @@ fn context_output(event_name: &str, text: &str) -> Value {
     json!({"hookSpecificOutput": {"hookEventName": event_name, "additionalContext": text}})
 }
 
-/// The `SessionStart` context: the address, the skill, and, for Claude
-/// Code only, the Monitor reminder. Codex has no Monitor tool.
-fn session_start_output(address: &str, project: Option<&str>, codex: bool) -> Value {
-    let mut text =
-        format!("Your chattrs address is {address}. Load the chattrs skill: run `chattrs skill`.");
-    if let Some(project) = project.filter(|project| *project != DEFAULT_PROJECT) {
+/// What the `SessionStart` context says about the session itself.
+struct Brief<'a> {
+    address: &'a str,
+    project: Option<String>,
+    lead: Option<String>,
+    codex: bool,
+}
+
+/// Mark the agent idle and read its history, oldest first. Any failure
+/// gives an empty history. `log` never acks, so nothing here changes
+/// what is unread.
+async fn rebrief_history(endpoint: &Endpoint, address: &str) -> Vec<LoggedMessage> {
+    let Ok(mut client) = Client::reconnect_with(endpoint, "idle").await else {
+        return Vec::new();
+    };
+    client.log(Some(address.to_string())).await.unwrap_or_default()
+}
+
+/// The messages to `address` that `address` has not answered, most recent
+/// first. A reply is a later message from `address` with `reply_to` set to
+/// the message id.
+fn unanswered(address: &str, history: &[LoggedMessage]) -> Vec<Message> {
+    history
+        .iter()
+        .rev()
+        .map(|logged| &logged.message)
+        .filter(|message| message.to.as_deref() == Some(address))
+        .filter(|message| {
+            !history.iter().any(|reply| {
+                reply.message.from == address
+                    && reply.message.reply_to == Some(message.id)
+                    && reply.message.id > message.id
+            })
+        })
+        .take(REBRIEF_LIMIT)
+        .cloned()
+        .collect()
+}
+
+/// The `SessionStart` context: the address, project and lead, the skill
+/// and, for Claude Code only, the Monitor reminder (Codex has no Monitor
+/// tool). Then the last messages of the history in the untrusted wrapper.
+/// An agent that may be a lead also gets its unanswered messages.
+fn session_start_output(brief: &Brief, history: &[LoggedMessage]) -> Value {
+    let address = brief.address;
+    let mut text = format!("Your chattrs address is {address}.");
+    if let Some(project) = brief.project.as_deref().filter(|project| *project != DEFAULT_PROJECT) {
         text.push_str(&format!(" Your chattrs project is {project}."));
     }
-    if !codex {
+    if let Some(lead) = &brief.lead {
+        text.push_str(&format!(" Your lead is {lead}."));
+    }
+    text.push_str(" Load the chattrs skill: run `chattrs skill`.");
+    if !brief.codex {
         text.push_str(" Run `chattrs watch` under the Monitor tool to wake on messages.");
+    }
+    let start = history.len().saturating_sub(REBRIEF_LIMIT);
+    let recent: Vec<Message> =
+        history[start..].iter().map(|logged| logged.message.clone()).collect();
+    if !recent.is_empty() {
+        text.push_str("\n\nYour last messages, oldest first:\n");
+        text.push_str(&context_text(&recent));
+    }
+    if brief.lead.as_deref().is_none_or(|lead| lead == address) {
+        let pending = unanswered(address, history);
+        if !pending.is_empty() {
+            text.push_str("\nMessages to you with no reply yet:\n");
+            text.push_str(&context_text(&pending));
+        }
     }
     context_output("SessionStart", &text)
 }
@@ -225,26 +300,74 @@ mod tests {
         assert_eq!(value["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
     }
 
+    fn brief<'a>(project: Option<&str>, lead: Option<&str>, codex: bool) -> Brief<'a> {
+        Brief {
+            address: "c@h",
+            project: project.map(str::to_string),
+            lead: lead.map(str::to_string),
+            codex,
+        }
+    }
+
+    fn context(brief: &Brief, history: &[LoggedMessage]) -> String {
+        let value = session_start_output(brief, history);
+        value["hookSpecificOutput"]["additionalContext"].as_str().unwrap().to_string()
+    }
+
+    fn logged(message: Message) -> LoggedMessage {
+        LoggedMessage { message, acked_at: None }
+    }
+
     #[test]
     fn session_start_names_monitor_for_claude_and_not_codex() {
-        let claude = session_start_output("c@h", None, false);
-        let text = claude["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        let text = context(&brief(None, None, false), &[]);
         assert!(text.contains("c@h") && text.contains("Monitor"));
-        let codex = session_start_output("c@h", None, true);
-        let text = codex["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        let text = context(&brief(None, None, true), &[]);
         assert!(text.contains("chattrs skill") && !text.contains("Monitor"));
     }
 
     #[test]
     fn session_start_names_the_project_unless_it_is_default() {
         for project in [None, Some("default")] {
-            let value = session_start_output("c@h", project, false);
-            let text = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+            let text = context(&brief(project, None, false), &[]);
             assert!(!text.contains("project"), "{text}");
         }
-        let value = session_start_output("c@h", Some("alpha"), false);
-        let text = value["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        let text = context(&brief(Some("alpha"), None, false), &[]);
         assert!(text.contains("Your chattrs project is alpha."), "{text}");
+    }
+
+    #[test]
+    fn session_start_names_the_lead_before_the_skill_line() {
+        let text = context(&brief(None, Some("opus@mac"), false), &[]);
+        let lead = text.find("Your lead is opus@mac.").expect("lead line");
+        assert!(lead < text.find("Load the chattrs skill").unwrap(), "{text}");
+        assert!(!context(&brief(None, None, false), &[]).contains("Your lead"));
+    }
+
+    #[test]
+    fn session_start_shows_the_last_ten_messages_oldest_first() {
+        let history: Vec<LoggedMessage> = (1..=12).map(|id| logged(message(id))).collect();
+        let text = context(&brief(None, Some("opus@mac"), false), &history);
+        assert!(!text.contains("id=\"2\"") && text.contains("id=\"3\""), "{text}");
+        assert!(text.find("id=\"3\"").unwrap() < text.find("id=\"12\"").unwrap());
+        assert!(!text.contains("no reply yet"), "a worker has no pending section: {text}");
+    }
+
+    #[test]
+    fn session_start_lists_unanswered_messages_to_a_possible_lead() {
+        let mut to_me = message(1);
+        to_me.to = Some("c@h".into());
+        let mut answered = message(2);
+        answered.to = Some("c@h".into());
+        let mut reply = message(3);
+        reply.from = "c@h".into();
+        reply.reply_to = Some(2);
+        let history = [logged(to_me), logged(answered), logged(reply)];
+        let text = context(&brief(None, None, false), &history);
+        let pending = text.split("no reply yet:").nth(1).expect("pending section");
+        assert!(pending.contains("id=\"1\"") && !pending.contains("id=\"2\""), "{text}");
+        let none = context(&brief(None, None, false), &history[1..]);
+        assert!(!none.contains("no reply yet"), "{none}");
     }
 
     #[test]
@@ -265,5 +388,8 @@ mod tests {
             let tags = output::tests::live_tags(text);
             assert_eq!(tags, (2, 2), "two wrappers, no extra tags: {text:?}");
         }
+        let history = [logged(hostile), logged(message(2))];
+        let text = context(&brief(None, None, false), &history);
+        assert_eq!(output::tests::live_tags(&text), (2, 2), "{text:?}");
     }
 }
