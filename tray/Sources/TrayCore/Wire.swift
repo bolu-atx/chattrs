@@ -6,10 +6,12 @@ public let maxLineBytes = 128 * 1024
 public struct Agent: Sendable, Equatable, Identifiable, Decodable {
     public let address: String
     public let lastSeen: Int64?
+    /// Live inbox watch on the broker. nil from a broker that predates it.
+    public let online: Bool?
     public var id: String { address }
 
     enum CodingKeys: String, CodingKey {
-        case address
+        case address, online
         case lastSeen = "last_seen"
     }
 }
@@ -38,7 +40,8 @@ public struct Message: Sendable, Equatable, Identifiable, Decodable {
 }
 
 public enum Frame: Sendable, Equatable {
-    case welcome
+    case welcome(observer: Bool)
+    case message(Message)
     case agents([Agent])
     case log([Message])
     case error(code: String, message: String)
@@ -49,6 +52,7 @@ public enum WireError: Error { case notAnObject, missingType }
 
 private struct AgentsBody: Decodable { let agents: [Agent] }
 private struct LogBody: Decodable { let messages: [Message] }
+private struct WelcomeBody: Decodable { let observer: Bool? }
 private struct ErrorBody: Decodable { let code: String; let message: String? }
 
 public enum Wire {
@@ -60,7 +64,8 @@ public enum Wire {
         guard let type = obj["type"] as? String else { throw WireError.missingType }
         let dec = JSONDecoder()
         switch type {
-        case "welcome": return .welcome
+        case "welcome": return .welcome(observer: try dec.decode(WelcomeBody.self, from: line).observer == true)
+        case "message": return .message(try dec.decode(Message.self, from: line))
         case "agents": return .agents(try dec.decode(AgentsBody.self, from: line).agents)
         case "log": return .log(try dec.decode(LogBody.self, from: line).messages)
         case "error":
@@ -71,10 +76,14 @@ public enum Wire {
     }
 
     public static func hello(address: String, token: String?) -> Data {
-        var f: [String: Any] = ["type": "hello", "v": 1, "address": address]
+        // observer: an older broker ignores the field and records the address.
+        var f: [String: Any] = ["type": "hello", "v": 1, "address": address, "observer": true]
         if let token, !token.isEmpty { f["token"] = token }
         return encode(f)
     }
+
+    /// Every new message, direct and announcements. Observer connections only.
+    public static func watchAllRequest() -> Data { encode(["type": "watch", "all": true]) }
 
     public static func agentsRequest() -> Data { encode(["type": "agents"]) }
 

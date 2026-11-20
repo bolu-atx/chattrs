@@ -42,12 +42,19 @@ echo '{"cmd":"connect","server":"100.64.0.7:4646","token":"…"}' | nc -U "$SOCK
 
 ## Contract
 
-The app uses only the chattrs wire protocol: requirements MON-1, MON-2, and MON-3 in [../docs/requirements.md](../docs/requirements.md). It sends `hello`, `agents`, and `log`. It never sends a plain `watch`, because that acks messages.
+The app uses only the chattrs wire protocol: requirements MON-1, MON-2, and MON-3 in [../docs/requirements.md](../docs/requirements.md). It follows the README's "Monitoring API (observer)" flow:
+
+1. `hello` with `"observer":true`. The broker does not record the app or list it in `agents`.
+2. The `welcome` must echo `"observer":true`. If it does not, the broker is too old: the app shows "broker too old: observer unsupported" and stops. It never connects as a normal agent.
+3. `watch` with `"all":true` streams every new message. The app keeps what streams, reads `log` after the last id it holds, and drops duplicates by id.
+4. `agents` every 7 s gives the agent list and `online`.
+
+The app is read-only. It never sends `send`, `ack`, `wait`, or `inbox`. Nothing in chattrs depends on it running.
+
+After a drop (a broker restart, or a lagging observer the broker closes), the app reconnects with backoff from 1 s to 30 s and catches up from `log`.
 
 The app ignores unknown fields. It skips unknown frame types and prints them to stderr.
 
 ## Known limits
 
-- Until the observer hello flag (issue #49) ships, the app address `tray@<host>` shows in `agents`.
-- Polling is the v1 path. It asks for `log` every 1.5 s and `agents` every 7 s. It will switch to the observer `watch`. Only `PollingSource` changes.
-- Every 10th `log` poll re-reads the newest 500 messages, so a blue dot (unread) can lag a read by about 15 s.
+- Live messages carry no `acked_at`. Every 15 s the app re-reads the newest 500 messages from `log`, so a blue dot (unread) can lag a read by about 15 s.

@@ -12,11 +12,14 @@ public struct BrokerConfig: Sendable, Equatable {
     }
 }
 
-/// Connects, says hello, then polls `log` (1.5 s) and `agents` (7 s) on one
-/// connection. Requests go out one at a time; replies match by frame type.
+/// One observer connection to the broker. It starts `watch` all, catches up
+/// from `log`, asks for `agents` every 7 s, and re-reads the newest 500
+/// messages every 15 s so `acked_at` (the unread dot) refreshes. It never
+/// sends a write. A broker that does not echo `observer` is too old: the
+/// source stops rather than connect as a normal agent.
 // @unchecked Sendable: every mutable property is read and written only on `queue`,
 // which is also the queue NWConnection calls back on.
-public final class PollingSource: FeedSource, @unchecked Sendable {
+public final class BrokerSource: FeedSource, @unchecked Sendable {
     private enum Kind { case log, agents }
 
     private let config: BrokerConfig
@@ -29,8 +32,13 @@ public final class PollingSource: FeedSource, @unchecked Sendable {
     private var welcomed = false
     private var attempt = 0
     private var buffer = LineBuffer()
+    /// Every message up to this id is held. Advances from forward `log` reads,
+    /// and from live messages once the catch-up is done.
     private var lastID: Int64 = 0
-    private var logPolls = 0
+    private var liveTop: Int64 = 0
+    private var catchingUp = false
+    private var refreshing = false
+    private var paging = false
     private var pending: [Kind] = []
     private var inFlight: Kind?
     private var sentAt = Date()
@@ -85,8 +93,11 @@ public final class PollingSource: FeedSource, @unchecked Sendable {
         pending = []
         inFlight = nil
         welcomed = false
+        catchingUp = false
+        paging = false
     }
 
+    /// The broker also drops a lagging observer. Reconnect, then catch up from `log`.
     private func drop(_ reason: String) {
         FileHandle.standardError.write(Data("chattrs-tray: connection dropped: \(reason)\n".utf8))
         closeConnection()
@@ -132,14 +143,29 @@ public final class PollingSource: FeedSource, @unchecked Sendable {
             return
         }
         switch frame {
-        case .welcome:
+        case .welcome(let observer):
             guard !welcomed else { return }
+            guard observer else {
+                stopped = true
+                closeConnection()
+                onEvent?(.state(.error("broker too old: observer unsupported")))
+                return
+            }
             welcomed = true
             attempt = 0
             onEvent?(.state(.connected))
+            // Catch-up order: start watch and keep what streams, then read log after lastID.
+            send(Wire.watchAllRequest())
+            catchingUp = true
+            liveTop = lastID
             startTimers()
             enqueue(.log)
             enqueue(.agents)
+        case .message(let m):
+            guard welcomed else { return }
+            liveTop = max(liveTop, m.id)
+            if !catchingUp { lastID = max(lastID, m.id) }
+            onEvent?(.messages([m]))
         case .agents(let list):
             guard inFlight == .agents else { return }
             inFlight = nil
@@ -148,9 +174,17 @@ public final class PollingSource: FeedSource, @unchecked Sendable {
         case .log(let msgs):
             guard inFlight == .log else { return }
             inFlight = nil
-            if let top = msgs.map(\.id).max() { lastID = max(lastID, top) }
             if !msgs.isEmpty { onEvent?(.messages(msgs)) }
-            if msgs.count >= 500 { pending.insert(.log, at: 0) }
+            if !refreshing {
+                if let top = msgs.map(\.id).max() { lastID = max(lastID, top) }
+                if msgs.count >= 500 {
+                    pending.insert(.log, at: 0)
+                    paging = true
+                } else if catchingUp {
+                    catchingUp = false
+                    lastID = max(lastID, liveTop)
+                }
+            }
             pump()
         case .error(let code, let message):
             if code == "bad_token" {
@@ -170,7 +204,7 @@ public final class PollingSource: FeedSource, @unchecked Sendable {
         }
     }
 
-    // MARK: polling
+    // MARK: requests
 
     private func startTimers() {
         func make(_ every: Double, _ kind: Kind) -> DispatchSourceTimer {
@@ -180,11 +214,13 @@ public final class PollingSource: FeedSource, @unchecked Sendable {
             t.resume()
             return t
         }
-        timers = [make(1.5, .log), make(7, .agents)]
+        // The watch brings new messages; log is only the unread refresh.
+        timers = [make(15, .log), make(7, .agents)]
     }
 
     private func tick(_ kind: Kind) {
         if inFlight != nil, Date().timeIntervalSince(sentAt) > 10 { drop("request timed out"); return }
+        if kind == .log, catchingUp { return }
         enqueue(kind)
     }
 
@@ -199,9 +235,9 @@ public final class PollingSource: FeedSource, @unchecked Sendable {
         inFlight = kind
         sentAt = Date()
         guard kind == .log else { send(Wire.agentsRequest()); return }
-        // Every 10th poll re-reads the newest 500 so acked_at (the unread dot) refreshes.
-        logPolls += 1
-        let after = logPolls % 10 == 0 ? max(0, lastID - 500) : lastID
-        send(Wire.logRequest(after: after))
+        // Catch-up and paging read forward; a timer tick re-reads the newest 500.
+        refreshing = !catchingUp && !paging
+        paging = false
+        send(Wire.logRequest(after: refreshing ? max(0, lastID - 500) : lastID))
     }
 }

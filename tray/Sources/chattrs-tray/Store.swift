@@ -26,7 +26,7 @@ final class AppStore: ObservableObject {
         }
         state = .connecting
         let mine = epoch
-        let src = PollingSource(config: config)
+        let src = BrokerSource(config: config)
         source = src
         src.start { [weak self] event in
             DispatchQueue.main.async {

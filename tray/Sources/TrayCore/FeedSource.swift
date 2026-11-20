@@ -22,8 +22,7 @@ public enum FeedEvent: Sendable {
     case messages([Message])
 }
 
-/// The one seam between the UI and the broker. A live observer stream replaces
-/// `PollingSource` later; nothing else changes.
+/// The one seam between the UI and the broker.
 public protocol FeedSource: Sendable {
     func start(onEvent: @escaping @Sendable (FeedEvent) -> Void)
     func stop()
