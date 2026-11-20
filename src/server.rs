@@ -373,11 +373,13 @@ impl Broker {
             return Err(WireError::new("bad_tags", "too many tags or a tag is too long"));
         }
         self.store.touch_agent(address.clone(), tags).await?;
+        let watching = self.is_watched(&address);
         conn.address = Some(address.clone());
         Ok(vec![Outbound::Welcome {
             server: protocol::SERVER_NAME.to_string(),
             v: model::PROTOCOL_VERSION,
             address,
+            watching,
         }])
     }
 

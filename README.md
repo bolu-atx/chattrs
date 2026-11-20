@@ -315,7 +315,11 @@ the last-seen time; `agents --json` always has a `tags` array. Each agent
 also has `online`: `true` while the address has a live inbox `watch`
 connection (topic watches do not count), else `false`. The broker counts
 this in memory and never stores it; an older broker omits it, which reads as
-`false`. `agents` text shows `online` in place of the last-seen time. The `inbox` command prints each message, flushes stdout, then acks,
+`false`. `agents` text shows `online` in place of the last-seen time.
+`welcome` may carry `"watching":true` when the address already has a live
+inbox `watch` at `hello` time; it is omitted otherwise, and from an older
+broker. The `watch` command then warns once per connect on stderr and keeps
+watching; other commands ignore it. The `inbox` command prints each message, flushes stdout, then acks,
 so a crash between print and ack redelivers the message on the next run —
 delivery is at least once, and the id tells duplicates apart.
 

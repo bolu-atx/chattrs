@@ -315,3 +315,31 @@ async fn agent_goes_offline_when_a_watch_connection_is_reset() {
     }
     panic!("agent stayed online after a reset");
 }
+
+async fn welcome_watching(raw: &mut Raw, address: &str) -> (Outbound, bool) {
+    let hello = format!("{{\"type\":\"hello\",\"v\":1,\"address\":\"{address}\"}}\n");
+    let welcome = raw_hello(raw, &hello).await;
+    let wire = crate::protocol::encode(&welcome).unwrap();
+    (welcome, wire.contains("watching"))
+}
+
+#[tokio::test]
+async fn second_watcher_welcome_says_watching_and_the_first_does_not() {
+    let (addr, _dir, _handle) = spawn().await;
+    let mut first = raw_connect(&addr).await;
+    let (welcome, on_wire) = welcome_watching(&mut first, "d@h").await;
+    assert!(matches!(welcome, Outbound::Welcome { watching: false, .. }));
+    assert!(!on_wire, "false is omitted from the wire");
+    raw_send(&mut first, "{\"type\":\"watch\"}\n").await;
+    raw_send(&mut first, "{\"type\":\"agents\"}\n").await;
+    let _ = raw_recv(&mut first).await.unwrap();
+
+    let mut second = raw_connect(&addr).await;
+    let (welcome, on_wire) = welcome_watching(&mut second, "d@h").await;
+    assert!(matches!(welcome, Outbound::Welcome { watching: true, .. }));
+    assert!(on_wire);
+
+    let mut other = raw_connect(&addr).await;
+    let (welcome, _) = welcome_watching(&mut other, "e@h").await;
+    assert!(matches!(welcome, Outbound::Welcome { watching: false, .. }));
+}

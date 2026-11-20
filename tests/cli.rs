@@ -470,3 +470,49 @@ fn watch_stdout_is_json_lines_only() {
     }
     assert_eq!(bodies, ["one", "two"]);
 }
+
+/// Spawn `watch` for `address` with stderr piped.
+fn spawn_watch(server: &str, address: &str) -> KillOnDrop {
+    let mut command = Command::new(binary());
+    command.arg("watch").arg("--server").arg(server);
+    command.env("CHATTRS_ADDRESS", address);
+    clear_env(&mut command);
+    command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
+    KillOnDrop(command.spawn().expect("spawn watch"))
+}
+
+#[test]
+fn second_watcher_warns_on_stderr_and_the_first_stays_silent() {
+    let broker = Broker::start();
+    let mut first = spawn_watch(&broker.addr, "dup@h");
+    let mut online = false;
+    for _ in 0..100 {
+        let agents = run_client(&broker.addr, "obs@h", "agents", &["--json"]);
+        online = stdout_text(&agents)
+            .lines()
+            .map(parse_line)
+            .any(|agent| agent["address"] == "dup@h" && agent["online"] == true);
+        if online {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(online, "first watcher never came online");
+
+    let mut second = spawn_watch(&broker.addr, "dup@h");
+    let stderr = second.0.stderr.take().expect("stderr");
+    let (sender, receiver) = mpsc::channel();
+    let _reader = std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            let _ = sender.send(line);
+        }
+    });
+    let line = receiver.recv_timeout(std::time::Duration::from_secs(10)).expect("a warning line");
+    assert!(line.starts_with("chattrs: warning: dup@h already has a live watch"), "{line}");
+
+    let mut stderr = String::new();
+    let mut pipe = first.0.stderr.take().expect("stderr");
+    let _ = first.0.kill();
+    std::io::Read::read_to_string(&mut pipe, &mut stderr).unwrap();
+    assert!(!stderr.contains("warning"), "first watcher warned: {stderr}");
+}
