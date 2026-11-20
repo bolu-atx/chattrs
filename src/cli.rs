@@ -38,6 +38,63 @@ pub enum Command {
     Status(StatusArgs),
     /// Print the bundled agent skill to stdout.
     Skill,
+    /// Run as an agent hook: read the hook JSON on stdin, print hook JSON.
+    Hook(HookArgs),
+    /// Install or remove the chattrs hooks in Claude Code and Codex configs.
+    Hooks(HooksArgs),
+}
+
+/// The agent events a hook serves, in the kebab-case form of the Claude
+/// Code and Codex hook event names.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HookEvent {
+    SessionStart,
+    UserPromptSubmit,
+    PostToolUse,
+    Stop,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct HookArgs {
+    /// The hook event that fired.
+    #[arg(value_enum)]
+    pub event: HookEvent,
+
+    #[command(flatten)]
+    pub client: ClientArgs,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct HooksArgs {
+    #[command(subcommand)]
+    pub action: HooksAction,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum HooksAction {
+    /// Add the chattrs hooks to the agent config files.
+    Install(HooksTarget),
+    /// Remove only the chattrs hooks from the agent config files.
+    Remove(HooksTarget),
+}
+
+/// Which agents' config files `hooks install` and `hooks remove` edit.
+#[derive(clap::Args, Debug)]
+pub struct HooksTarget {
+    /// Agent to edit.
+    #[arg(long, value_enum, default_value = "all")]
+    pub agent: HooksAgent,
+
+    /// Edit the config files in the current directory instead of the user's.
+    #[arg(long)]
+    pub project: bool,
+}
+
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HooksAgent {
+    Claude,
+    Codex,
+    All,
 }
 
 #[derive(clap::Args, Debug)]

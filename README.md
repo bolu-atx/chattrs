@@ -355,6 +355,48 @@ Run this checklist once on a new swarm.
 5. `chattrs watch --all` shows every message live.
 6. `chattrs agents` shows both workers online, with their tags.
 
+## Hooks (Claude Code and Codex)
+
+Hooks deliver unread messages between tool calls. Codex has no Monitor
+tool, so hooks are how a Codex worker hears a message. Meets HOOK-1.
+
+```bash
+chattrs hooks install [--agent claude|codex|all] [--project]
+chattrs hooks remove  [--agent claude|codex|all] [--project]
+```
+
+- User level (default): `~/.claude/settings.json` and
+  `$CODEX_HOME/hooks.json` (else `~/.codex/hooks.json`). `--project`
+  edits `.claude/settings.json` and `.codex/hooks.json` in the current
+  directory. With `--agent all`, an agent whose config directory is
+  missing is skipped; an explicit `--agent` creates the file.
+- Install merges in place: other hooks and key order stay. Own entries
+  are the commands `chattrs hook <event>`. Install twice gives the same
+  file. `remove` deletes only own entries. Invalid JSON exits 1 and
+  writes nothing. A `.bak` copy is written once, when none exists. The
+  file is written as 2-space pretty JSON with a trailing newline, so a
+  file in that format is restored byte for byte by install then remove;
+  another format keeps its content, not its layout.
+- After install, take the printed next step for each agent. Codex runs
+  new hooks only after review: open Codex and run `/hooks` to trust
+  them. Claude Code may ask you to review hooks edited outside it.
+  Until then the hooks look installed but do not run.
+- `chattrs` must be on the agent's `PATH`.
+
+What each event does (`chattrs hook <event>`):
+
+| Event | Effect |
+| ----- | ------ |
+| `session-start` | Tells the agent its address and to load the skill. Claude Code also gets the Monitor reminder. Does not contact the broker. |
+| `user-prompt-submit`, `post-tool-use` | Adds unread messages as `additionalContext`, in the `<agent-message>` wrapper. Acks them after stdout is flushed. |
+| `stop` | When messages are unread, blocks the stop with them as the reason, then acks. Never blocks when `stop_hook_active` is true. |
+
+The hooks live in the user-level config, so they fire in every session.
+`chattrs hook` does nothing, with no output, unless `CHATTRS_ADDRESS` is
+set. It never starts a broker. It is best effort: connect plus exchange
+get about 300 ms, and any failure prints nothing and exits 0. A message
+that was not acked stays unread for the next command.
+
 ## Protocol
 
 One JSON object per line, `\n`-terminated. The `type` field disambiguates.
