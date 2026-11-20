@@ -34,6 +34,8 @@ pub enum Command {
     Agents(AgentsArgs),
     /// Show the full message history, oldest first.
     Log(LogArgs),
+    /// Report the own state to the broker. Best effort: always exits 0.
+    Status(StatusArgs),
     /// Print the bundled agent skill to stdout.
     Skill,
 }
@@ -234,6 +236,35 @@ pub struct AgentsArgs {
     /// Print one JSON object per agent instead of a text line.
     #[arg(long)]
     pub json: bool,
+}
+
+/// The states `status` accepts.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    Working,
+    Idle,
+    Waiting,
+}
+
+impl State {
+    /// The wire value of this state.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            State::Working => "working",
+            State::Idle => "idle",
+            State::Waiting => "waiting",
+        }
+    }
+}
+
+#[derive(clap::Args, Debug)]
+pub struct StatusArgs {
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// The state to report.
+    #[arg(value_enum)]
+    pub state: State,
 }
 
 #[derive(clap::Args, Debug)]

@@ -125,7 +125,7 @@ impl Client {
     /// broker on demand and retry once on a fresh connection. Any
     /// other failure returns the original connect error.
     pub async fn connect(endpoint: &Endpoint) -> Result<Client, ClientError> {
-        Client::open(endpoint, true, false).await
+        Client::open(endpoint, true, false, None).await
     }
 
     /// Connect again after a drop. A reconnect never starts a broker:
@@ -133,13 +133,14 @@ impl Client {
     /// under a waiting `ask` or `watch` is not replaced behind the
     /// operator's back, possibly on another database.
     pub async fn reconnect(endpoint: &Endpoint) -> Result<Client, ClientError> {
-        Client::open(endpoint, false, false).await
+        Client::open(endpoint, false, false, None).await
     }
 
     async fn open(
         endpoint: &Endpoint,
         may_start: bool,
         observer: bool,
+        state: Option<&str>,
     ) -> Result<Client, ClientError> {
         let stream = match connect_stream(&endpoint.server).await {
             Ok(stream) => stream,
@@ -171,6 +172,7 @@ impl Client {
                     hello_tags(std::env::var("CHATTRS_TAGS").ok().as_deref())
                 },
                 observer,
+                state: state.map(str::to_string),
             })
             .await?;
         match frame {
@@ -403,6 +405,39 @@ pub(crate) async fn connect_retrying(
     }
 }
 
+/// How long `status` keeps trying to reach the broker. It must never hold
+/// up the agent that calls it.
+const STATUS_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Pause between `status` connect attempts.
+const STATUS_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Report `state` with a `hello`. Never starts a broker. Retries I/O
+/// failures quietly until `window` ends; a broker error ends it at once.
+pub async fn report_state(
+    endpoint: &Endpoint,
+    state: &str,
+    window: std::time::Duration,
+) -> Result<(), ClientError> {
+    let attempts = async {
+        loop {
+            match Client::open(endpoint, false, false, Some(state)).await {
+                Ok(_) => return Ok(()),
+                Err(ClientError::Io(_)) => tokio::time::sleep(STATUS_RETRY_PAUSE).await,
+                Err(error) => return Err(error),
+            }
+        }
+    };
+    tokio::time::timeout(window, attempts)
+        .await
+        .unwrap_or_else(|_| Err(ClientError::Io(format!("no broker answered in {window:?}"))))
+}
+
+/// `report_state` with the standard `status` window.
+pub async fn report_status(endpoint: &Endpoint, state: &str) -> Result<(), ClientError> {
+    report_state(endpoint, state, STATUS_WINDOW).await
+}
+
 /// Seconds between reconnects, doubling from 1 s to 30 s. Shared by
 /// `watch` and the `ask` wait, so both back off the same way.
 pub fn next_backoff_secs(current: u64) -> u64 {
@@ -570,7 +605,7 @@ impl Watcher {
     /// Connect and send the `watch` frame. An I/O failure is returned for
     /// the caller to retry; any other failure ends the stream.
     async fn connect(&mut self) -> Result<(), ClientError> {
-        let mut client = Client::open(&self.endpoint, !self.connected_once, self.all).await?;
+        let mut client = Client::open(&self.endpoint, !self.connected_once, self.all, None).await?;
         self.connected_once = true;
         if client.watching && self.topics.is_empty() {
             eprintln!(

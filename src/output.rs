@@ -102,11 +102,29 @@ pub fn log_text(message: &LoggedMessage) -> String {
     format!("{}\n", render_log_line(message))
 }
 
+/// A reported state older than this shows as `unknown` (MON-4).
+const STATE_FRESH_MS: u64 = 15 * 60 * 1000;
+
 /// One agent as a text line: the address, `online` or its last-seen
-/// timestamp, and its comma-joined tags when it has any.
+/// timestamp, its state when it reported one, and its comma-joined tags
+/// when it has any.
 pub fn agent_text(agent: &Agent) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_millis() as u64)
+        .unwrap_or(0);
+    agent_text_at(agent, now)
+}
+
+/// `agent_text` with the clock passed in, in ms since the epoch.
+fn agent_text_at(agent: &Agent, now: u64) -> String {
     let seen = if agent.online { "online".to_string() } else { format_ts(agent.last_seen) };
     let mut line = format!("{}  {seen}", agent.address);
+    if let (Some(state), Some(state_at)) = (agent.state.as_deref(), agent.state_at) {
+        let shown = if now.saturating_sub(state_at) > STATE_FRESH_MS { "unknown" } else { state };
+        line.push_str("  ");
+        line.push_str(shown);
+    }
     if !agent.tags.is_empty() {
         line.push_str("  ");
         line.push_str(&agent.tags.join(","));
@@ -184,6 +202,8 @@ mod tests {
             last_seen: 1763200000123,
             online: false,
             tags: vec!["gpu".into()],
+            state: None,
+            state_at: None,
         };
         assert_eq!(agent_text(&agent), "a@h  2025-11-15T09:46:40Z  gpu\n");
         agent.online = true;
@@ -193,6 +213,40 @@ mod tests {
         agent.online = false;
         let json: serde_json::Value = serde_json::from_str(&agent_json(&agent)).unwrap();
         assert_eq!(json["online"], false);
+    }
+
+    #[test]
+    fn agent_text_shows_a_fresh_state_and_a_stale_one_as_unknown() {
+        let at = 1763200000000;
+        let agent = Agent {
+            address: "a@h".into(),
+            last_seen: at,
+            online: true,
+            tags: vec!["gpu".into()],
+            state: Some("working".into()),
+            state_at: Some(at),
+        };
+        assert_eq!(agent_text_at(&agent, at + 60_000), "a@h  online  working  gpu\n");
+        assert_eq!(agent_text_at(&agent, at + 15 * 60_000), "a@h  online  working  gpu\n");
+        assert_eq!(agent_text_at(&agent, at + 15 * 60_000 + 1), "a@h  online  unknown  gpu\n");
+        let json: serde_json::Value = serde_json::from_str(&agent_json(&agent)).unwrap();
+        assert_eq!(json["state"], "working");
+        assert_eq!(json["state_at"], at);
+    }
+
+    #[test]
+    fn agent_json_state_is_null_when_never_set() {
+        let agent = Agent {
+            address: "a@h".into(),
+            last_seen: 1,
+            online: false,
+            tags: vec![],
+            state: None,
+            state_at: None,
+        };
+        let json: serde_json::Value = serde_json::from_str(&agent_json(&agent)).unwrap();
+        assert!(json["state"].is_null() && json["state_at"].is_null());
+        assert!(json.as_object().unwrap().contains_key("state_at"));
     }
 
     #[test]

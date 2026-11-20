@@ -35,6 +35,7 @@ mod tests {
                 token: None,
                 tags: vec![],
                 observer: false,
+                state: None,
             },
             Inbound::Hello {
                 v: 1,
@@ -42,6 +43,7 @@ mod tests {
                 token: Some("s3cret".into()),
                 tags: vec!["os:linux".into(), "gpu".into()],
                 observer: false,
+                state: None,
             },
             Inbound::Send {
                 to: Some("opus@mac".into()),
@@ -138,7 +140,8 @@ mod tests {
                 address: "a@h".into(),
                 token: None,
                 tags: vec![],
-                observer: false
+                observer: false,
+                state: None
             }
         );
         let line = encode(&Inbound::Hello {
@@ -147,9 +150,27 @@ mod tests {
             token: None,
             tags: vec![],
             observer: false,
+            state: None,
         })
         .unwrap();
         assert!(!line.contains("tags"), "empty tags are omitted: {line}");
+    }
+
+    #[test]
+    fn hello_state_is_optional_on_the_wire() {
+        let hello = |state: Option<&str>| Inbound::Hello {
+            v: 1,
+            address: "a@h".into(),
+            token: None,
+            tags: vec![],
+            observer: false,
+            state: state.map(str::to_string),
+        };
+        let line = encode(&hello(None)).unwrap();
+        assert!(!line.contains("state"), "no state is omitted: {line}");
+        let line = encode(&hello(Some("idle"))).unwrap();
+        assert!(line.contains(r#""state":"idle""#), "{line}");
+        assert_eq!(decode::<Inbound>(&line).unwrap(), hello(Some("idle")));
     }
 
     #[test]
@@ -161,6 +182,7 @@ mod tests {
                 token: None,
                 tags: vec![],
                 observer: false,
+                state: None,
             })
             .unwrap(),
             serde_json::to_value(Inbound::Send {
@@ -249,6 +271,7 @@ mod tests {
             token: None,
             tags: vec![],
             observer: false,
+            state: None,
         })
         .unwrap();
         let watch_line = encode(&Inbound::Watch { topics: vec![], all: false }).unwrap();
