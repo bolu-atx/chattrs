@@ -241,6 +241,7 @@ impl Store {
                     Ok(Agent {
                         address: row.get(0)?,
                         last_seen: row.get::<_, i64>(1)? as u64,
+                        online: false,
                         tags: tags
                             .and_then(|json| serde_json::from_str(&json).ok())
                             .unwrap_or_default(),

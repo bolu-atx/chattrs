@@ -102,10 +102,11 @@ pub fn log_text(message: &LoggedMessage) -> String {
     format!("{}\n", render_log_line(message))
 }
 
-/// One agent as a text line: the address, its last-seen timestamp, and
-/// its comma-joined tags when it has any.
+/// One agent as a text line: the address, `online` or its last-seen
+/// timestamp, and its comma-joined tags when it has any.
 pub fn agent_text(agent: &Agent) -> String {
-    let mut line = format!("{}  {}", agent.address, format_ts(agent.last_seen));
+    let seen = if agent.online { "online".to_string() } else { format_ts(agent.last_seen) };
+    let mut line = format!("{}  {seen}", agent.address);
     if !agent.tags.is_empty() {
         line.push_str("  ");
         line.push_str(&agent.tags.join(","));
@@ -175,6 +176,24 @@ pub fn write_stdout(text: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_text_shows_online_in_place_of_last_seen_and_keeps_tags_after() {
+        let mut agent = Agent {
+            address: "a@h".into(),
+            last_seen: 1763200000123,
+            online: false,
+            tags: vec!["gpu".into()],
+        };
+        assert_eq!(agent_text(&agent), "a@h  2025-11-15T09:46:40Z  gpu\n");
+        agent.online = true;
+        assert_eq!(agent_text(&agent), "a@h  online  gpu\n");
+        let json: serde_json::Value = serde_json::from_str(&agent_json(&agent)).unwrap();
+        assert_eq!(json["online"], true);
+        agent.online = false;
+        let json: serde_json::Value = serde_json::from_str(&agent_json(&agent)).unwrap();
+        assert_eq!(json["online"], false);
+    }
 
     #[test]
     fn format_ts_renders_utc_to_the_second() {

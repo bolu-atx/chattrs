@@ -101,6 +101,10 @@ pub struct Message {
 pub struct Agent {
     pub address: String,
     pub last_seen: u64,
+    /// True while the address has a live inbox `watch` connection. The
+    /// broker fills it per request; it is never stored.
+    #[serde(default)]
+    pub online: bool,
     /// Tags from the agent's latest `hello` that carried any; empty when
     /// it never sent tags.
     #[serde(default)]

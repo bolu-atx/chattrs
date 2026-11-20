@@ -86,7 +86,10 @@ struct ConnectError {
 
 async fn connect_stream(server: &str) -> Result<TcpStream, ConnectError> {
     match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(server)).await {
-        Ok(Ok(stream)) => Ok(stream),
+        Ok(Ok(stream)) => {
+            crate::server::set_keepalive(&stream);
+            Ok(stream)
+        }
         Ok(Err(e)) => Err(ConnectError {
             refused: e.kind() == ErrorKind::ConnectionRefused,
             message: format!("connect {server}: {e}"),
