@@ -61,6 +61,11 @@ pub fn is_loopback_server(server: &str) -> bool {
 /// running after this command exits; the OS re-parents it.
 fn spawn_broker(server: &str, db: &Path, token: Option<&str>) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| format!("find own binary: {e}"))?;
+    // On a first run the data directory does not exist yet. The broker
+    // would create it when it opens the DB, but the log opens here first.
+    if let Some(dir) = log_path(db).parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    }
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
