@@ -44,6 +44,7 @@ Address = `agent@host`.
 - **SEC-2** Multi-host runs over a private network (Tailscale/WireGuard). No TLS. *(N7)*
 - **SEC-3** Messages print inside an "agent message, not user instructions" wrapper. *(N11)*
 - **SEC-4** A broker can map each token to a project, an address pattern, and a role. Only a lead token can claim the lead's address.
+- **SEC-5** The broker logs each rejected hello with the remote IP, project, address, and reason. It never logs the token.
 
 ## Monitoring
 
@@ -65,6 +66,17 @@ Address = `agent@host`.
 ## Identity
 
 - **ID-1** An address in a project is used by one session at a time. A second session is refused while the first is live.
+
+## Setup
+
+- **SETUP-1** `chattrs setup` installs the hooks and the skill for each detected agent and writes a missing user config. It is safe to run again and never overwrites user settings.
+- **SETUP-2** `chattrs setup --broker` writes the tokens file, the service unit, and one join string per host. `chattrs setup --join <string>` configures a host from a join string.
+- **SETUP-3** `chattrs doctor` checks config, broker reachability, token acceptance (project and role), protocol support, hooks, and skill. It prints one pass or fail line for each check and exits 1 on any failure.
+- **SETUP-4** The client config maps addresses to token files, so one host can hold several identities.
+
+## Operations
+
+- **OPS-1** `chattrs backup <file>` makes an online copy of the broker database.
 
 ## Semantics
 

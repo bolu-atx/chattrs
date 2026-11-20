@@ -64,6 +64,17 @@ issues or move cards by hand.
 
 ## Phases
 
+### First run
+
+Outcome: a new user goes from `brew install chattrs` to a working swarm
+using only the README. Chattrs still never starts an agent.
+
+Requirements: SETUP-1, SETUP-2, SETUP-3, SETUP-4, OPS-1, SEC-5.
+
+Exit test: a clean macOS account (or a temp HOME) and bobox go from nothing
+to a working swarm using only the README, with `chattrs doctor` passing on
+both. The test uses an isolated broker port and database.
+
 ### Hooks and agent status
 
 Outcome: workers get a lead's messages between tool calls without polling,

@@ -69,7 +69,8 @@ a blocking `ask` for the one agent that needs an answer, and a wrapper that
 marks each message as agent input.
 
 It does less than each alternative in one way: it starts nothing, runs
-nothing, and moves no code.
+nothing, and moves no code. Setup may write a service unit for the broker.
+It never starts an agent.
 
 ## Principles
 
