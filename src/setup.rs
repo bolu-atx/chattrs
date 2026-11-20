@@ -15,6 +15,67 @@ use crate::{hook, skill};
 mod broker;
 mod join;
 
+/// Why `setup` stopped. `Display` gives the text printed after `chattrs: `.
+#[derive(Debug)]
+pub enum SetupError {
+    /// A file or directory step failed. `verb` is `read`, `write`,
+    /// `create`, or `chmod`.
+    Fs {
+        verb: &'static str,
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    Stdin(std::io::Error),
+    CurrentExe(std::io::Error),
+    /// A service command could not start.
+    Spawn {
+        program: String,
+        source: std::io::Error,
+    },
+    /// A service command ran and failed.
+    StepFailed {
+        command: String,
+        status: std::process::ExitStatus,
+    },
+    /// A join string is bad. The text never includes the string.
+    BadJoin(String),
+    /// A file that setup never overwrites exists.
+    Exists(PathBuf),
+    /// A flag or an input is wrong.
+    Invalid(String),
+    /// `hooks install` or the home lookup failed.
+    Hook(String),
+}
+
+impl std::fmt::Display for SetupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SetupError::Fs { verb, path, source } => {
+                write!(f, "{verb} {}: {source}", path.display())
+            }
+            SetupError::Stdin(source) => write!(f, "read stdin: {source}"),
+            SetupError::CurrentExe(source) => write!(f, "find the chattrs binary: {source}"),
+            SetupError::Invalid(message) | SetupError::Hook(message) => f.write_str(message),
+            SetupError::Spawn { program, source } => write!(f, "run {program}: {source}"),
+            SetupError::StepFailed { command, status } => {
+                write!(f, "`{command}` failed: {status}")
+            }
+            SetupError::BadJoin(why) => write!(f, "bad join string: {why}"),
+            SetupError::Exists(path) => {
+                write!(f, "{} already exists; setup --broker does not overwrite it", path.display())
+            }
+        }
+    }
+}
+
+impl std::error::Error for SetupError {}
+
+impl From<String> for SetupError {
+    fn from(message: String) -> SetupError {
+        SetupError::Hook(message)
+    }
+}
+
 /// The starter config. Every line is a comment, so it changes nothing until
 /// the user edits it.
 const CONFIG_TEMPLATE: &str = "\
@@ -36,30 +97,47 @@ fn on_path(program: &str) -> bool {
         .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
 }
 
+fn parent_dir(path: &Path) -> Result<&Path, SetupError> {
+    path.parent()
+        .ok_or_else(|| SetupError::Invalid(format!("no parent dir for {}", path.display())))
+}
+
 /// Write `text` to `path` when the file is missing or differs. Returns true
 /// when it wrote.
-fn write_if_changed(path: &Path, text: &str) -> Result<bool, String> {
+fn write_if_changed(path: &Path, text: &str) -> Result<bool, SetupError> {
     if fs::read_to_string(path).is_ok_and(|current| current == text) {
         return Ok(false);
     }
-    let dir = path.parent().ok_or_else(|| format!("no parent dir for {}", path.display()))?;
-    fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
-    fs::write(path, text).map_err(|error| format!("write {}: {error}", path.display()))?;
+    let dir = parent_dir(path)?;
+    fs::create_dir_all(dir).map_err(|source| SetupError::Fs {
+        verb: "create",
+        path: dir.to_path_buf(),
+        source,
+    })?;
+    fs::write(path, text).map_err(|source| SetupError::Fs {
+        verb: "write",
+        path: path.to_path_buf(),
+        source,
+    })?;
     Ok(true)
 }
 
 /// Create the config with mode 0600. Returns false when it already exists.
-fn write_config_if_missing(path: &Path) -> Result<bool, String> {
+fn write_config_if_missing(path: &Path) -> Result<bool, SetupError> {
     if path.exists() {
         return Ok(false);
     }
-    let dir = path.parent().ok_or_else(|| format!("no parent dir for {}", path.display()))?;
-    fs::create_dir_all(dir).map_err(|error| format!("create {}: {error}", dir.display()))?;
+    let dir = parent_dir(path)?;
+    fs::create_dir_all(dir).map_err(|source| SetupError::Fs {
+        verb: "create",
+        path: dir.to_path_buf(),
+        source,
+    })?;
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let fail = |error: std::io::Error| format!("write {}: {error}", path.display());
+    let fail = |source| SetupError::Fs { verb: "write", path: path.to_path_buf(), source };
     let mut file = options.open(path).map_err(fail)?;
     std::io::Write::write_all(&mut file, CONFIG_TEMPLATE.as_bytes()).map_err(fail)?;
     Ok(true)
@@ -95,7 +173,7 @@ pub(crate) fn targets(home: &Path) -> [Target; 2] {
 }
 
 /// Install the hooks and the skill for one agent.
-fn setup_agent(target: &Target) -> Result<(), String> {
+fn setup_agent(target: &Target) -> Result<(), SetupError> {
     hook::install::run(HooksAction::Install(HooksTarget { agent: target.agent, project: false }))?;
     let path = target.skills_dir.join("chattrs/SKILL.md");
     let verb = if write_if_changed(&path, skill::text())? { "wrote" } else { "kept" };
@@ -105,7 +183,7 @@ fn setup_agent(target: &Target) -> Result<(), String> {
 
 /// Run `chattrs setup`. `--broker` sets up a broker host and nothing else.
 /// `--join` stores the tokens first, then the host setup runs as usual.
-pub fn run(args: SetupArgs) -> Result<(), String> {
+pub fn run(args: SetupArgs) -> Result<(), SetupError> {
     if args.broker {
         return broker::run(&args);
     }
@@ -116,7 +194,7 @@ pub fn run(args: SetupArgs) -> Result<(), String> {
 }
 
 /// Hooks, skill, and config for this host.
-fn run_host() -> Result<(), String> {
+fn run_host() -> Result<(), SetupError> {
     let home = hook::install::home()?;
     let targets = targets(&home);
     for target in targets.iter().filter(|target| !target.detected) {

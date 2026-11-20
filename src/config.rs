@@ -31,6 +31,62 @@ pub struct Config {
     pub token_map: Vec<(String, PathBuf)>,
 }
 
+/// Why a config file could not be loaded. `Display` gives the text that
+/// `chattrs` prints after `chattrs: `.
+#[derive(Debug)]
+pub enum ConfigError {
+    /// A config file could not be read.
+    Read { file: PathBuf, source: std::io::Error },
+    /// A line of a config file is wrong. `msg` says how.
+    Parse { file: PathBuf, line: usize, msg: String },
+    /// A repo file names a token or a token file.
+    SecretInRepoFile { file: PathBuf, line: usize },
+    /// A repo file has a `[tokens]` table.
+    TokensInRepoFile { file: PathBuf },
+    /// A token file could not be read.
+    TokenFileRead { file: PathBuf, source: std::io::Error },
+    /// A token file is wider than 0600.
+    TokenFileMode { file: PathBuf, mode: u32 },
+    /// A token file holds no token.
+    TokenFileEmpty { file: PathBuf },
+    /// The current directory is unknown.
+    CurrentDir(std::io::Error),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::Read { file, source } => write!(f, "{}: {source}", file.display()),
+            ConfigError::Parse { file, line, msg } => {
+                write!(f, "{}:{line}: {msg}", file.display())
+            }
+            ConfigError::SecretInRepoFile { file, line } => write!(
+                f,
+                "{}:{line}: a repo config file must not hold a token; put token_file in \
+                 ~/.config/chattrs/config.toml",
+                file.display()
+            ),
+            ConfigError::TokensInRepoFile { file } => {
+                write!(f, "{}: a repo config file must not hold [tokens]", file.display())
+            }
+            ConfigError::TokenFileRead { file, source } => {
+                write!(f, "token_file {}: {source}", file.display())
+            }
+            ConfigError::TokenFileMode { file, mode } => write!(
+                f,
+                "token_file {} has mode {mode:o}, wider than 600; run chmod 600",
+                file.display()
+            ),
+            ConfigError::TokenFileEmpty { file } => {
+                write!(f, "token_file {} is empty", file.display())
+            }
+            ConfigError::CurrentDir(source) => write!(f, "current directory: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
 /// What `parse_file` reads: the flat pairs and the `[tokens]` entries.
 struct Parsed {
     pairs: Vec<(String, String)>,
@@ -40,8 +96,9 @@ struct Parsed {
 /// Parse a file's `key = "value"` lines and its optional `[tokens]` table.
 /// Keys outside `allowed` are errors that name the file and line. In the
 /// table, each key is an address pattern, quoted or bare.
-fn parse_file(path: &Path, allowed: &[&str]) -> Result<Parsed, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+fn parse_file(path: &Path, allowed: &[&str]) -> Result<Parsed, ConfigError> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|source| ConfigError::Read { file: path.to_path_buf(), source })?;
     let mut parsed = Parsed { pairs: Vec::new(), tokens: Vec::new() };
     let mut in_tokens = false;
     for (index, raw) in text.lines().enumerate() {
@@ -49,27 +106,28 @@ fn parse_file(path: &Path, allowed: &[&str]) -> Result<Parsed, String> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let at = format!("{}:{}", path.display(), index + 1);
+        let parse_error =
+            |msg: String| ConfigError::Parse { file: path.to_path_buf(), line: index + 1, msg };
         if trimmed == "[tokens]" {
             in_tokens = true;
             continue;
         }
         let Some((key, value)) = parse_pair(trimmed) else {
-            return Err(format!("{at}: expected key = \"value\""));
+            return Err(parse_error("expected key = \"value\"".to_string()));
         };
         if in_tokens {
             let pattern = key.trim_matches('"');
             if parsed.tokens.iter().any(|(seen, _)| seen == pattern) {
-                return Err(format!("{at}: duplicate address `{pattern}`"));
+                return Err(parse_error(format!("duplicate address `{pattern}`")));
             }
             parsed.tokens.push((pattern.to_string(), value));
             continue;
         }
         if !allowed.contains(&key) {
-            return Err(format!("{at}: unknown key `{key}`"));
+            return Err(parse_error(format!("unknown key `{key}`")));
         }
         if parsed.pairs.iter().any(|(seen, _)| seen == key) {
-            return Err(format!("{at}: duplicate key `{key}`"));
+            return Err(parse_error(format!("duplicate key `{key}`")));
         }
         parsed.pairs.push((key.to_string(), value));
     }
@@ -77,23 +135,23 @@ fn parse_file(path: &Path, allowed: &[&str]) -> Result<Parsed, String> {
 }
 
 /// Read the token from `path`. On unix, a file wider than 0600 is refused.
-pub(crate) fn read_token_file(path: &Path) -> Result<String, String> {
-    let shown = path.display();
+pub(crate) fn read_token_file(path: &Path) -> Result<String, ConfigError> {
+    let file = || path.to_path_buf();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(path).map_err(|e| format!("token_file {shown}: {e}"))?;
+        let meta = std::fs::metadata(path)
+            .map_err(|source| ConfigError::TokenFileRead { file: file(), source })?;
         let mode = meta.permissions().mode() & 0o777;
         if mode & 0o177 != 0 {
-            return Err(format!(
-                "token_file {shown} has mode {mode:o}, wider than 600; run chmod 600"
-            ));
+            return Err(ConfigError::TokenFileMode { file: file(), mode });
         }
     }
-    let text = std::fs::read_to_string(path).map_err(|e| format!("token_file {shown}: {e}"))?;
+    let text = std::fs::read_to_string(path)
+        .map_err(|source| ConfigError::TokenFileRead { file: file(), source })?;
     let token = text.trim();
     if token.is_empty() {
-        return Err(format!("token_file {shown} is empty"));
+        return Err(ConfigError::TokenFileEmpty { file: file() });
     }
     Ok(token.to_string())
 }
@@ -114,23 +172,22 @@ pub(crate) fn find_repo_file(start: &Path) -> Option<PathBuf> {
 }
 
 /// Refuse a repo file that names a token or a token file.
-fn refuse_secrets(file: &Path) -> Result<(), String> {
-    let text = std::fs::read_to_string(file).map_err(|e| format!("{}: {e}", file.display()))?;
+fn refuse_secrets(file: &Path) -> Result<(), ConfigError> {
+    let text = std::fs::read_to_string(file)
+        .map_err(|source| ConfigError::Read { file: file.to_path_buf(), source })?;
     for (index, raw) in text.lines().enumerate() {
         if parse_pair(raw.trim()).is_some_and(|(key, _)| matches!(key, "token" | "token_file")) {
-            return Err(format!(
-                "{}:{}: a repo config file must not hold a token; put token_file in \
-                 ~/.config/chattrs/config.toml",
-                file.display(),
-                index + 1
-            ));
+            return Err(ConfigError::SecretInRepoFile {
+                file: file.to_path_buf(),
+                line: index + 1,
+            });
         }
     }
     Ok(())
 }
 
 /// Load both files for a user `home` and a working directory `cwd`.
-pub fn load_from(home: Option<&Path>, cwd: &Path) -> Result<Config, String> {
+pub fn load_from(home: Option<&Path>, cwd: &Path) -> Result<Config, ConfigError> {
     let mut config = Config::default();
     let user_file = home.map(|h| h.join(".config/chattrs/config.toml"));
     if let Some(file) = user_file.filter(|f| f.is_file()) {
@@ -155,7 +212,7 @@ pub fn load_from(home: Option<&Path>, cwd: &Path) -> Result<Config, String> {
         refuse_secrets(&file)?;
         let parsed = parse_file(&file, &["project", "lead"])?;
         if !parsed.tokens.is_empty() {
-            return Err(format!("{}: a repo config file must not hold [tokens]", file.display()));
+            return Err(ConfigError::TokensInRepoFile { file });
         }
         for (key, value) in parsed.pairs {
             match key.as_str() {
@@ -168,14 +225,14 @@ pub fn load_from(home: Option<&Path>, cwd: &Path) -> Result<Config, String> {
 }
 
 /// Load the config for the real home and the working directory `cwd`.
-pub fn load_at(cwd: &Path) -> Result<Config, String> {
+pub fn load_at(cwd: &Path) -> Result<Config, ConfigError> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     load_from(home.as_deref(), cwd)
 }
 
 /// Load the config for the real home and the current directory.
-pub fn load() -> Result<Config, String> {
-    let cwd = std::env::current_dir().map_err(|e| format!("current directory: {e}"))?;
+pub fn load() -> Result<Config, ConfigError> {
+    let cwd = std::env::current_dir().map_err(ConfigError::CurrentDir)?;
     load_at(&cwd)
 }
 
@@ -255,7 +312,7 @@ impl Config {
     /// Replace the fallback `token` with the token of the `[tokens]` entry
     /// that fits `address`, if one does. The caller skips this when
     /// `CHATTRS_TOKEN` is set, so the variable keeps winning (`Settings`).
-    pub fn select_token(&mut self, address: Option<&str>) -> Result<(), String> {
+    pub fn select_token(&mut self, address: Option<&str>) -> Result<(), ConfigError> {
         let Some(path) = address.and_then(|address| self.mapped_token_file(address)) else {
             return Ok(());
         };
@@ -320,7 +377,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             write(&dir.path().join(".chattrs.toml"), &format!("{key} = \"x\"\n"));
             fs::create_dir_all(dir.path().join(".git")).unwrap();
-            let error = load_from(None, dir.path()).unwrap_err();
+            let error = load_from(None, dir.path()).unwrap_err().to_string();
             assert!(
                 error.contains(".chattrs.toml:1") && error.contains("must not hold"),
                 "{error}"
@@ -333,11 +390,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join(".chattrs.toml"), "project = \"a\"\n\nlead2 = \"b\"\n");
         fs::create_dir_all(dir.path().join(".git")).unwrap();
-        let error = load_from(None, dir.path()).unwrap_err();
+        let error = load_from(None, dir.path()).unwrap_err().to_string();
         assert!(error.contains(".chattrs.toml:3: unknown key `lead2`"), "{error}");
         let home = dir.path().join("h");
         write(&home.join(".config/chattrs/config.toml"), "project = \"a\"\n");
-        let error = load_from(Some(&home), dir.path()).unwrap_err();
+        let error = load_from(Some(&home), dir.path()).unwrap_err().to_string();
         assert!(error.contains("config.toml:1: unknown key `project`"), "{error}");
     }
 
@@ -353,7 +410,7 @@ mod tests {
             &home.join(".config/chattrs/config.toml"),
             &format!("token_file = \"{}\"\n", tok.display()),
         );
-        let error = load_from(Some(&home), dir.path()).unwrap_err();
+        let error = load_from(Some(&home), dir.path()).unwrap_err().to_string();
         assert!(error.contains("wider than 600"), "{error}");
         chmod(&tok, 0o600);
         assert_eq!(load_from(Some(&home), dir.path()).unwrap().token.as_deref(), Some("abc"));
@@ -423,7 +480,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join(".chattrs.toml"), "[tokens]\n\"a@b\" = \"/x\"\n");
         fs::create_dir_all(dir.path().join(".git")).unwrap();
-        let error = load_from(None, dir.path()).unwrap_err();
+        let error = load_from(None, dir.path()).unwrap_err().to_string();
         assert!(error.contains("must not hold [tokens]"), "{error}");
     }
 

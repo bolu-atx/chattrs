@@ -60,6 +60,24 @@ impl From<client::ClientError> for RunError {
     }
 }
 
+impl From<config::ConfigError> for RunError {
+    fn from(error: config::ConfigError) -> RunError {
+        RunError::Message(error.to_string())
+    }
+}
+
+impl From<tokens::TokensError> for RunError {
+    fn from(error: tokens::TokensError) -> RunError {
+        RunError::Message(error.to_string())
+    }
+}
+
+impl From<setup::SetupError> for RunError {
+    fn from(error: setup::SetupError) -> RunError {
+        RunError::Message(error.to_string())
+    }
+}
+
 impl From<String> for RunError {
     fn from(message: String) -> RunError {
         RunError::Message(message)
@@ -69,7 +87,7 @@ impl From<String> for RunError {
 /// Load the config files. A `[tokens]` entry replaces the plain `token_file`
 /// when it fits the address; an explicit `CHATTRS_TOKEN` still wins over both
 /// (`Settings`).
-fn load_config() -> Result<config::Config, String> {
+fn load_config() -> Result<config::Config, config::ConfigError> {
     let mut config = config::load()?;
     if std::env::var_os("CHATTRS_TOKEN").is_none() {
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -133,7 +151,7 @@ async fn run(args: Args, settings: &Settings) -> Result<(), RunError> {
         Command::Skill => cmd_skill(),
         Command::Env(c) => cmd_env(c, settings),
         Command::Exec(c) => cmd_exec(c, settings),
-        Command::Setup(c) => setup::run(c).map_err(RunError::Message),
+        Command::Setup(c) => Ok(setup::run(c)?),
         Command::Backup(c) => backup::run(c),
         Command::Doctor(c) => doctor::run(c).await,
         Command::Log(c) => cmd_log(c, settings).await,

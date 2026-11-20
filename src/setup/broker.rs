@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::cli::{SetupArgs, DEFAULT_PORT};
-use crate::{hook, model, setup::join, store::Store};
+use crate::{hook, model, setup::join, setup::SetupError, store::Store};
 
 const LABEL: &str = "com.chattrs.broker";
 const OBSERVER_ADDR: &str = "tray@*";
@@ -34,14 +34,14 @@ struct Issued {
 
 /// Fill `buf` from the operating system's random source.
 #[cfg(unix)]
-fn fill_random(buf: &mut [u8]) -> Result<(), String> {
-    fs::File::open("/dev/urandom")
-        .and_then(|mut file| file.read_exact(buf))
-        .map_err(|e| format!("read /dev/urandom: {e}"))
+fn fill_random(buf: &mut [u8]) -> Result<(), SetupError> {
+    fs::File::open("/dev/urandom").and_then(|mut file| file.read_exact(buf)).map_err(|source| {
+        SetupError::Fs { verb: "read", path: PathBuf::from("/dev/urandom"), source }
+    })
 }
 
 #[cfg(windows)]
-fn fill_random(buf: &mut [u8]) -> Result<(), String> {
+fn fill_random(buf: &mut [u8]) -> Result<(), SetupError> {
     #[link(name = "bcrypt")]
     extern "system" {
         fn BCryptGenRandom(algorithm: *mut u8, buffer: *mut u8, len: u32, flags: u32) -> i32;
@@ -52,12 +52,12 @@ fn fill_random(buf: &mut [u8]) -> Result<(), String> {
     if status == 0 {
         Ok(())
     } else {
-        Err(format!("BCryptGenRandom failed: {status:#x}"))
+        Err(SetupError::Invalid(format!("BCryptGenRandom failed: {status:#x}")))
     }
 }
 
 /// A token: 32 random bytes as 64 hex characters.
-fn random_token() -> Result<String, String> {
+fn random_token() -> Result<String, SetupError> {
     let mut bytes = [0u8; 32];
     fill_random(&mut bytes)?;
     Ok(bytes.iter().map(|byte| format!("{byte:02x}")).collect())
@@ -65,10 +65,14 @@ fn random_token() -> Result<String, String> {
 
 /// Write `text` to `path`, creating parent directories. With `overwrite`
 /// false, an existing file is an error. `mode` applies to a new file.
-pub fn write_file(path: &Path, text: &str, mode: u32, overwrite: bool) -> Result<(), String> {
-    let fail = |error: std::io::Error| format!("write {}: {error}", path.display());
+pub fn write_file(path: &Path, text: &str, mode: u32, overwrite: bool) -> Result<(), SetupError> {
+    let fail = |source| SetupError::Fs { verb: "write", path: path.to_path_buf(), source };
     if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        fs::create_dir_all(dir).map_err(|source| SetupError::Fs {
+            verb: "create",
+            path: dir.to_path_buf(),
+            source,
+        })?;
     }
     let mut options = fs::OpenOptions::new();
     options.write(true);
@@ -85,12 +89,12 @@ pub fn write_file(path: &Path, text: &str, mode: u32, overwrite: bool) -> Result
 }
 
 /// Set mode 0600 on an existing file (unix).
-pub fn restrict(path: &Path) -> Result<(), String> {
+pub fn restrict(path: &Path) -> Result<(), SetupError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o600))
-            .map_err(|e| format!("chmod {}: {e}", path.display()))?;
+            .map_err(|source| SetupError::Fs { verb: "chmod", path: path.to_path_buf(), source })?;
     }
     let _ = path;
     Ok(())
@@ -103,24 +107,26 @@ fn valid_host(host: &str) -> bool {
 }
 
 /// Check the flags and fill in the defaults.
-fn plan(args: &SetupArgs) -> Result<Plan, String> {
+fn plan(args: &SetupArgs) -> Result<Plan, SetupError> {
+    let invalid = |message: String| SetupError::Invalid(message);
     let hosts = args.hosts.clone();
     for (i, host) in hosts.iter().enumerate() {
         if !valid_host(host) {
-            return Err(format!("`{host}` is not a valid host name"));
+            return Err(invalid(format!("`{host}` is not a valid host name")));
         }
         if hosts[..i].contains(host) {
-            return Err(format!("host `{host}` is listed twice"));
+            return Err(invalid(format!("host `{host}` is listed twice")));
         }
     }
-    let first = hosts.first().ok_or("--hosts needs at least one host")?;
+    let first =
+        hosts.first().ok_or_else(|| invalid("--hosts needs at least one host".to_string()))?;
     let lead = args.lead.clone().unwrap_or_else(|| format!("lead@{first}"));
     if !model::is_valid_address(&lead) {
-        return Err(format!("`{lead}` is not a valid lead address"));
+        return Err(invalid(format!("`{lead}` is not a valid lead address")));
     }
     let projects = args.projects.clone();
     if let Some(bad) = projects.iter().find(|p| !model::is_valid_topic(p)) {
-        return Err(format!("`{bad}` is not a valid project name"));
+        return Err(invalid(format!("`{bad}` is not a valid project name")));
     }
     Ok(Plan { hosts, lead, projects })
 }
@@ -129,8 +135,8 @@ fn plan(args: &SetupArgs) -> Result<Plan, String> {
 /// supplies each new token.
 fn generate(
     plan: &Plan,
-    mut next_token: impl FnMut() -> Result<String, String>,
-) -> Result<(String, Vec<Issued>), String> {
+    mut next_token: impl FnMut() -> Result<String, SetupError>,
+) -> Result<(String, Vec<Issued>), SetupError> {
     let mut text = String::from(
         "# chattrs broker tokens, written by `chattrs setup --broker`. Keep mode 0600.\n",
     );
@@ -175,15 +181,17 @@ fn generate(
 fn resolve_bind(
     bind: Option<&str>,
     tailscale: impl FnOnce() -> Option<String>,
-) -> Result<IpAddr, String> {
+) -> Result<IpAddr, SetupError> {
+    let invalid = |message: &str| SetupError::Invalid(message.to_string());
     let text = match bind {
         Some(text) => text.to_string(),
-        None => tailscale()
-            .ok_or("no Tailscale IPv4 found (`tailscale ip -4`); pass --bind <ip>".to_string())?,
+        None => tailscale().ok_or_else(|| {
+            invalid("no Tailscale IPv4 found (`tailscale ip -4`); pass --bind <ip>")
+        })?,
     };
-    let ip: IpAddr = text.trim().parse().map_err(|_| "--bind must be an IP address".to_string())?;
+    let ip: IpAddr = text.trim().parse().map_err(|_| invalid("--bind must be an IP address"))?;
     if ip.is_unspecified() {
-        return Err("refusing to bind 0.0.0.0 or ::; give one interface IP".to_string());
+        return Err(invalid("refusing to bind 0.0.0.0 or ::; give one interface IP"));
     }
     Ok(ip)
 }
@@ -256,9 +264,11 @@ struct Unit {
     steps: Vec<Vec<String>>,
 }
 
-fn unit(home: &Path, exe: &Path, args: &[String]) -> Result<Unit, String> {
+fn unit(home: &Path, exe: &Path, args: &[String]) -> Result<Unit, SetupError> {
     if cfg!(windows) {
-        return Err("setup --broker writes a systemd or launchd unit; this OS has neither".into());
+        return Err(SetupError::Invalid(
+            "setup --broker writes a systemd or launchd unit; this OS has neither".to_string(),
+        ));
     }
     let words = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
     if cfg!(target_os = "macos") {
@@ -289,25 +299,19 @@ fn unit(home: &Path, exe: &Path, args: &[String]) -> Result<Unit, String> {
 }
 
 /// Run `setup --broker`.
-pub fn run(args: &SetupArgs) -> Result<(), String> {
+pub fn run(args: &SetupArgs) -> Result<(), SetupError> {
     let plan = plan(args)?;
     let ip = resolve_bind(args.bind.as_deref(), tailscale_ipv4)?;
     let listen = SocketAddr::new(ip, args.port.unwrap_or(DEFAULT_PORT));
     let home = hook::install::home()?;
     let tokens_path = home.join(".config/chattrs/tokens.toml");
-    let exe = std::env::current_exe().map_err(|e| format!("find the chattrs binary: {e}"))?;
+    let exe = std::env::current_exe().map_err(SetupError::CurrentExe)?;
     let unit = unit(&home, &exe, &serve_args(listen, &Store::default_path(), &tokens_path))?;
     if tokens_path.exists() {
-        return Err(format!(
-            "{} already exists; setup --broker does not overwrite it",
-            tokens_path.display()
-        ));
+        return Err(SetupError::Exists(tokens_path));
     }
     if unit.path.exists() {
-        return Err(format!(
-            "{} already exists; setup --broker does not overwrite it",
-            unit.path.display()
-        ));
+        return Err(SetupError::Exists(unit.path));
     }
     let (text, issued) = generate(&plan, random_token)?;
     write_file(&tokens_path, &text, 0o600, false)?;
@@ -324,9 +328,9 @@ pub fn run(args: &SetupArgs) -> Result<(), String> {
             let status = Command::new(&step[0])
                 .args(&step[1..])
                 .status()
-                .map_err(|e| format!("run {}: {e}", step[0]))?;
+                .map_err(|source| SetupError::Spawn { program: step[0].clone(), source })?;
             if !status.success() {
-                return Err(format!("`{}` failed: {status}", step.join(" ")));
+                return Err(SetupError::StepFailed { command: step.join(" "), status });
             }
         }
     }
@@ -346,7 +350,7 @@ mod tests {
         }
     }
 
-    fn counter() -> impl FnMut() -> Result<String, String> {
+    fn counter() -> impl FnMut() -> Result<String, SetupError> {
         let mut n = 0;
         move || {
             n += 1;
@@ -411,7 +415,7 @@ mod tests {
             resolve_bind(None, || Some("100.1.2.3".into())).unwrap().to_string(),
             "100.1.2.3"
         );
-        assert!(resolve_bind(None, || None).unwrap_err().contains("--bind"));
+        assert!(resolve_bind(None, || None).unwrap_err().to_string().contains("--bind"));
     }
 
     #[test]
