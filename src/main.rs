@@ -429,7 +429,11 @@ fn cmd_exec_host(c: cli::ExecArgs) -> Result<(), RunError> {
         return Err(RunError::Message(format!("`{host}` is not a host name")));
     }
     // `--lead` also reads CHATTRS_LEAD; only a typed flag goes to the remote.
-    let lead_typed = std::env::args().any(|a| a == "--lead" || a.starts_with("--lead="));
+    // Only flags before the program count: its own args may say `--lead`.
+    let lead_typed = std::env::args()
+        .skip(1)
+        .take_while(|a| a != "--" && *a != c.command[0])
+        .any(|a| a == "--lead" || a.starts_with("--lead="));
     let lead = c.lead.as_deref().filter(|_| lead_typed);
     let name = c.detach.then(|| {
         c.session_name

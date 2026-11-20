@@ -1779,10 +1779,10 @@ fn exec_detach_starts_a_tmux_session_and_prints_hints() {
     assert_eq!(out.status.code(), Some(0), "{out:?}");
     let text = String::from_utf8_lossy(&out.stdout);
     assert!(text.contains("started my-w1 on box"), "{text}");
-    assert!(text.contains("attach: ssh -t box tmux attach -t my-w1"), "{text}");
-    assert!(text.contains("stop: ssh box tmux kill-session -t my-w1"), "{text}");
+    assert!(text.contains("attach: ssh -t box tmux attach -t =my-w1"), "{text}");
+    assert!(text.contains("stop: ssh box tmux kill-session -t =my-w1"), "{text}");
     let log = std::fs::read_to_string(dir.join("tmux.log")).unwrap();
-    assert!(log.contains("has-session -t my-w1"), "{log}");
+    assert!(log.contains("has-session -t =my-w1"), "{log}");
     assert!(
         log.contains(
             "new-session -d -s my-w1 exec chattrs exec --as 'my.w1@box' -- 'claude' 'go now'"
@@ -1800,7 +1800,7 @@ fn exec_detach_refuses_an_existing_session() {
     assert_eq!(out.status.code(), Some(1), "{out:?}");
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("session my-w1 already exists"), "{err}");
-    assert!(err.contains("ssh -t box tmux attach -t my-w1"), "{err}");
+    assert!(err.contains("ssh -t box tmux attach -t =my-w1"), "{err}");
     let log = std::fs::read_to_string(dir.join("tmux.log")).unwrap();
     assert!(!log.contains("new-session") && !log.contains("kill"), "{log}");
 }

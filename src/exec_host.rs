@@ -53,9 +53,9 @@ fn detach_script(host: &str, cwd: Option<&str>, name: &str, exec: &str) -> Strin
     ));
     script.push_str(&format!(
         "tmux has-session -t {} 2>/dev/null && {{ {}; }}; ",
-        sh_quote(name),
+        sh_quote(&format!("={name}")),
         say(format!(
-            "chattrs: tmux session {name} already exists on {host}; attach with: ssh -t {host} tmux attach -t {name}, or pick another --session-name"
+            "chattrs: tmux session {name} already exists on {host}; attach with: ssh -t {host} tmux attach -t ={name}, or pick another --session-name"
         ))
     ));
     script.push_str(&format!("tmux new-session -d -s {} {}", sh_quote(name), sh_quote(exec)));
@@ -94,7 +94,7 @@ pub(crate) fn remote_command(
 /// The lines printed after a detached start succeeds.
 pub(crate) fn detach_hints(host: &str, name: &str) -> String {
     format!(
-        "started {name} on {host}\nattach: ssh -t {host} tmux attach -t {name}\nstop: ssh {host} tmux kill-session -t {name}\n"
+        "started {name} on {host}\nattach: ssh -t {host} tmux attach -t ={name}\nstop: ssh {host} tmux kill-session -t ={name}\n"
     )
 }
 
