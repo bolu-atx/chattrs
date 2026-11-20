@@ -1642,3 +1642,165 @@ fn exec_passes_hyphen_args_and_the_exit_code_to_the_program() {
     assert_eq!(out.status.code(), Some(7));
     assert_eq!(stdout_text(&out).trim(), "--as evil@h");
 }
+
+/// A scratch dir with a fake `ssh` (logs its argv, one word per line, to
+/// `ssh.log`; with `FAKE_SSH_RUN` set it runs the remote string under
+/// `sh -c` with PATH set to `FAKE_REMOTE_PATH`) and a `$SHELL` stand-in
+/// that skips the `-l`. Returns the dir.
+#[cfg(unix)]
+fn fake_ssh_dir(name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = std::env::temp_dir().join(format!("chattrs-fake-ssh-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    let script = |path: std::path::PathBuf, body: &str| {
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    script(
+        dir.join("bin/ssh"),
+        &format!(
+            "#!/bin/sh\nfor a; do printf '%s\\n' \"$a\" >> '{log}'; done\n\
+             [ -n \"$FAKE_SSH_RUN\" ] || exit 0\n\
+             for last; do :; done\n\
+             PATH=\"$FAKE_REMOTE_PATH\" SHELL='{shell}' exec /bin/sh -c \"$last\"\n",
+            log = dir.join("ssh.log").display(),
+            shell = dir.join("fakeshell").display(),
+        ),
+    );
+    script(dir.join("fakeshell"), "#!/bin/sh\nexec /bin/sh -c \"$2\"\n");
+    dir
+}
+
+/// Run `chattrs exec ARGS` with the fake ssh first in PATH.
+#[cfg(unix)]
+fn run_exec_ssh(dir: &std::path::Path, args: &[&str], envs: &[(&str, &str)]) -> Output {
+    let path = format!("{}:/usr/bin:/bin", dir.join("bin").display());
+    let mut all = vec![("PATH", path.as_str())];
+    all.extend_from_slice(envs);
+    run_exec(&std::env::temp_dir(), args, &all)
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_host_runs_ssh_with_one_remote_string_and_no_secrets() {
+    let dir = fake_ssh_dir("plain");
+    let out = run_exec_ssh(
+        &dir,
+        &[
+            "--host",
+            "box",
+            "--cwd",
+            "/srv/r",
+            "--as",
+            "w1@box",
+            "--lead",
+            "lead@mac",
+            "--project",
+            "p",
+            "--tags",
+            "t",
+            "--",
+            "claude",
+            "--resume",
+            "a b",
+        ],
+        &[("CHATTRS_TOKEN", "sekrit"), ("CHATTRS_SERVER", "10.9.9.9:1")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let log = std::fs::read_to_string(dir.join("ssh.log")).unwrap();
+    let argv: Vec<&str> = log.lines().collect();
+    assert_eq!(argv.len(), 3, "{log}");
+    assert_eq!(&argv[..2], ["-t", "box"]);
+    assert_eq!(
+        argv[2],
+        "exec \"$SHELL\" -lc 'cd '\\''/srv/r'\\'' && exec chattrs exec --as '\\''w1@box'\\'' --lead '\\''lead@mac'\\'' -- '\\''claude'\\'' '\\''--resume'\\'' '\\''a b'\\'''"
+    );
+    for secret in ["sekrit", "CHATTRS_", "10.9.9.9", "--project", "--tags", "--server"] {
+        assert!(!log.contains(secret), "{secret} leaked: {log}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_host_flags_need_their_parents() {
+    let dir = fake_ssh_dir("clap");
+    for args in [
+        &["--cwd", "/x", "claude"][..],
+        &["--detach", "claude"],
+        &["--host", "b", "--session-name", "n", "claude"],
+    ] {
+        let out = run_exec_ssh(&dir, args, &[]);
+        assert_eq!(out.status.code(), Some(2), "{args:?}: {out:?}");
+        assert!(String::from_utf8_lossy(&out.stderr).contains("required arguments"), "{out:?}");
+    }
+}
+
+/// Run a detached start whose fake ssh executes the remote string.
+/// `with_tmux`: a fake tmux that logs its args; `exists`: it reports a session.
+#[cfg(unix)]
+fn run_detached(name: &str, with_tmux: bool, exists: bool) -> (Output, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = fake_ssh_dir(name);
+    let remote_bin = dir.join("remote-bin");
+    std::fs::create_dir_all(&remote_bin).unwrap();
+    if with_tmux {
+        let tmux = remote_bin.join("tmux");
+        let body = format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n[ \"$1\" = has-session ] && exit {}\nexit 0\n",
+            dir.join("tmux.log").display(),
+            if exists { 0 } else { 1 },
+        );
+        std::fs::write(&tmux, body).unwrap();
+        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let remote_path = remote_bin.display().to_string();
+    let out = run_exec_ssh(
+        &dir,
+        &["--host", "box", "--cwd", "/", "--detach", "--as", "my.w1@box", "claude", "go now"],
+        &[("FAKE_SSH_RUN", "1"), ("FAKE_REMOTE_PATH", &remote_path)],
+    );
+    (out, dir)
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_detach_without_tmux_exits_1_with_a_hint() {
+    let (out, _) = run_detached("notmux", false, false);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("install tmux, or drop --detach"));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("started"));
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_detach_starts_a_tmux_session_and_prints_hints() {
+    let (out, dir) = run_detached("ok", true, false);
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.contains("started my-w1 on box"), "{text}");
+    assert!(text.contains("attach: ssh -t box tmux attach -t =my-w1"), "{text}");
+    assert!(text.contains("stop: ssh box tmux kill-session -t =my-w1"), "{text}");
+    let log = std::fs::read_to_string(dir.join("tmux.log")).unwrap();
+    assert!(log.contains("has-session -t =my-w1"), "{log}");
+    assert!(
+        log.contains(
+            "new-session -d -s my-w1 exec chattrs exec --as 'my.w1@box' -- 'claude' 'go now'"
+        ),
+        "{log}"
+    );
+    let ssh = std::fs::read_to_string(dir.join("ssh.log")).unwrap();
+    assert_eq!(ssh.lines().next(), Some("box"), "detach uses no -t: {ssh}");
+}
+
+#[cfg(unix)]
+#[test]
+fn exec_detach_refuses_an_existing_session() {
+    let (out, dir) = run_detached("exists", true, true);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("session my-w1 already exists"), "{err}");
+    assert!(err.contains("ssh -t box tmux attach -t =my-w1"), "{err}");
+    let log = std::fs::read_to_string(dir.join("tmux.log")).unwrap();
+    assert!(!log.contains("new-session") && !log.contains("kill"), "{log}");
+}

@@ -39,6 +39,35 @@ refuse` and still starts the agent.
 The broker refuses a second live session for the same address (ID-1). The
 refusal shows when the agent's hooks or `watch` connect.
 
+#### Start an agent on another host
+
+`chattrs exec --host H [--cwd DIR] [--detach] [--session-name NAME] PROGRAM`
+starts the agent on host `H`. It runs the system `ssh`, so `~/.ssh/config`
+aliases work. The remote login shell runs `chattrs exec` there.
+
+```bash
+chattrs exec --host bobox --cwd ~/repo --as w1@bobox --lead lead@mac codex
+chattrs exec --host bobox --cwd ~/repo --detach --as w1@bobox --lead lead@mac codex
+```
+
+- chattrs forwards only `--as`, `--lead`, the program, and its arguments.
+  It never sends the token, the server, the project, the tags, or any
+  `CHATTRS_*` variable. The remote host reads its own config and token.
+- The remote host needs `chattrs` on its login-shell `PATH` and its own
+  config and token (`chattrs setup --join`).
+- Without `--detach`, the worker lives only as long as the ssh connection.
+  If the launching machine sleeps, loses the network, or closes the
+  terminal, the worker stops.
+- With `--detach`, the worker runs in a remote tmux session and chattrs
+  returns. The worker lives until it exits or someone kills the session.
+  chattrs prints the attach command (`ssh -t H tmux attach -t NAME`) and
+  the stop command (`ssh H tmux kill-session -t NAME`). `NAME` defaults to
+  the user part of the address, with unsafe characters turned into `-`.
+- tmux is optional. Only `--detach` needs it. If tmux is missing, chattrs
+  exits 1 and says so. It never installs tmux, never falls back to a run
+  without `--detach`, and never attaches to or kills an existing session.
+- chattrs never watches, kills, or restarts agents.
+
 ### Solo, one machine
 
 Three steps.
@@ -256,7 +285,7 @@ acks them (MSG-5). Announcements never reach an inbox.
 | `agents [--all] [--json]` | List the agents of the project: online or last seen, state, health, tags. Hides agents offline over 7 days with no traffic since. `--all` shows them. |
 | `projects [--json]` | List every project with its agent and message counts. Read-only. |
 | `status working\|idle\|waiting` | Report the own state. Best effort: it never starts a broker, gives up after about 2 s, and always exits 0. |
-| `exec [--as ADDR] [--project P] [--lead ADDR] [--server S] [--tags T] [--] PROGRAM [ARGS...]` | Run PROGRAM with the session env that `env` prints. On Unix it replaces the chattrs process. The default address is `<program>@<host>`. It never adds the token to the environment. |
+| `exec [--as ADDR] [--project P] [--lead ADDR] [--server S] [--tags T] [--host H [--cwd DIR] [--detach [--session-name N]]] [--] PROGRAM [ARGS...]` | Run PROGRAM with the session env that `env` prints. On Unix it replaces the chattrs process. The default address is `<program>@<host>`. It never adds the token to the environment. With `--host` it runs the same command on H over `ssh`, see [Start an agent on another host](#start-an-agent-on-another-host). |
 | `env --as ADDR [--project P] [--lead ADDR] [--server S] [--tags T] [--token T] [--with-token]` | Print `export` lines for one session: `eval "$(chattrs env --as a@h)"`. It makes a new `CHATTRS_SESSION` on every run. It omits the token unless `--with-token`. |
 | `setup` | Install the hooks and the skill for each agent found (Claude Code, Codex). Write a starter `config.toml` only if missing. Safe to run again. `setup --broker --hosts a,b [...]` prepares a broker host; `setup --join STRING\|-` stores join-string tokens. See [Several hosts](#several-hosts-setup---broker-and-setup---join-setup-2). |
 | `doctor [--as ADDR] [--server S]` | Check config, token files, broker, token, protocol, hooks, and skill. One `ok` or `FAIL` line each; exit 1 on any failure. Read-only. See [Check a host](#check-a-host-doctor-setup-3). |

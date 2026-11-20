@@ -34,6 +34,7 @@ Address = `agent@host`.
 - **CLI-14** `agents` marks an address online while it has a live `watch` connection. *(N9, N12)*
 - **CLI-15** When an address already has a live `watch`, a second `watch` on it warns on stderr. *(N9)* — two sessions do not share an inbox by mistake.
 - **CLI-16** `exec [--as ADDR] PROGRAM [ARGS...]` runs the program with the env that `env` prints. It never adds the token to that env. On Unix it replaces the chattrs process. The default address is `<program>@<hostname>`. *(N1, N3)*
+- **CLI-17** `exec --host H [--cwd DIR] [--detach]` runs `chattrs exec` on H over the system `ssh`, in the remote login shell. It forwards only `--as`, `--lead`, the program, and its args, each shell-quoted. It never sends the token or any `CHATTRS_*` variable. With `--detach` it starts a remote tmux session, fails with a hint if tmux is missing or the session exists, and prints the attach and stop commands. chattrs never watches, kills, or restarts the agent. *(N1, N3)*
 
 ## Distribution
 
