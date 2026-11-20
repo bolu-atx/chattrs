@@ -33,6 +33,17 @@ pub const MAX_TAGS: usize = 32;
 /// Largest accepted tag, in bytes.
 pub const MAX_TAG_BYTES: usize = 64;
 
+/// The longest session id in bytes.
+pub const MAX_SESSION_BYTES: usize = 128;
+
+/// True for a session id: non-empty, at most 128 bytes, printable ASCII
+/// with no spaces.
+pub fn is_valid_session(session: &str) -> bool {
+    !session.is_empty()
+        && session.len() <= MAX_SESSION_BYTES
+        && session.bytes().all(|b| b.is_ascii_graphic())
+}
+
 /// The states an agent can report in `hello`.
 pub const STATES: [&str; 3] = ["working", "idle", "waiting"];
 
@@ -189,6 +200,11 @@ pub enum Inbound {
         /// project.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        /// The session id, from `CHATTRS_SESSION`. One session at a time
+        /// may use an address; a second is refused with `address_in_use`.
+        /// Absent for an old client, which is never refused or registered.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session: Option<String>,
     },
     /// Store a message for the `to` address. The broker fills in `from`.
     /// With no `to`, the broker answers `reply_to` to its sender instead.

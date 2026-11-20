@@ -37,6 +37,7 @@ mod tests {
                 observer: false,
                 state: None,
                 project: None,
+                session: None,
             },
             Inbound::Hello {
                 v: 1,
@@ -46,6 +47,7 @@ mod tests {
                 observer: false,
                 state: None,
                 project: None,
+                session: None,
             },
             Inbound::Send {
                 to: Some("opus@mac".into()),
@@ -157,6 +159,7 @@ mod tests {
                 observer: false,
                 state: None,
                 project: None,
+                session: None,
             }
         );
         let line = encode(&Inbound::Hello {
@@ -167,9 +170,11 @@ mod tests {
             observer: false,
             state: None,
             project: None,
+            session: None,
         })
         .unwrap();
         assert!(!line.contains("tags"), "empty tags are omitted: {line}");
+        assert!(!line.contains("session"), "an absent session is omitted: {line}");
     }
 
     #[test]
@@ -182,6 +187,7 @@ mod tests {
             observer: false,
             state: state.map(str::to_string),
             project: None,
+            session: None,
         };
         let line = encode(&hello(None)).unwrap();
         assert!(!line.contains("state"), "no state is omitted: {line}");
@@ -201,6 +207,7 @@ mod tests {
                 observer: false,
                 state: None,
                 project: None,
+                session: None,
             })
             .unwrap(),
             serde_json::to_value(Inbound::Send {
@@ -306,6 +313,7 @@ mod tests {
             observer: false,
             state: None,
             project: None,
+            session: None,
         })
         .unwrap();
         let watch_line = encode(&Inbound::Watch { topics: vec![], all: false }).unwrap();
