@@ -27,6 +27,7 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
         return;
     };
     let input = read_input();
+    let mut trace = Trace::new(event, input.clone());
     let endpoint = Endpoint {
         server: client.server.clone(),
         address: address.to_string(),
@@ -45,7 +46,46 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
         return;
     }
     // A timeout drops the exchange; unacked messages stay unread.
-    let _ = tokio::time::timeout(BUDGET, deliver(event, &endpoint)).await;
+    let _ = tokio::time::timeout(BUDGET, deliver(event, &endpoint, &mut trace)).await;
+    trace.write();
+}
+
+/// One debug record per hook run, written when `CHATTRS_HOOK_DEBUG` names a
+/// file. It shows which runs fired and which ids each fetched and emitted.
+struct Trace {
+    event: HookEvent,
+    input: Value,
+    fetched: Vec<u64>,
+    emitted: Vec<u64>,
+}
+
+impl Trace {
+    fn new(event: HookEvent, input: Value) -> Trace {
+        Trace { event, input, fetched: Vec::new(), emitted: Vec::new() }
+    }
+
+    /// Append one JSON line. Best effort: a failure is ignored.
+    fn write(&self) {
+        use std::io::Write;
+        let Some(path) = std::env::var_os("CHATTRS_HOOK_DEBUG").filter(|path| !path.is_empty())
+        else {
+            return;
+        };
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as u64);
+        let line = json!({
+            "pid": std::process::id(),
+            "ts_ms": ts,
+            "event": format!("{:?}", self.event),
+            "input": self.input,
+            "fetched": self.fetched,
+            "emitted": self.emitted,
+        });
+        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(file, "{line}");
+        }
+    }
 }
 
 /// The hook JSON from stdin. Empty, invalid, or terminal stdin gives null.
@@ -67,10 +107,12 @@ fn hello_state(event: HookEvent) -> Option<&'static str> {
     }
 }
 
-/// Fetch unread messages, print them as hook output, flush, and only then
-/// ack exactly those ids. Any failure ends quietly. A `stop` that blocks
-/// to deliver puts the agent back to working, because the agent goes on.
-async fn deliver(event: HookEvent, endpoint: &Endpoint) {
+/// Fetch unread messages, claim them with one ack, and print only the ids
+/// the ack changed to read. A failed ack prints nothing; a message claimed
+/// but not printed is lost, which is the price of never delivering twice.
+/// Any failure ends quietly. A `stop` that blocks to deliver puts the agent
+/// back to working, because the agent goes on.
+async fn deliver(event: HookEvent, endpoint: &Endpoint, trace: &mut Trace) {
     let opened = match hello_state(event) {
         Some(state) => Client::reconnect_with(endpoint, state).await,
         None => Client::reconnect(endpoint).await,
@@ -81,14 +123,25 @@ async fn deliver(event: HookEvent, endpoint: &Endpoint) {
     let Ok(messages) = client.unread().await else {
         return;
     };
+    let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
+    trace.fetched.clone_from(&ids);
     if messages.is_empty() {
         return;
     }
+    // Claim first: the broker reports only the ids this ack changed to read,
+    // so two hook runs that fetched the same message cannot both emit it.
+    let Ok(claimed) = client.ack(&ids).await else {
+        return;
+    };
+    let messages: Vec<Message> =
+        messages.into_iter().filter(|message| claimed.contains(&message.id)).collect();
+    if messages.is_empty() {
+        return;
+    }
+    trace.emitted = messages.iter().map(|message| message.id).collect();
     if !print_json(&delivery_output(event, &messages)) {
         return;
     }
-    let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
-    let _ = client.ack(&ids).await;
     if event == HookEvent::Stop {
         let _ = Client::reconnect_with(endpoint, "working").await;
     }
