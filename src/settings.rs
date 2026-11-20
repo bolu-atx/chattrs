@@ -42,7 +42,8 @@ pub struct Settings {
     /// `Config::select_token` chose.
     pub token: Option<String>,
     pub token_source: TokenSource,
-    /// `CHATTRS_LEAD`, then the config `lead`. A set variable wins even when blank.
+    /// `CHATTRS_LEAD`, then the config `lead`. A blank variable counts as
+    /// unset, as a blank `CHATTRS_PROJECT` does.
     pub lead: Option<String>,
     project_env: Option<String>,
     project_config: Option<String>,
@@ -64,7 +65,9 @@ impl Settings {
             tags: pick("CHATTRS_TAGS", &files.tags),
             token,
             token_source,
-            lead: pick("CHATTRS_LEAD", &files.lead),
+            lead: env("CHATTRS_LEAD")
+                .filter(|lead| !lead.trim().is_empty())
+                .or_else(|| files.lead.clone()),
             project_env: env("CHATTRS_PROJECT"),
             project_config: files.project.clone(),
         }
@@ -96,13 +99,13 @@ impl Settings {
             Command::Hook(c) => self.apply_client(&mut c.client, server_is_default),
             Command::Env(c) => {
                 self.apply_server(&mut c.server, server_is_default);
-                fill(&mut c.lead, &self.lead);
+                fill_lead(&mut c.lead, &self.lead);
                 fill(&mut c.tags, &self.tags);
                 fill(&mut c.token, &self.token);
             }
             Command::Exec(c) => {
                 self.apply_server(&mut c.server, server_is_default);
-                fill(&mut c.lead, &self.lead);
+                fill_lead(&mut c.lead, &self.lead);
                 fill(&mut c.tags, &self.tags);
             }
             _ => {}
@@ -122,6 +125,15 @@ impl Settings {
 }
 
 /// Set `slot` from `value` only when a flag or variable left it unset.
+/// Like `fill`, but a blank lead (from clap reading a blank `CHATTRS_LEAD`)
+/// counts as unset too.
+fn fill_lead(slot: &mut Option<String>, value: &Option<String>) {
+    if slot.as_deref().is_some_and(|lead| lead.trim().is_empty()) {
+        *slot = None;
+    }
+    fill(slot, value);
+}
+
 fn fill(slot: &mut Option<String>, value: &Option<String>) {
     if slot.is_none() {
         slot.clone_from(value);
@@ -166,7 +178,7 @@ mod tests {
     #[test]
     fn server_tags_and_lead_follow_env_then_file_then_default() {
         let all_file = || files(Some("f:1"), Some("ft"), Some("fl@h"));
-        let table: [Row; 4] = [
+        let table: [Row; 5] = [
             (&[], Config::default(), DEFAULT_SERVER, None, None),
             (&[], all_file(), "f:1", Some("ft"), Some("fl@h")),
             (
@@ -176,14 +188,16 @@ mod tests {
                 Some("et"),
                 Some("el@h"),
             ),
-            // A set variable blocks the file, even when it is empty.
+            // A set variable blocks the file, even when it is empty, except
+            // a blank lead, which counts as unset.
             (
                 &[("CHATTRS_SERVER", ""), ("CHATTRS_TAGS", ""), ("CHATTRS_LEAD", "")],
                 all_file(),
                 "",
                 Some(""),
-                Some(""),
+                Some("fl@h"),
             ),
+            (&[("CHATTRS_LEAD", "  ")], all_file(), "f:1", Some("ft"), Some("fl@h")),
         ];
         for (env, file, server, tags, lead) in table {
             let s = Settings::resolve(&env_of(env), &file);
