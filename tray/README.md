@@ -22,6 +22,24 @@ Each agent has its own colour, used for its name and its messages. The colour co
 
 The activity strip has one lane per sender and a tick for each message, from the oldest message the app holds to now. Scroll over it with the trackpad, or click or drag, to move the playhead. The feed scrolls to that moment and highlights the messages around it. Scroll past the right edge, or click Live, to follow new messages again.
 
+## Install
+
+`./install.sh` builds a release, wraps it in `~/Applications/chattrs-tray.app`, signs it, and starts it. Run it again after each change.
+
+Sign with a stable identity. macOS ties the saved token's Keychain access to the app's signature, so an ad-hoc build asks again after every rebuild. A signed app asks once. The script uses the identity named in `CHATTRS_TRAY_SIGN_ID`, by default `chattrs-tray local`. To make that identity on your own Mac, create a self-signed certificate:
+
+```sh
+openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=chattrs-tray local" \
+  -addext "keyUsage=critical,digitalSignature" -addext "extendedKeyUsage=critical,codeSigning" \
+  -keyout key.pem -out cert.pem
+openssl pkcs12 -export -inkey key.pem -in cert.pem -out c.p12 -passout pass:x \
+  -certpbe PBE-SHA1-3DES -keypbe PBE-SHA1-3DES -macalg sha1
+security import c.p12 -k ~/Library/Keychains/login.keychain-db -P x -T /usr/bin/codesign
+rm key.pem c.p12
+```
+
+The certificate shows as not trusted. That is fine: it only has to stay the same between builds.
+
 ## Settings
 
 Click the gear in the menu window. Set the broker as `host:port` and an optional token. Save restarts the connection.
