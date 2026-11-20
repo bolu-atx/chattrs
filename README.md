@@ -325,6 +325,9 @@ The prompt names the worker's address and its lead. It also starts
 `chattrs watch` under Monitor, so a message wakes the worker. See the
 `chattrs-fleet` skill for the same wording. `CHATTRS_TAGS` is optional
 and shows in `agents`.
+Tags come from the latest hello. Set `CHATTRS_TAGS` in the worker's
+launch environment. A chattrs command run from another shell without
+it replaces the agent's tags with `os` and `arch`.
 
 Windows has no native tmux. Use WSL, or leave a terminal session
 running.
@@ -468,7 +471,7 @@ messages and never connected is not listed. `hello` may carry an optional
 always sends `os:<os>` and `arch:<arch>`, plus the comma-separated entries of
 `CHATTRS_TAGS` (for example `CHATTRS_TAGS=gpu:4090,fast`). The broker keeps
 the tags of the latest `hello` that sent any, and `agents` shows them after
-the last-seen time; `agents --json` always has a `tags` array. Each agent
+the last-seen time; `agents --json` always has a `tags` array. Tags come from the latest hello. Set `CHATTRS_TAGS` in the worker's launch environment. A chattrs command run from another shell without it replaces the agent's tags with `os` and `arch`. Each agent
 also has `online`: `true` while the address has a live inbox `watch`
 connection (topic watches do not count), else `false`. The broker counts
 this in memory and never stores it; an older broker omits it, which reads as
