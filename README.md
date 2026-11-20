@@ -68,6 +68,19 @@ chattrs exec --host bobox --cwd ~/repo --detach --as w1@bobox --lead lead@mac co
   without `--detach`, and never attaches to or kills an existing session.
 - chattrs never watches, kills, or restarts agents.
 
+#### Or let your agent do it
+
+Paste this to your agent:
+
+> chattrs is installed. Run `chattrs setup-guide` and do every step it marks for you; list the steps it marks for me.
+
+`chattrs setup-guide` is read-only and always exits 0. It guesses the role
+(solo, broker, or host) and says how, and `--role` overrides the guess. For a
+swarm it asks which hosts join and which host runs the broker, and you pass
+the answers back as `--hosts` and `--broker-host`. It prints ssh commands and
+never runs them. It never sends a `hello` and never prints a token or a join
+string. Use `--json` for a stable machine-readable form.
+
 ### Solo, one machine
 
 Three steps.
@@ -237,6 +250,14 @@ brew install bolu-atx/tap/chattrs      # macOS arm64
 cargo install --git https://github.com/bolu-atx/chattrs   # from source
 ```
 
+To install a pinned release on a host without a package manager (never needs
+sudo), use the release installers, here for `vX.Y.Z`:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/bolu-atx/chattrs/releases/download/vX.Y.Z/chattrs-installer.sh | sh
+powershell -ExecutionPolicy ByPass -c "irm https://github.com/bolu-atx/chattrs/releases/download/vX.Y.Z/chattrs-installer.ps1 | iex"
+```
+
 Prebuilt binaries and installers are on the
 [Releases page](https://github.com/bolu-atx/chattrs/releases).
 `chattrs --version` names the release. Every channel installs the same
@@ -304,6 +325,7 @@ acks them (MSG-5). Announcements never reach an inbox.
 | `exec [--as ADDR] [--project P] [--lead ADDR] [--server S] [--tags T] [--host H [--cwd DIR] [--detach [--session-name N]]] [--] PROGRAM [ARGS...]` | Run PROGRAM with the session env that `env` prints. On Unix it replaces the chattrs process. The default address is `<program>@<host>`. It never adds the token to the environment. With `--host` it runs the same command on H over `ssh`, see [Start an agent on another host](#start-an-agent-on-another-host). |
 | `env --as ADDR [--project P] [--lead ADDR] [--server S] [--tags T] [--token T] [--with-token]` | Print `export` lines for one session: `eval "$(chattrs env --as a@h)"`. It makes a new `CHATTRS_SESSION` on every run. It omits the token unless `--with-token`. |
 | `setup` | Install the hooks and the skill for each agent found (Claude Code, Codex). Write a starter `config.toml` only if missing. Safe to run again. `setup --broker --hosts a,b [...]` prepares a broker host; `setup --join STRING\|-` stores join-string tokens. See [Several hosts](#several-hosts-setup---broker-and-setup---join-setup-2). |
+| `setup-guide [--role solo\|broker\|host] [--hosts H,..] [--broker-host H] [--json]` | Print the ordered setup steps for an agent (id, status, who, command, why). Read-only, always exit 0, never sends a `hello`, never prints a secret. |
 | `doctor [--as ADDR] [--server S]` | Check config, token files, broker, token, protocol, hooks, and skill. One `ok` or `FAIL` line each; exit 1 on any failure. Read-only. See [Check a host](#check-a-host-doctor-setup-3). |
 | `hooks install\|remove [--agent claude\|codex\|all] [--project]` | Edit the hook entries in the agent configs. See [Hooks](#hooks-claude-code-and-codex). |
 | `hook EVENT` | Run as a hook. Reads hook JSON on stdin. Not for direct use. |

@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use crate::cli::{HooksAction, HooksAgent, HooksTarget, SetupArgs};
 use crate::{hook, skill};
 
-mod broker;
+pub(crate) mod broker;
 mod join;
 
 /// Why `setup` stopped. `Display` gives the text printed after `chattrs: `.
@@ -216,6 +216,7 @@ fn run_host() -> Result<(), SetupError> {
     if !found.is_empty() {
         eprintln!("chattrs: start an agent on the swarm with: chattrs exec claude");
     }
+    eprintln!("next: chattrs setup-guide");
     Ok(())
 }
 

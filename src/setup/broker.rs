@@ -345,6 +345,16 @@ fn make_private_dir(dir: &Path) -> Result<(), SetupError> {
     })
 }
 
+/// The files `setup --broker` writes on this host: the tokens file, then
+/// the service unit of each OS.
+pub(crate) fn written_files(home: &Path) -> [PathBuf; 3] {
+    [
+        home.join(".config/chattrs/tokens.toml"),
+        home.join(".config/systemd/user/chattrs.service"),
+        home.join(format!("Library/LaunchAgents/{LABEL}.plist")),
+    ]
+}
+
 /// Run `setup --broker`.
 pub fn run(args: &SetupArgs) -> Result<(), SetupError> {
     run_with(args, std::io::stdout().is_terminal())

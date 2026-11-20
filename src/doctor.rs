@@ -35,41 +35,87 @@ enum Probe {
     Rejected { code: String, message: String },
 }
 
-/// The lines printed so far, as pass or fail.
+/// One finished check: its name, pass or fail, and the detail line.
+pub(crate) struct Check {
+    pub(crate) pass: bool,
+    pub(crate) name: &'static str,
+    pub(crate) detail: String,
+}
+
+/// One line of the report: a check, or a note that is not a check.
+enum Line {
+    Check(Check),
+    Note(String),
+}
+
+/// The checks collected so far, in print order. Doctor prints them; the
+/// setup guide reads them.
 #[derive(Default)]
-struct Report {
-    failed: bool,
+pub(crate) struct Report {
+    lines: Vec<Line>,
 }
 
 impl Report {
-    fn pass(&mut self, check: &str, detail: impl Display) {
-        self.line("ok  ", check, detail);
+    fn pass(&mut self, name: &'static str, detail: impl Display) {
+        self.lines.push(Line::Check(Check { pass: true, name, detail: detail.to_string() }));
     }
 
-    fn fail(&mut self, check: &str, detail: impl Display) {
-        self.failed = true;
-        self.line("FAIL", check, detail);
+    fn fail(&mut self, name: &'static str, detail: impl Display) {
+        self.lines.push(Line::Check(Check { pass: false, name, detail: detail.to_string() }));
     }
 
-    fn line(&mut self, status: &str, check: &str, detail: impl Display) {
-        // A closed stdout is not a check failure, so the write error is dropped.
-        let _ = crate::output::write_stdout(&format!("{status} {check}: {detail}\n"));
+    fn note(&mut self, text: &str) {
+        self.lines.push(Line::Note(text.to_string()));
     }
+
+    pub(crate) fn checks(&self) -> impl Iterator<Item = &Check> {
+        self.lines.iter().filter_map(|line| match line {
+            Line::Check(check) => Some(check),
+            Line::Note(_) => None,
+        })
+    }
+
+    fn failed(&self) -> bool {
+        self.checks().any(|check| !check.pass)
+    }
+
+    fn print(&self) {
+        for line in &self.lines {
+            let text = match line {
+                Line::Check(check) => {
+                    let status = if check.pass { "ok  " } else { "FAIL" };
+                    format!("{status} {}: {}\n", check.name, check.detail)
+                }
+                Line::Note(text) => format!("{text}\n"),
+            };
+            // A closed stdout is not a check failure, so the write error is dropped.
+            let _ = crate::output::write_stdout(&text);
+        }
+    }
+}
+
+/// Run every check. With no address in `args`, no `hello` is sent: the
+/// broker check is a TCP connect only. Nothing is printed.
+pub(crate) async fn collect(args: &DoctorArgs) -> Report {
+    let mut report = Report::default();
+    match hook::install::home() {
+        Ok(home) => {
+            check_host(&mut report, args, &home).await;
+            check_agents(&mut report, &home);
+        }
+        Err(error) => report.fail("config", format!("{error}; set HOME")),
+    }
+    report
 }
 
 /// Run `chattrs doctor`. Every failure is printed; the error carries only
 /// the exit code.
 pub async fn run(args: DoctorArgs) -> Result<(), RunError> {
-    let mut report = Report::default();
-    match hook::install::home() {
-        Ok(home) => {
-            check_host(&mut report, &args, &home).await;
-            check_agents(&mut report, &home);
-        }
-        Err(error) => report.fail("config", format!("{error}; set HOME")),
-    }
+    let report = collect(&args).await;
+    report.print();
     let _ = crate::output::write_stdout(&format!("{CODEX_NOTE}\n"));
-    if report.failed {
+    eprintln!("next: chattrs setup-guide");
+    if report.failed() {
         return Err(RunError::Reported);
     }
     Ok(())
@@ -300,7 +346,7 @@ async fn check_probes(
             .pass("token", format!("{pattern}: not probed (only the current address is checked)"));
     }
     if session.is_none() {
-        let _ = crate::output::write_stdout("note: CHATTRS_SESSION not set: use chattrs env\n");
+        report.note("note: CHATTRS_SESSION not set: use chattrs env");
     }
 }
 

@@ -5,6 +5,8 @@ description: Talk to other agents through the chattrs broker: send progress, ask
 
 # chattrs: talk to other agents
 
+To set up or repair chattrs, run `chattrs setup-guide` and follow it.
+
 Your address is in `CHATTRS_ADDRESS`. `chattrs exec claude` sets it when it starts you. `chattrs agents` lists who exists.
 
 Report progress or completion (does not wait):

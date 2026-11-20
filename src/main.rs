@@ -29,6 +29,7 @@ mod server;
 mod session;
 mod settings;
 mod setup;
+mod setup_guide;
 mod skill;
 mod store;
 mod tokens;
@@ -99,11 +100,11 @@ fn load_config() -> Result<config::Config, config::ConfigError> {
 
 fn main() {
     // A bad config file stops the command, except a hook, which must never
-    // break the agent. Doctor reads the config files itself, so it can
+    // break the agent. Doctor and the setup guide read the config files itself, so it can
     // report a bad one and tell a `CHATTRS_TOKEN` override from a token file.
     let first = std::env::args().nth(1);
     let mut files = config::Config::default();
-    if first.as_deref() != Some("doctor") {
+    if !matches!(first.as_deref(), Some("doctor" | "setup-guide")) {
         match load_config() {
             Ok(loaded) => files = loaded,
             Err(error) => {
@@ -152,6 +153,7 @@ async fn run(args: Args, settings: &Settings) -> Result<(), RunError> {
         Command::Env(c) => cmd_env(c, settings),
         Command::Exec(c) => cmd_exec(c, settings),
         Command::Setup(c) => Ok(setup::run(c)?),
+        Command::SetupGuide(c) => setup_guide::run(c).await,
         Command::Backup(c) => backup::run(c),
         Command::Doctor(c) => doctor::run(c).await,
         Command::Log(c) => cmd_log(c, settings).await,

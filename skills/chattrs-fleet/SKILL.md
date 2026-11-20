@@ -5,6 +5,8 @@ description: Run a chattrs fleet across hosts: install, broker, client env, veri
 
 # chattrs: run a fleet
 
+To set up or repair chattrs, run `chattrs setup-guide` and follow it.
+
 One broker on an always-on host, reachable over Tailscale. Clients
 connect with the fleet token.
 

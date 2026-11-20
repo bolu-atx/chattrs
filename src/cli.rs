@@ -57,6 +57,8 @@ pub enum Command {
     Backup(BackupArgs),
     /// Set up this host (hooks, skill, config), a broker host (`--broker`), or join a broker (`--join`).
     Setup(SetupArgs),
+    /// Print the ordered steps to set up or repair chattrs, for an agent to follow. Read-only.
+    SetupGuide(SetupGuideArgs),
 }
 
 /// The agent events a hook serves, in the kebab-case form of the Claude
@@ -558,6 +560,42 @@ pub struct SetupArgs {
     /// Replace an existing token file and config entry for the same pattern.
     #[arg(long, requires = "join")]
     pub force: bool,
+}
+
+/// What this machine is in the setup: alone, the broker host, or a swarm host.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GuideRole {
+    Solo,
+    Broker,
+    Host,
+}
+
+/// An ssh host name that is safe to put in a shell command.
+fn guide_host(text: &str) -> Result<String, String> {
+    let plain = |c: char| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-');
+    if text.is_empty() || text.len() > 100 || !text.chars().all(plain) {
+        return Err(format!("`{text}` is not a plain ssh host name (letters, digits, . _ -)"));
+    }
+    Ok(text.to_string())
+}
+
+#[derive(clap::Args, Debug, Default)]
+pub struct SetupGuideArgs {
+    /// Skip the guess: `solo`, `broker` (this machine runs the broker), or `host`.
+    #[arg(long, value_enum)]
+    pub role: Option<GuideRole>,
+
+    /// Hosts that join the swarm (ssh names), comma-separated.
+    #[arg(long, value_delimiter = ',', value_parser = guide_host)]
+    pub hosts: Vec<String>,
+
+    /// The always-on host that runs the broker (an ssh name).
+    #[arg(long, value_parser = guide_host)]
+    pub broker_host: Option<String>,
+
+    /// Print one stable JSON document instead of text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(clap::Args, Debug)]
