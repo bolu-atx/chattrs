@@ -33,10 +33,12 @@ CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to
 
 | File | Owns |
 | ---- | ---- |
-| `src/main.rs` | Thin entry: parse `cli`, dispatch to one small function per command, map the result to an exit code |
+| `src/main.rs` | Thin entry: load config, parse `cli`, start the runtime, dispatch, map `RunError` to an exit code |
+| `src/commands.rs` | The command bodies for `serve`, `stop`, `send`, `reply`, `ask`, `inbox`, `watch`, `log`, `agents`, `projects`, `status`, `skill`, plus the shared `write`, `endpoint`, and `deliver_unread` helpers |
+| `src/session.rs` | `chattrs env`: the `Session` settings and `session_pairs` that `env` and `exec` share |
 | `src/cli.rs` | Clap `Args` + subcommand structs, connection flags |
 | `src/model.rs` | Wire types (`Inbound`, `Outbound`), limits, address validation, serde shapes |
-| `src/exec.rs` | `exec` module root (the command itself still lives in `main.rs`) |
+| `src/exec.rs` | `chattrs exec`: run a program with the session variables, or on a remote host with `--host` |
 | `src/exec/host.rs` | `exec --host`: `sh_quote` and the pure builder of the ssh argv (plain and `--detach` tmux script) |
 | `src/output.rs` | Every line the CLI writes to stdout: text rendering, JSON lines, timestamps, the stdout writer |
 | `src/protocol.rs` | Line-JSON framing: `encode`/`decode` |

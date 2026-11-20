@@ -214,7 +214,10 @@ fn exec_address_hint(args: &[String]) -> Option<String> {
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
-            "--" => return address.or_else(|| rest.next().map(|p| crate::exec_default_address(p))),
+            "--" => {
+                return address
+                    .or_else(|| rest.next().map(|p| crate::exec::exec_default_address(p)))
+            }
             "--as" => address = rest.next().cloned(),
             "--project" | "--lead" | "--server" | "--tags" | "--host" | "--cwd"
             | "--session-name" => {
@@ -224,7 +227,7 @@ fn exec_address_hint(args: &[String]) -> Option<String> {
                 address = arg.strip_prefix("--as=").map(str::to_string)
             }
             _ if arg.starts_with('-') => {}
-            program => return address.or_else(|| Some(crate::exec_default_address(program))),
+            program => return address.or_else(|| Some(crate::exec::exec_default_address(program))),
         }
     }
     address
