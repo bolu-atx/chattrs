@@ -1,5 +1,5 @@
-//! chattrs — the token table (SEC-4): one entry per token, each naming a
-//! project, an address pattern, and a role.
+//! chattrs — the token table (SEC-4): one entry per token, each naming an
+//! address pattern and a role, and optionally a project.
 //!
 //! The broker reads the table from a TOML file at start. The parser accepts
 //! a small subset of TOML (see `Tokens::parse`), so the crate needs no TOML
@@ -42,7 +42,8 @@ impl Role {
 #[derive(Debug)]
 pub struct Entry {
     token: String,
-    project: String,
+    /// `None` means the token works in every project.
+    project: Option<String>,
     addr: String,
     pub role: Role,
 }
@@ -52,7 +53,7 @@ pub struct Entry {
 pub enum Miss {
     /// No entry has this token.
     BadToken,
-    /// Some entry has this token, but none for the hello project.
+    /// Some entry has this token, but every one names other projects.
     WrongProject,
 }
 
@@ -126,18 +127,23 @@ impl Draft {
             value.ok_or_else(|| format!("line {line}: entry has no `{name}`"))
         };
         let token = field(self.token, "token")?;
-        let project = field(self.project, "project")?;
         let addr = field(self.addr, "addr")?;
         let role_text = field(self.role, "role")?;
         let role = Role::parse(&role_text)
             .ok_or_else(|| format!("line {line}: role must be lead, agent, or observer"))?;
-        if project == model::ALL_PROJECTS {
-            if role != Role::Observer {
-                return Err(format!("line {line}: project `*` is only for the observer role"));
+        // `*` is the old spelling of "no project", for observers only.
+        let project = match self.project {
+            Some(project) if project == model::ALL_PROJECTS => {
+                if role != Role::Observer {
+                    return Err(format!("line {line}: project `*` is only for the observer role"));
+                }
+                None
             }
-        } else if !model::is_valid_topic(&project) {
-            return Err(format!("line {line}: project is not a valid project name"));
-        }
+            Some(project) if !model::is_valid_topic(&project) => {
+                return Err(format!("line {line}: project is not a valid project name"));
+            }
+            other => other,
+        };
         if !is_valid_pattern(&addr) {
             return Err(format!("line {line}: addr is not an address or a `*` pattern"));
         }
@@ -240,19 +246,28 @@ impl Tokens {
         Ok(Tokens { entries })
     }
 
-    /// The same token may appear in several projects (one lead token for
-    /// several projects). One token twice in one project is ambiguous.
+    /// The same token may appear again only when every copy names a
+    /// distinct project (one lead token for several projects). A copy with
+    /// no project overlaps every other copy.
     fn check_unique(entries: &[Entry]) -> Result<(), String> {
         for (i, entry) in entries.iter().enumerate() {
-            if entries[..i]
-                .iter()
-                .any(|other| other.token == entry.token && other.project == entry.project)
-            {
-                return Err(format!(
-                    "entry {} repeats a token for project {}",
-                    i + 1,
-                    entry.project
-                ));
+            let clash = entries[..i].iter().any(|other| {
+                other.token == entry.token
+                    && (other.project.is_none()
+                        || entry.project.is_none()
+                        || other.project == entry.project)
+            });
+            if clash {
+                return Err(match &entry.project {
+                    Some(project) => format!(
+                        "entry {} repeats a token that already covers project {project}",
+                        i + 1
+                    ),
+                    None => format!(
+                        "entry {} repeats a token; a token with no project must appear once",
+                        i + 1
+                    ),
+                });
             }
         }
         Ok(())
@@ -260,7 +275,7 @@ impl Tokens {
 
     /// The entry for a presented token and the hello project. The compare
     /// runs against every entry, in constant time each, and never stops at
-    /// a match. An entry for the project wins over one for `*`.
+    /// a match. An entry for the project wins over one with no project.
     pub fn find(&self, presented: Option<&str>, project: &str) -> Result<&Entry, Miss> {
         let got = presented.unwrap_or_default().as_bytes();
         let (mut exact, mut any, mut token_known) = (None, None, false);
@@ -269,10 +284,10 @@ impl Tokens {
                 continue;
             }
             token_known = true;
-            if entry.project == project {
-                exact = Some(entry);
-            } else if entry.project == model::ALL_PROJECTS {
-                any = Some(entry);
+            match entry.project.as_deref() {
+                Some(own) if own == project => exact = Some(entry),
+                Some(_) => {}
+                None => any = Some(entry),
             }
         }
         match (exact.or(any), token_known) {
@@ -291,7 +306,7 @@ impl Tokens {
         address: &str,
         observer: bool,
     ) -> Result<(), &'static str> {
-        if entry.project != model::ALL_PROJECTS && entry.project != project {
+        if entry.project.as_deref().is_some_and(|own| own != project) {
             return Err("token is not valid for this project");
         }
         if !glob_matches(&entry.addr, address) {
@@ -302,17 +317,17 @@ impl Tokens {
             (Role::Agent, true) => return Err("an agent token cannot open an observer hello"),
             _ => {}
         }
-        if !observer && entry.role != Role::Lead && self.is_lead_address(project, address) {
+        if !observer && entry.role != Role::Lead && self.is_lead_address(address) {
             return Err("that address belongs to a lead token");
         }
         Ok(())
     }
 
-    /// True when some lead entry of `project` names `address` exactly.
-    fn is_lead_address(&self, project: &str, address: &str) -> bool {
-        self.entries.iter().any(|entry| {
-            entry.role == Role::Lead && entry.project == project && entry.addr == address
-        })
+    /// True when some lead entry names `address` exactly. The project of
+    /// the lead entry does not matter: a lead address is reserved across
+    /// the whole broker.
+    fn is_lead_address(&self, address: &str) -> bool {
+        self.entries.iter().any(|entry| entry.role == Role::Lead && entry.addr == address)
     }
 }
 
@@ -359,7 +374,7 @@ role = "observer"
             ("[[token]]\ncolor = \"red\"\n", "line 2: unknown key"),
             ("[[token]]\ntoken = \"a\"\ntoken = \"b\"\n", "line 3: duplicate key"),
             ("[[token]]\ntoken = \"\"\n", "line 2: token is empty"),
-            ("[[token]]\ntoken = \"a\"\n", "line 1: entry has no `project`"),
+            ("[[token]]\ntoken = \"a\"\n", "line 1: entry has no `addr`"),
             (
                 "[[token]]\ntoken=\"a\"\nproject=\"p\"\naddr=\"a@h\"\nrole=\"boss\"\n",
                 "line 1: role must be",
@@ -385,7 +400,7 @@ role = "observer"
         }
         let dup = "[[token]]\ntoken=\"a\"\nproject=\"p\"\naddr=\"a@h\"\nrole=\"agent\"\n";
         let err = Tokens::parse(&format!("{dup}{dup}")).unwrap_err();
-        assert!(err.contains("repeats a token for project p"), "{err}");
+        assert!(err.contains("repeats a token that already covers project p"), "{err}");
     }
 
     #[test]
@@ -402,15 +417,18 @@ role = "observer"
             block("t-a", "alpha", "*@h", "agent"),
         );
         let tokens = Tokens::parse(&text).unwrap();
-        assert_eq!(tokens.find(Some("t-l"), "alpha").unwrap().project, "alpha");
-        assert_eq!(tokens.find(Some("t-l"), "beta").unwrap().project, "beta");
+        assert_eq!(tokens.find(Some("t-l"), "alpha").unwrap().project.as_deref(), Some("alpha"));
+        assert_eq!(tokens.find(Some("t-l"), "beta").unwrap().project.as_deref(), Some("beta"));
         assert_eq!(tokens.find(Some("t-l"), "gamma").unwrap_err(), Miss::WrongProject);
         assert_eq!(tokens.find(Some("nope"), "alpha").unwrap_err(), Miss::BadToken);
         for other in
             [block("t-l", "beta", "other@h", "lead"), block("t-l", "beta", "lead@h", "agent")]
         {
             let err = Tokens::parse(&format!("{text}{other}")).unwrap_err();
-            assert!(err.contains("entry 4 repeats a token for project beta"), "{err}");
+            assert!(
+                err.contains("entry 4 repeats a token that already covers project beta"),
+                "{err}"
+            );
         }
         // The same token may have a different role in another project.
         let mixed = format!(
@@ -419,6 +437,92 @@ role = "observer"
             block("t-m", "beta", "*@h", "agent")
         );
         assert!(Tokens::parse(&mixed).is_ok());
+    }
+
+    fn block(token: &str, project: Option<&str>, addr: &str, role: &str) -> String {
+        let project = project.map(|p| format!("project=\"{p}\"\n")).unwrap_or_default();
+        format!("[[token]]\ntoken=\"{token}\"\n{project}addr=\"{addr}\"\nrole=\"{role}\"\n")
+    }
+
+    #[test]
+    fn an_unscoped_token_works_in_every_project() {
+        let tokens = Tokens::parse(&block("t-a", None, "*@h", "agent")).unwrap();
+        for project in ["alpha", "beta"] {
+            let entry = tokens.find(Some("t-a"), project).unwrap();
+            assert!(tokens.authorize(entry, project, "w1@h", false).is_ok());
+        }
+    }
+
+    #[test]
+    fn a_scoped_token_is_refused_outside_its_project() {
+        let tokens = Tokens::parse(&block("t-a", Some("alpha"), "*@h", "agent")).unwrap();
+        assert!(tokens.find(Some("t-a"), "alpha").is_ok());
+        assert_eq!(tokens.find(Some("t-a"), "beta").unwrap_err(), Miss::WrongProject);
+    }
+
+    #[test]
+    fn an_old_multi_project_file_still_loads() {
+        let text = format!(
+            "{}{}{}\n[[token]]\ntoken=\"t-obs\"\nproject=\"*\"\naddr=\"tray@*\"\nrole=\"observer\"\n",
+            block("t-l", Some("alpha"), "lead@h", "lead"),
+            block("t-l", Some("beta"), "lead@h", "lead"),
+            block("t-a", Some("alpha"), "*@h", "agent"),
+        );
+        let tokens = Tokens::parse(&text).unwrap();
+        let lead = tokens.find(Some("t-l"), "beta").unwrap();
+        assert!(tokens.authorize(lead, "beta", "lead@h", false).is_ok());
+        assert_eq!(tokens.find(Some("t-l"), "gamma").unwrap_err(), Miss::WrongProject);
+        let obs = tokens.find(Some("t-obs"), "gamma").unwrap();
+        assert!(tokens.authorize(obs, "gamma", "tray@x", true).is_ok());
+    }
+
+    #[test]
+    fn duplicate_tokens_need_distinct_projects() {
+        let un = block("t", None, "*@h", "agent");
+        let sc = block("t", Some("alpha"), "*@h", "agent");
+        let err = Tokens::parse(&format!("{un}{un}")).unwrap_err();
+        assert!(err.contains("entry 2 repeats a token"), "{err}");
+        assert!(Tokens::parse(&format!("{un}{sc}")).is_err());
+        assert!(Tokens::parse(&format!("{sc}{un}")).is_err());
+        assert!(Tokens::parse(&format!("{sc}{sc}")).is_err());
+    }
+
+    #[test]
+    fn an_unscoped_lead_address_is_protected_in_every_project() {
+        let text = format!(
+            "{}{}",
+            block("t-l", None, "lead@h", "lead"),
+            block("t-a", None, "*@h", "agent")
+        );
+        let tokens = Tokens::parse(&text).unwrap();
+        let lead = tokens.find(Some("t-l"), "beta").unwrap();
+        let agent = tokens.find(Some("t-a"), "beta").unwrap();
+        for project in ["alpha", "beta"] {
+            assert!(tokens.authorize(lead, project, "lead@h", false).is_ok());
+            assert!(tokens.authorize(agent, project, "lead@h", false).is_err());
+            assert!(tokens.authorize(agent, project, "w1@h", false).is_ok());
+        }
+        assert!(tokens.authorize(agent, "beta", "w1@h", true).is_err());
+        assert!(tokens.authorize(lead, "beta", "other@h", false).is_err());
+    }
+
+    #[test]
+    fn a_lead_address_is_reserved_across_the_broker() {
+        let text = format!(
+            "{}{}",
+            block("t-l", Some("alpha"), "lead@mac", "lead"),
+            block("t-a", None, "*@mac", "agent")
+        );
+        let tokens = Tokens::parse(&text).unwrap();
+        let agent = tokens.find(Some("t-a"), "beta").unwrap();
+        assert!(tokens.authorize(agent, "alpha", "lead@mac", false).is_err());
+        assert!(tokens.authorize(agent, "beta", "lead@mac", false).is_err());
+        assert!(tokens.authorize(agent, "beta", "w1@mac", false).is_ok());
+        // The scoped lead cannot claim it outside its own project either.
+        let lead = tokens.find(Some("t-l"), "alpha").unwrap();
+        assert!(tokens.authorize(lead, "alpha", "lead@mac", false).is_ok());
+        assert!(tokens.authorize(lead, "beta", "lead@mac", false).is_err());
+        assert_eq!(tokens.find(Some("t-l"), "beta").unwrap_err(), Miss::WrongProject);
     }
 
     #[test]

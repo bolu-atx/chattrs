@@ -368,7 +368,7 @@ fn report_token(
                 format!("{who}: {message}; check that the token file matches the broker, or run chattrs setup --join"),
             )
         }
-        Ok(Probe::Rejected { code, message }) if code == "forbidden" => {
+        Ok(Probe::Rejected { code, message }) if code == "forbidden" && message.contains("not valid for this project") => {
             return report.fail(
                 "token",
                 format!(

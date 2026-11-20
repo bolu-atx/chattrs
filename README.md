@@ -126,8 +126,10 @@ It writes `~/.config/chattrs/tokens.toml` (mode 0600) and a systemd user unit
 (`~/Library/LaunchAgents/com.chattrs.broker.plist`). It never overwrites
 either file. It prints the command that starts the service; `--enable` runs
 it. It issues one agent token per host (`*@<host>`), one lead token, and one
-observer token (`tray@*`, all projects). Then it prints one join string for
-each, `chattrs://<token>@<ip>:<port>?as=<pattern>`. The pattern is
+observer token (`tray@*`). The tokens have no `project` line, so they work in
+every project. With `--projects`, it writes one entry per project instead,
+and each token stays inside those projects (the observer still sees all).
+Then it prints one join string for each, `chattrs://<token>@<ip>:<port>?as=<pattern>`. The pattern is
 percent-encoded.
 
 `setup --join` also takes a string as an argument. Quote it, but it then
@@ -506,43 +508,50 @@ Run this once on a new swarm.
 
 ### Token table
 
-Meets SEC-4. A token table gives each token a project, an address pattern,
-and a role. Start the broker with `serve --tokens <path>` or
+Meets SEC-4. A token table gives each token an address pattern and a role.
+A token works in every project. An optional `project` line limits it to one
+project. Start the broker with `serve --tokens <path>` or
 `CHATTRS_TOKENS`. The file is TOML. The broker refuses to start when its
 mode is wider than 0600 (unix). Make each token with `openssl rand -hex 32`.
 
 ```toml
-# The lead of project alpha. Only a lead token can claim this address.
+# The lead. Only a lead token can claim this address, in any project.
 [[token]]
 token = "<64 hex characters>"
-project = "alpha"
 addr = "lead@box1"
 role = "lead"
 
-# Any worker on box1, in alpha only.
+# Any worker on box1, in every project.
+[[token]]
+token = "<64 hex characters>"
+addr = "*@box1"
+role = "agent"
+
+# A worker on box2, walled into project alpha.
 [[token]]
 token = "<64 hex characters>"
 project = "alpha"
-addr = "*@box1"
+addr = "*@box2"
 role = "agent"
 
 # A read-only viewer that sees every project.
 [[token]]
 token = "<64 hex characters>"
-project = "*"
 addr = "tray@mac"
 role = "observer"
 ```
 
 The parser reads a small subset of TOML: blank lines, `#` comments,
 `[[token]]` headers, and `key = "value"` lines (double quotes, no escapes).
-The keys `token`, `project`, `addr`, and `role` are required, once each.
-Any other line, an unknown key, a bad value, or a repeated token stops the
-broker with an error that names the line. A lead who leads several projects
-uses one token and lists it once per project. One token twice in one
-project is refused.
+The keys `token`, `addr`, and `role` are required. `project` is optional.
+Each key appears once per entry. Any other line, an unknown key, or a bad
+value stops the broker with an error that names the line. A repeated token
+stops it too, unless every copy names a different project. A lead who
+leads several projects can use one entry with no `project`, or one token
+listed once per project.
 
-- `project` is a project name, or `"*"` for `observer` entries only.
+- `project` is a project name. With no `project`, the token works in every
+  project. `"*"` means the same, for `observer` entries only (the old form).
 - `addr` is an exact address, or a pattern where `*` matches any run of
   characters, such as `*@box1`.
 - `role` is `lead`, `agent`, or `observer`.
@@ -552,9 +561,10 @@ time, then checks the hello:
 
 - No entry matches: `bad_token`. The broker closes the connection.
 - The project or address does not fit the entry, or a role rule fails:
-  `forbidden`.
+  `forbidden`. The project check applies only to an entry with a `project`.
 - Lead rule: only a `lead` entry can claim an address that a `lead` entry
-  names exactly in that project.
+  names exactly. This holds in every project, whether or not that entry
+  has a `project`.
 - Observer rule: an `observer` entry works only with an observer hello. An
   `agent` entry cannot send an observer hello.
 

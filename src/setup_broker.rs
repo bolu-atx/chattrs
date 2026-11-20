@@ -21,6 +21,7 @@ const OBSERVER_ADDR: &str = "tray@*";
 struct Plan {
     hosts: Vec<String>,
     lead: String,
+    /// Empty means the tokens carry no project line.
     projects: Vec<String>,
 }
 
@@ -117,8 +118,7 @@ fn plan(args: &SetupArgs) -> Result<Plan, String> {
     if !model::is_valid_address(&lead) {
         return Err(format!("`{lead}` is not a valid lead address"));
     }
-    let projects =
-        if args.projects.is_empty() { vec!["default".to_string()] } else { args.projects.clone() };
+    let projects = args.projects.clone();
     if let Some(bad) = projects.iter().find(|p| !model::is_valid_topic(p)) {
         return Err(format!("`{bad}` is not a valid project name"));
     }
@@ -135,26 +135,33 @@ fn generate(
         "# chattrs broker tokens, written by `chattrs setup --broker`. Keep mode 0600.\n",
     );
     let mut issued = Vec::new();
-    let mut add = |token: &str, project: &str, addr: &str, role: &str| {
+    let mut add = |token: &str, project: Option<&str>, addr: &str, role: &str| {
+        let project = project.map(|p| format!("project = \"{p}\"\n")).unwrap_or_default();
         text.push_str(&format!(
-            "\n[[token]]\ntoken = \"{token}\"\nproject = \"{project}\"\naddr = \"{addr}\"\nrole = \"{role}\"\n"
+            "\n[[token]]\ntoken = \"{token}\"\n{project}addr = \"{addr}\"\nrole = \"{role}\"\n"
         ));
+    };
+    // No `--projects`: one entry with no project. Otherwise one per project.
+    let scopes: Vec<Option<&str>> = if plan.projects.is_empty() {
+        vec![None]
+    } else {
+        plan.projects.iter().map(|p| Some(p.as_str())).collect()
     };
     for host in &plan.hosts {
         let token = next_token()?;
         let pattern = format!("*@{host}");
-        for project in &plan.projects {
-            add(&token, project, &pattern, "agent");
+        for scope in &scopes {
+            add(&token, *scope, &pattern, "agent");
         }
         issued.push(Issued { label: format!("agent {host}"), pattern, token });
     }
     let token = next_token()?;
-    for project in &plan.projects {
-        add(&token, project, &plan.lead, "lead");
+    for scope in &scopes {
+        add(&token, *scope, &plan.lead, "lead");
     }
     issued.push(Issued { label: format!("lead {}", plan.lead), pattern: plan.lead.clone(), token });
     let token = next_token()?;
-    add(&token, model::ALL_PROJECTS, OBSERVER_ADDR, "observer");
+    add(&token, None, OBSERVER_ADDR, "observer");
     issued.push(Issued {
         label: format!("observer {OBSERVER_ADDR}"),
         pattern: OBSERVER_ADDR.to_string(),
@@ -371,12 +378,22 @@ mod tests {
     }
 
     #[test]
+    fn default_file_has_no_project_lines_and_works_in_any_project() {
+        let (text, issued) = generate(&plan(&args(&["a", "b"])).unwrap(), counter()).unwrap();
+        assert!(!text.contains("project"), "{text}");
+        let tokens = Tokens::parse(&text).unwrap();
+        let agent = issued.iter().find(|i| i.label == "agent a").unwrap();
+        for project in ["alpha", "beta"] {
+            let entry = tokens.find(Some(&agent.token), project).unwrap();
+            assert_eq!(tokens.authorize(entry, project, "w1@a", false), Ok(()));
+            assert!(tokens.authorize(entry, project, "lead@a", false).is_err());
+        }
+    }
+
+    #[test]
     fn defaults_and_validation() {
         let plan_ = plan(&args(&["mac", "bobox"])).unwrap();
-        assert_eq!(
-            (plan_.lead.as_str(), plan_.projects),
-            ("lead@mac", vec!["default".to_string()])
-        );
+        assert_eq!((plan_.lead.as_str(), plan_.projects), ("lead@mac", Vec::<String>::new()));
         assert!(plan(&args(&["a", "a"])).is_err());
         assert!(plan(&args(&["a b"])).is_err());
         let mut bad = args(&["a"]);
