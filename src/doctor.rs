@@ -273,8 +273,10 @@ async fn check_probes(
     address: &str,
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
+    let (explicit, from_config) = crate::project::split_applied(args.project.clone());
+    let from_config = from_config.or(config.project.clone());
     let (project, source) =
-        crate::project::resolve(args.project.as_deref(), config.project.as_deref(), &cwd);
+        crate::project::resolve(explicit.as_deref(), from_config.as_deref(), &cwd);
     report.pass("project", format!("{project} ({})", source.word()));
     let hello_project = (source != crate::project::ProjectSource::Default).then_some(project);
     let own_token = match args.token.clone().filter(|token| !token.is_empty()) {
