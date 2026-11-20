@@ -370,6 +370,8 @@ The parser accepts a small subset of TOML, with no extra crate:
 - `key = "value"` lines inside an entry. The keys are `token`,
   `project`, `addr`, and `role`. Each is required and appears once. A
   value is a double-quoted string with no escape sequences.
+- A lead who leads several projects uses one token and lists it once per
+  project. One token twice in one project is refused.
 - Nothing else. Any other line, an unknown key, a bad value, or a repeated
   token stops the broker with an error that names the line.
 

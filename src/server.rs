@@ -27,7 +27,7 @@ use crate::autostart;
 use crate::model::{self, Inbound, Message, Outbound};
 use crate::protocol;
 use crate::store::{self, Sender, Store};
-use crate::tokens::{self, Entry, Role, Tokens};
+use crate::tokens::{self, Entry, Miss, Role, Tokens};
 
 /// One broker error: a machine-readable code and a human message.
 #[derive(Debug)]
@@ -362,10 +362,19 @@ impl Broker {
     /// Check the presented token. With a token table, the matching entry
     /// is returned. Without one, the shared token (if any) must match,
     /// and no entry exists.
-    fn authenticate(&self, presented: Option<&str>) -> Result<Option<&Entry>, WireError> {
+    fn authenticate(
+        &self,
+        presented: Option<&str>,
+        project: &str,
+    ) -> Result<Option<&Entry>, WireError> {
         let bad = || WireError::new("bad_token", "token is missing or incorrect");
         if let Some(table) = &self.tokens {
-            return table.find(presented).map(Some).ok_or_else(bad);
+            return table.find(presented, project).map(Some).map_err(|miss| match miss {
+                Miss::BadToken => bad(),
+                Miss::WrongProject => {
+                    WireError::new("forbidden", "token is not valid for this project")
+                }
+            });
         }
         match (self.token.as_deref(), presented) {
             (None, _) => Ok(None),
@@ -493,7 +502,8 @@ impl Broker {
         hello: Hello,
     ) -> Result<Vec<Outbound>, WireError> {
         let Hello { v, address, token, tags, observer, state, project, session } = hello;
-        let entry = self.authenticate(token.as_deref())?;
+        let project = project.unwrap_or_else(|| model::DEFAULT_PROJECT.to_string());
+        let entry = self.authenticate(token.as_deref(), &project)?;
         let role = entry.map(|entry| entry.role);
         if v != model::PROTOCOL_VERSION {
             return Err(WireError::new("bad_version", "unsupported version, expected 1"));
@@ -501,7 +511,6 @@ impl Broker {
         if !model::is_valid_address(&address) {
             return Err(WireError::new("bad_address", "address is invalid"));
         }
-        let project = project.unwrap_or_else(|| model::DEFAULT_PROJECT.to_string());
         let project_ok =
             if project == model::ALL_PROJECTS { observer } else { model::is_valid_topic(&project) };
         if !project_ok {
