@@ -7,6 +7,8 @@ final class AppStore: ObservableObject {
     @Published var agents: [Agent] = []
     @Published var messages: [Message] = []  // newest first, capped
     @Published var server = Settings.server
+    /// Flips on each new message so the alien takes a step.
+    @Published var step = false
 
     private var source: (any FeedSource)?
     private var epoch = 0
@@ -38,6 +40,12 @@ final class AppStore: ObservableObject {
         }
     }
 
+    private func assignColors() {
+        var all = Set(agents.map(\.address))
+        for m in messages { all.insert(m.from); if let to = m.to { all.insert(to) } }
+        AgentPalette.assign(all)
+    }
+
     /// Handles one control-socket request. See README "Control socket".
     func handleControl(_ line: Data) -> Data {
         switch Control.parse(line) {
@@ -56,10 +64,12 @@ final class AppStore: ObservableObject {
     }
 
     private func apply(_ event: FeedEvent) {
+        defer { assignColors() }
         switch event {
         case .state(let s): state = s
         case .agents(let a): agents = a
         case .messages(let new):
+            if let top = new.map(\.id).max(), top > (messages.first?.id ?? 0) { step.toggle() }
             var byID = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
             for m in new { byID[m.id] = m }
             messages = Array(byID.values.sorted { $0.id > $1.id }.prefix(cap))

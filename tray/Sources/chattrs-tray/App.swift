@@ -24,7 +24,7 @@ struct TrayApp: App {
         MenuBarExtra {
             ContentView().environmentObject(store)
         } label: {
-            Image(nsImage: Icon.image(for: store.state))
+            Image(nsImage: Icon.menuBar(for: store.state, step: store.step))
         }
         .menuBarExtraStyle(.window)
     }
