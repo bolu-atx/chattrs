@@ -11,12 +11,19 @@ use std::time::{Duration, Instant, SystemTime};
 
 const CLIENT_TOKEN: &str = "tok-secret-w1";
 const OTHER_TOKEN: &str = "tok-secret-other";
+const LEAD_TOKEN: &str = "tok-secret-lead";
 const TOKENS: &str = r#"
 [[token]]
 token = "tok-secret-w1"
 project = "alpha"
 addr = "*@box1"
 role = "agent"
+
+[[token]]
+token = "tok-secret-lead"
+project = "alpha"
+addr = "lead@box1"
+role = "lead"
 "#;
 
 fn binary() -> PathBuf {
@@ -44,7 +51,7 @@ fn start_broker(dir: &Path, extra: &[&str]) -> Broker {
         .args(extra)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(std::fs::File::create(dir.join("broker.err")).expect("stderr file"))
         .spawn()
         .expect("spawn the broker");
     let broker = Broker { child, server };
@@ -88,10 +95,17 @@ impl Host {
             .env_remove("XDG_CONFIG_HOME")
             .env("PATH", "")
             .env("CHATTRS_ADDRESS", "w1@box1")
+            .env_remove("CHATTRS_SESSION")
             .envs(envs.iter().copied())
             .current_dir(self.home())
             .stdin(Stdio::null());
         command.output().expect("run chattrs")
+    }
+
+    /// The `rejected hello` lines the broker has logged so far.
+    fn rejections(&self) -> Vec<String> {
+        let log = std::fs::read_to_string(self.home().join("broker.err")).expect("broker log");
+        log.lines().filter(|line| line.contains("rejected hello")).map(str::to_string).collect()
     }
 
     /// Run doctor, and check that no secret reached stdout or stderr.
@@ -99,7 +113,7 @@ impl Host {
         let output = self.run(&["doctor"], envs);
         let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        for secret in [CLIENT_TOKEN, OTHER_TOKEN] {
+        for secret in [CLIENT_TOKEN, OTHER_TOKEN, LEAD_TOKEN] {
             assert!(!stdout.contains(secret) && !stderr.contains(secret), "{stdout}{stderr}");
         }
         (output.status.code().expect("exit code"), stdout)
@@ -121,15 +135,19 @@ fn healthy_host() -> Host {
     assert_eq!(setup.status.code(), Some(0), "setup: {setup:?}");
     let own = home.join("tokens/w1");
     let spare = home.join("tokens/spare");
+    let lead = home.join("tokens/lead");
+    write_private(&lead, LEAD_TOKEN);
     write_private(&own, CLIENT_TOKEN);
     write_private(&spare, OTHER_TOKEN);
     write_private(
         &home.join(".config/chattrs/config.toml"),
         &format!(
-            "server = \"{}\"\n[tokens]\n\"w1@box1\" = \"{}\"\n\"*@box2\" = \"{}\"\n",
+            "server = \"{}\"\n[tokens]\n\"w1@box1\" = \"{}\"\n\"*@box2\" = \"{}\"\n\
+             \"lead@box1\" = \"{}\"\n",
             host.broker.server,
             own.display(),
-            spare.display()
+            spare.display(),
+            lead.display()
         ),
     );
     std::fs::write(home.join(".chattrs.toml"), "project = \"alpha\"\n").expect("repo config");
@@ -143,6 +161,9 @@ fn snapshot(dir: &Path) -> BTreeMap<PathBuf, (u64, SystemTime)> {
     while let Some(next) = pending.pop() {
         for entry in std::fs::read_dir(&next).expect("read dir").map(|e| e.expect("entry")) {
             let meta = entry.metadata().expect("metadata");
+            if entry.file_name().to_string_lossy().starts_with("broker.") {
+                continue; // the broker's own db and log change on a hello
+            }
             if meta.is_dir() {
                 pending.push(entry.path());
             } else {
@@ -171,13 +192,14 @@ fn doctor_passes_on_a_healthy_host_and_writes_nothing() {
         assert!(line_with(&stdout, check).starts_with("ok"), "{check}: {stdout}");
     }
     assert!(stdout.contains("w1@box1: project alpha"), "{stdout}");
-    assert!(stdout.contains("*@box2: skipped"), "{stdout}");
+    assert!(stdout.contains("*@box2: not probed"), "{stdout}");
+    assert!(stdout.contains("lead@box1: not probed"), "{stdout}");
     assert!(stdout.contains("Codex hook trust cannot be detected"), "{stdout}");
     assert_eq!(snapshot(host.home()), before, "doctor wrote a file");
 }
 
 #[test]
-fn doctor_accepts_a_shared_token_and_records_no_agent() {
+fn doctor_accepts_a_shared_token() {
     let dir = tempfile::TempDir::new().expect("make a temp home");
     let broker = start_broker(dir.path(), &["--token", "tok-secret-w1"]);
     let host = Host { dir, broker };
@@ -185,9 +207,106 @@ fn doctor_accepts_a_shared_token_and_records_no_agent() {
     let (_, stdout) = host.doctor(&envs);
     assert!(line_with(&stdout, "token").starts_with("ok"), "{stdout}");
     assert!(stdout.contains("CHATTRS_TOKEN, which overrides"), "{stdout}");
-    let agents = host.run(&["agents", "--as", "peer@box1"], &envs);
-    let listed = String::from_utf8_lossy(&agents.stdout).into_owned();
-    assert!(!listed.contains("w1@box1"), "doctor recorded an agent: {listed}");
+}
+
+/// A broker log with no `rejected hello` line: doctor never trips SEC-5.
+#[test]
+fn doctor_logs_no_rejection_and_shows_the_broker_version() {
+    let host = healthy_host();
+    let (code, stdout) = host.doctor(&[("CHATTRS_SESSION", "w-sess")]);
+    assert_eq!(code, 0, "{stdout}");
+    let version = format!("ok   broker: {}", env!("CARGO_PKG_VERSION"));
+    assert!(stdout.contains(&version), "{stdout}");
+    assert!(!stdout.contains("CHATTRS_SESSION not set"), "{stdout}");
+    assert_eq!(host.rejections(), Vec::<String>::new());
+}
+
+#[test]
+fn doctor_beside_a_live_lead_session_and_a_worker_logs_no_rejection() {
+    let host = healthy_host();
+    let lead = [("CHATTRS_ADDRESS", "lead@box1"), ("CHATTRS_SESSION", "lead-sess")];
+    let mut watch = common::command(binary());
+    watch
+        .arg("watch")
+        .env("HOME", host.home())
+        .env("CODEX_HOME", host.home().join(".codex"))
+        .env_remove("XDG_CONFIG_HOME")
+        .envs(lead)
+        .current_dir(host.home())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let _watch = KillOnDrop(watch.spawn().expect("spawn watch"));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let agents = host.run(&["agents"], &[]);
+        if String::from_utf8_lossy(&agents.stdout).contains("lead@box1  online") {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the lead watch never came online: {agents:?}");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let (code, stdout) = host.doctor(&lead);
+    assert_eq!(code, 0, "lead: {stdout}");
+    assert!(stdout.contains("lead@box1: project alpha"), "{stdout}");
+    let (code, stdout) = host.doctor(&[("CHATTRS_SESSION", "worker-sess")]);
+    assert_eq!(code, 0, "worker: {stdout}");
+    assert!(stdout.contains("w1@box1: project alpha"), "{stdout}");
+    assert_eq!(host.rejections(), Vec::<String>::new());
+}
+
+struct KillOnDrop(Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[test]
+fn doctor_without_an_address_checks_no_token_and_still_passes() {
+    let host = healthy_host();
+    let (code, stdout) = host.doctor(&[("CHATTRS_ADDRESS", "")]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("ok   token: no current address: token not checked"), "{stdout}");
+    assert!(stdout.contains("eval \"$(chattrs env --as <addr>)\""), "{stdout}");
+    assert!(!stdout.contains("not probed"), "{stdout}");
+    assert_eq!(host.rejections(), Vec::<String>::new());
+}
+
+#[test]
+fn doctor_without_a_session_says_hello_anyway_and_adds_a_note() {
+    let host = healthy_host();
+    let (code, stdout) = host.doctor(&[]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(stdout.contains("note: CHATTRS_SESSION not set: use chattrs env"), "{stdout}");
+    assert!(line_with(&stdout, "token").starts_with("ok"), "{stdout}");
+}
+
+#[test]
+fn doctor_says_so_when_the_welcome_has_no_version() {
+    let host = healthy_host();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind the fake broker");
+    let server = listener.local_addr().expect("fake broker address").to_string();
+    std::thread::spawn(move || {
+        use std::io::{BufRead as _, BufReader, Write as _};
+        for stream in listener.incoming().flatten() {
+            let mut line = String::new();
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            if reader.read_line(&mut line).unwrap_or(0) > 0 {
+                let welcome = "{\"type\":\"welcome\",\"server\":\"chattrs\",\"v\":1,\
+                               \"address\":\"w1@box1\",\"project\":\"alpha\"}\n";
+                let _ = (&stream).write_all(welcome.as_bytes());
+            }
+        }
+    });
+    let (code, stdout) = host.doctor(&[("CHATTRS_SERVER", &server)]);
+    assert_eq!(code, 0, "{stdout}");
+    assert!(
+        stdout.contains("ok   broker: version not reported (older than 0.6); upgrade recommended"),
+        "{stdout}"
+    );
 }
 
 #[test]

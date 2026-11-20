@@ -109,10 +109,6 @@ pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
 }
 
 /// A pattern is an address shape with `*` allowed anywhere.
-/// The refusal of an observer `hello` from an agent token. `doctor` reads it
-/// as "token valid for this project and address".
-pub(crate) const OBSERVER_REFUSAL: &str = "an agent token cannot open an observer hello";
-
 pub(crate) fn is_valid_pattern(addr: &str) -> bool {
     let allowed =
         |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'@' | b'*');
@@ -303,7 +299,7 @@ impl Tokens {
         }
         match (entry.role, observer) {
             (Role::Observer, false) => return Err("an observer token needs an observer hello"),
-            (Role::Agent, true) => return Err(OBSERVER_REFUSAL),
+            (Role::Agent, true) => return Err("an agent token cannot open an observer hello"),
             _ => {}
         }
         if !observer && entry.role != Role::Lead && self.is_lead_address(project, address) {

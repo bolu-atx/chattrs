@@ -2,11 +2,12 @@
 //!
 //! It prints one `ok` or `FAIL` line per check on stdout and exits 1 when
 //! any check fails. It is read-only: it writes no file, never prints a
-//! token, and never acks or reads a message. The token check says `hello`
-//! as an observer, which the broker never records as an agent. A broker
-//! with a token table refuses that hello for an agent or lead token, but
-//! only after it checked the token, the project, and the address, so the
-//! refusal still proves those three.
+//! token, and never acks or reads a message. The token check sends one
+//! normal `hello` as the current address, with the current session, so the
+//! broker treats it as that session reconnecting and refuses nothing. The
+//! `welcome` proves the token, the project, and the address, and carries
+//! the broker version. Other `[tokens]` identities are not probed. Only a
+//! `tray@` identity says `hello` as an observer.
 
 use std::fmt::Display;
 use std::path::{Path, PathBuf};
@@ -23,15 +24,13 @@ use crate::{hook_install, protocol, setup, skill, RunError};
 /// How long the connect and the `welcome` may each take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
-use crate::tokens::OBSERVER_REFUSAL as ROLE_REFUSAL;
-
 /// Printed after the checks: no code path can see Codex's hook trust.
 const CODEX_NOTE: &str = "note: Codex hook trust cannot be detected; if Codex hooks do not fire, \
                           run /hooks in Codex and trust them.";
 
 /// What a probe `hello` got back.
 enum Probe {
-    Welcome { v: u32, project: Option<String>, observer: bool },
+    Welcome { v: u32, project: Option<String>, observer: bool, version: Option<String> },
     Rejected { code: String, message: String },
 }
 
@@ -85,8 +84,14 @@ async fn check_host(report: &mut Report, args: &DoctorArgs, home: &Path) {
     let server = server.unwrap_or_else(|| DEFAULT_SERVER.to_string());
     let reachable = check_reachable(report, &server).await;
     let Some(address) = address_of(args) else {
-        report.fail("address", "not set; pass --as or set CHATTRS_ADDRESS or CHATTRS_AGENT");
-        return not_checked(report, "no address");
+        // A warning, not a failure: no code path may pick an address to say
+        // `hello` as, since that would refresh some other identity.
+        report.pass(
+            "token",
+            "no current address: token not checked; run doctor inside a launched session, \
+             or eval \"$(chattrs env --as <addr>)\" first",
+        );
+        return;
     };
     let override_token = args.token.as_deref().filter(|token| !token.is_empty());
     check_pick(report, &config, &address, override_token.is_some());
@@ -214,23 +219,27 @@ async fn connect(server: &str) -> Result<TcpStream, String> {
     }
 }
 
-/// Say an observer `hello` and read the answer. Nothing else is sent.
-async fn probe(
-    server: &str,
-    address: &str,
-    token: Option<&str>,
-    project: Option<&str>,
-) -> Result<Probe, String> {
+/// What the one probe `hello` says.
+struct Hello<'a> {
+    address: &'a str,
+    token: Option<&'a str>,
+    project: Option<&'a str>,
+    session: Option<&'a str>,
+    observer: bool,
+}
+
+/// Say one `hello` and read the answer. Nothing else is sent.
+async fn probe(server: &str, who: Hello<'_>) -> Result<Probe, String> {
     let (read_half, mut write_half) = connect(server).await?.into_split();
     let hello = Inbound::Hello {
         v: model::PROTOCOL_VERSION,
-        address: address.to_string(),
-        token: token.map(str::to_string),
+        address: who.address.to_string(),
+        token: who.token.map(str::to_string),
         tags: Vec::new(),
-        observer: true,
+        observer: who.observer,
         state: None,
-        project: project.map(str::to_string),
-        session: None,
+        project: who.project.map(str::to_string),
+        session: who.session.map(str::to_string),
     };
     let line = protocol::encode(&hello)?;
     write_half.write_all(line.as_bytes()).await.map_err(|error| format!("send hello: {error}"))?;
@@ -244,16 +253,18 @@ async fn probe(
         Ok(Ok(_)) => {}
     }
     match protocol::decode(&answer)? {
-        Outbound::Welcome { v, project, observer, .. } => {
-            Ok(Probe::Welcome { v, project, observer })
+        Outbound::Welcome { v, project, observer, version, .. } => {
+            Ok(Probe::Welcome { v, project, observer, version })
         }
         Outbound::Error { code, message } => Ok(Probe::Rejected { code, message }),
         _ => Err("the broker sent an unexpected frame instead of welcome".to_string()),
     }
 }
 
-/// Probe the current address and every concrete `[tokens]` address. A glob
-/// cannot be probed, since no address stands for it.
+/// Say `hello` as the current address only. Other `[tokens]` addresses are
+/// listed and not probed, since a hello as them would refresh their
+/// identity. This hello records the current address's last-seen, which is
+/// the user's own identity. Only a `tray@` identity says an observer `hello`.
 async fn check_probes(
     report: &mut Report,
     args: &DoctorArgs,
@@ -266,23 +277,36 @@ async fn check_probes(
         Some(token) => Some(token),
         None => token_source(config, address).and_then(|p| config::read_token_file(&p).ok()),
     };
-    let first = probe(server, address, own_token.as_deref(), project.as_deref()).await;
-    report_protocol(report, &first);
-    report_token(report, address, &first, project.as_deref(), config.project.as_deref());
-    for (pattern, path) in config.token_map.iter().filter(|(pattern, _)| pattern != address) {
-        if pattern.contains('*') {
-            report.pass(
-                "token",
-                format!("{pattern}: skipped, a glob pattern has no address to test"),
-            );
-            continue;
+    let session = crate::client::env_session();
+    let observer = address.starts_with("tray@");
+    let who = Hello {
+        address,
+        token: own_token.as_deref(),
+        project: project.as_deref(),
+        session: session.as_deref(),
+        observer,
+    };
+    let result = probe(server, who).await;
+    report_protocol(report, &result);
+    report_broker(report, &result);
+    report_token(report, address, &result, observer, config.project.as_deref());
+    for (pattern, _) in config.token_map.iter().filter(|(pattern, _)| pattern != address) {
+        report
+            .pass("token", format!("{pattern}: not probed (only the current address is checked)"));
+    }
+    if session.is_none() {
+        let _ = crate::output::write_stdout("note: CHATTRS_SESSION not set: use chattrs env\n");
+    }
+}
+
+/// The broker version from the `welcome`.
+fn report_broker(report: &mut Report, result: &Result<Probe, String>) {
+    match result {
+        Ok(Probe::Welcome { version: Some(version), .. }) => report.pass("broker", version),
+        Ok(Probe::Welcome { version: None, .. }) => {
+            report.pass("broker", "version not reported (older than 0.6); upgrade recommended")
         }
-        let Ok(token) = config::read_token_file(path) else {
-            report.fail("token", format!("{pattern}: token file unreadable, see token-map"));
-            continue;
-        };
-        let result = probe(server, pattern, Some(&token), project.as_deref()).await;
-        report_token(report, pattern, &result, project.as_deref(), config.project.as_deref());
+        _ => {}
     }
 }
 
@@ -298,10 +322,6 @@ fn report_protocol(report: &mut Report, result: &Result<Probe, String>) {
             "protocol",
             format!("{message}; this client speaks v{ours}; upgrade the older side"),
         ),
-        // The broker checks the version before the address, project, and role.
-        Ok(Probe::Rejected { code, .. }) if code == "forbidden" => {
-            report.pass("protocol", format!("v{ours}"))
-        }
         Ok(Probe::Rejected { code, .. }) => {
             report.fail("protocol", format!("not checked, the broker refused the hello ({code})"))
         }
@@ -309,19 +329,18 @@ fn report_protocol(report: &mut Report, result: &Result<Probe, String>) {
     }
 }
 
-/// Report one probe. `sent` is the project the hello asked for and `repo`
-/// the project of the repo `.chattrs.toml`.
+/// Report the probe. `observer` says whether the hello was an observer
+/// hello, and `repo` is the project of the repo `.chattrs.toml`.
 fn report_token(
     report: &mut Report,
     who: &str,
     result: &Result<Probe, String>,
-    sent: Option<&str>,
+    observer: bool,
     repo: Option<&str>,
 ) {
-    let sent = sent.unwrap_or(model::DEFAULT_PROJECT);
     let (project, how) = match result {
         Err(error) => return report.fail("token", format!("{who}: {error}")),
-        Ok(Probe::Welcome { observer: false, .. }) => {
+        Ok(Probe::Welcome { observer: false, .. }) if observer => {
             return report.fail(
                 "token",
                 format!("{who}: the broker ignored the observer hello; upgrade the broker"),
@@ -329,11 +348,12 @@ fn report_token(
         }
         Ok(Probe::Welcome { project, .. }) => (
             project.as_deref().unwrap_or(model::DEFAULT_PROJECT),
-            "observer hello accepted; the welcome carries no role",
+            if observer {
+                "observer hello accepted"
+            } else {
+                "hello accepted; the broker refreshed this address's last-seen"
+            },
         ),
-        Ok(Probe::Rejected { code, message }) if code == "forbidden" && message == ROLE_REFUSAL => {
-            (sent, "an agent or lead token; the welcome carries no role")
-        }
         Ok(Probe::Rejected { code, message }) if code == "bad_token" => {
             return report.fail(
                 "token",
@@ -355,7 +375,7 @@ fn report_token(
             "token",
             format!("{who}: the broker put this connection in project {project}, but .chattrs.toml says {repo}"),
         ),
-        None => report.pass("token", format!("{who}: project {project}; {how}; no agent was recorded")),
+        None => report.pass("token", format!("{who}: project {project}; {how}")),
     }
 }
 

@@ -285,6 +285,9 @@ pub enum Outbound {
         /// broker.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        /// The broker's crate version. Absent from an older broker.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        version: Option<String>,
     },
     /// Confirms a stored message with its id. `known` is `false` when the
     /// `to` address never said `hello`. It is absent when the send has no
