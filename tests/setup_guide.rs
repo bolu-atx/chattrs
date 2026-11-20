@@ -111,6 +111,13 @@ fn solo_is_the_guess_and_steps_flip_after_setup() {
 }
 
 #[test]
+fn solo_guide_says_never_to_run_serve_by_hand() {
+    let dir = home();
+    let (stdout, _) = guide(dir.path(), &["--role", "solo"]);
+    assert!(stdout.contains("never run `chattrs serve` by hand"), "{stdout}");
+}
+
+#[test]
 fn text_output_has_one_block_per_step_and_the_rerun_line() {
     let dir = home();
     let (stdout, _) = guide(dir.path(), &["--hosts", "mac,box", "--broker-host", "box"]);

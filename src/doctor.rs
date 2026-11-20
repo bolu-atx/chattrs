@@ -129,7 +129,7 @@ async fn check_host(report: &mut Report, args: &DoctorArgs, home: &Path) {
     check_token_map(report, &config);
     let settings = Settings::resolve(&process_env, &config);
     let server = args.server.clone().unwrap_or_else(|| settings.server.clone());
-    let reachable = check_reachable(report, &server).await;
+    let reach = check_reachable(report, &server).await;
     let Some(address) = address_of(args) else {
         // A warning, not a failure: no code path may pick an address to say
         // `hello` as, since that would refresh some other identity.
@@ -142,19 +142,28 @@ async fn check_host(report: &mut Report, args: &DoctorArgs, home: &Path) {
     };
     let override_token = args.token.as_deref().filter(|token| !token.is_empty());
     check_pick(report, &config, &address, override_token.is_some());
-    let reason = if !config_ok {
-        "config failed"
-    } else if !reachable {
-        "broker unreachable"
-    } else {
-        return check_probes(report, args, &config, &settings, (&server, &address)).await;
-    };
-    not_checked(report, reason);
+    if !config_ok {
+        return not_checked(report, "config failed", true);
+    }
+    match reach {
+        Reach::Up => check_probes(report, args, &config, &settings, (&server, &address)).await,
+        Reach::Idle => {
+            not_checked(report, "the loopback broker starts on first use", false);
+        }
+        Reach::Down => not_checked(report, "broker unreachable", true),
+    }
 }
 
-fn not_checked(report: &mut Report, reason: &str) {
-    report.fail("token", format!("not checked, {reason}"));
-    report.fail("protocol", format!("not checked, {reason}"));
+/// Report the token and protocol checks as skipped. `fail` says whether that is a failure.
+fn not_checked(report: &mut Report, reason: &str, fail: bool) {
+    for name in ["token", "protocol"] {
+        let detail = format!("not checked, {reason}");
+        if fail {
+            report.fail(name, detail);
+        } else {
+            report.pass(name, detail);
+        }
+    }
 }
 
 /// The own address: `--as`, else `<agent>@<hostname>`.
@@ -244,15 +253,27 @@ fn check_pick(report: &mut Report, config: &Config, address: &str, env_override:
     }
 }
 
-async fn check_reachable(report: &mut Report, server: &str) -> bool {
+/// What the TCP connect to the broker showed.
+enum Reach {
+    Up,
+    /// A loopback server with nothing listening. The next client command starts it (CLI-11).
+    Idle,
+    Down,
+}
+
+async fn check_reachable(report: &mut Report, server: &str) -> Reach {
     match connect(server).await {
         Ok(_) => {
             report.pass("broker", format!("{server} accepts connections"));
-            true
+            Reach::Up
+        }
+        Err(_) if crate::autostart::is_loopback_server(server) => {
+            report.pass("broker", format!("{server} not running; starts on first use (loopback)"));
+            Reach::Idle
         }
         Err(error) => {
             report.fail("broker", format!("{error}; start the broker or fix `server`"));
-            false
+            Reach::Down
         }
     }
 }
