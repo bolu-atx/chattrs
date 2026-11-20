@@ -1378,3 +1378,31 @@ fn setup_broker_then_join_gives_each_identity_its_token() {
         run_with_stdin(client.path(), &["setup", "--join", &find("agent bobox"), "--force"], "");
     assert_eq!(forced.status.code(), Some(0), "--force replaces: {forced:?}");
 }
+
+#[test]
+fn help_never_prints_the_token() {
+    let secret = "help-must-not-show-this-token";
+    let help = |args: &[&str]| {
+        let output = common::command(binary())
+            .args(args)
+            .env("CHATTRS_TOKEN", secret)
+            .output()
+            .expect("run chattrs help");
+        format!("{}{}", stdout_text(&output), String::from_utf8_lossy(&output.stderr))
+    };
+    let top = help(&["--help"]);
+    let commands: Vec<String> = top
+        .lines()
+        .skip_while(|line| !line.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|line| line.starts_with("  "))
+        .filter_map(|line| line.split_whitespace().next().map(str::to_string))
+        .filter(|name| name != "help")
+        .collect();
+    assert!(commands.len() > 5, "no subcommands found in help: {top}");
+    assert!(!top.contains(secret));
+    for name in &commands {
+        let text = help(&[name, "--help"]);
+        assert!(!text.contains(secret), "`chattrs {name} --help` printed the token");
+    }
+}
