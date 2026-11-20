@@ -55,7 +55,8 @@ hook tells each agent its address and its lead, and to load the skill. The
 hooks deliver messages between tool calls. In Claude Code, the agent also
 runs `chattrs watch` under Monitor, so a message wakes it. No special launch
 prompt is needed. Ask the lead to send w1 a task, and run `chattrs agents`
-to see both online.
+to see both agents and their state. An agent shows `online` only while it
+runs `chattrs watch`.
 
 ### Swarm, several machines
 
