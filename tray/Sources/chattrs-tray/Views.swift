@@ -27,18 +27,19 @@ struct ContentView: View {
     @EnvironmentObject var store: AppStore
     @State private var showSettings = false
     @State private var playhead: Int64?
-    /// nil shows every project.
-    @State private var project: String?
+    /// Empty shows every project.
+    @State private var selected: Set<String> = []
 
     var body: some View {
         let projects = projectNames(agents: store.agents, messages: store.messages)
-        let agents = store.agents.filter { project == nil || $0.projectName == project }
-        let messages = store.messages.filter { project == nil || $0.projectName == project }
-        let showProjects = projects.count > 1 && project == nil
+        let shown = { (p: String) in selected.isEmpty || selected.contains(p) }
+        let agents = store.agents.filter { shown($0.projectName) }
+        let messages = store.messages.filter { shown($0.projectName) }
+        let showProjects = projects.count > 1 && selected.count != 1
         VStack(spacing: 0) {
             Header(showSettings: $showSettings)
             if projects.count > 1 && !showSettings {
-                ProjectPicker(projects: projects, selection: $project)
+                ProjectPills(projects: projects, selection: $selected)
             }
             Divider()
             if showSettings {
@@ -53,7 +54,7 @@ struct ContentView: View {
             Divider()
             footer
         }
-        .frame(width: 400, height: 640)
+        .frame(width: 400, height: 690)
     }
 
     private var footer: some View {
@@ -122,41 +123,70 @@ struct Header: View {
     }
 }
 
-/// Shown once the broker has more than one project.
-struct ProjectPicker: View {
+/// Shown once the broker has more than one project. Native toggle buttons
+/// (HIG: a multi-select filter). No selection means every project.
+struct ProjectPills: View {
     let projects: [String]
-    @Binding var selection: String?
+    @Binding var selection: Set<String>
 
     var body: some View {
-        Picker("Project", selection: $selection) {
-            Text("All projects").tag(String?.none)
-            Divider()
-            ForEach(projects, id: \.self) { Text($0).tag(String?.some($0)) }
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                pill("All projects", isOn: Binding(
+                    get: { selection.isEmpty },
+                    set: { if $0 { selection.removeAll() } }))
+                ForEach(projects, id: \.self) { name in
+                    pill(name, isOn: Binding(
+                        get: { selection.contains(name) },
+                        set: { on in if on { selection.insert(name) } else { selection.remove(name) } }))
+                }
+            }
+            .padding(.horizontal, Theme.pad)
         }
-        .pickerStyle(.menu)
-        .fixedSize()
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, Theme.pad).padding(.bottom, 10)
-        .onChange(of: projects) { list in
-            if let s = selection, !list.contains(s) { selection = nil }
-        }
+        .padding(.bottom, 10)
+        .onChange(of: projects) { list in selection.formIntersection(list) }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Projects")
+    }
+
+    @ViewBuilder private func pill(_ title: String, isOn: Binding<Bool>) -> some View {
+        let t = Toggle(title, isOn: isOn).toggleStyle(.button).controlSize(.small)
+        if #available(macOS 14, *) { t.buttonBorderShape(.capsule) } else { t }
     }
 }
 
 struct AgentsSection: View {
     let agents: [Agent]
     var grouped = false
+    /// Remembered per viewer. On by default: gone agents are offline for over an hour.
+    @AppStorage("hideGone") private var hideGone = true
 
     var body: some View {
+        let goneCount = agents.filter { $0.health() == .gone }.count
         VStack(alignment: .leading, spacing: 8) {
-            Text("Agents").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+            HStack {
+                Text("Agents").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                Spacer()
+                if goneCount > 0 {
+                    Toggle("Hide \(goneCount) gone", isOn: $hideGone)
+                        .toggleStyle(.checkbox)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .help("Agents offline for over an hour")
+                }
+            }
             if agents.isEmpty {
                 Text("Agents show here once they connect to the broker.")
                     .font(.callout).foregroundStyle(.secondary)
             } else {
                 ScrollView {
                     TimelineView(.periodic(from: .now, by: 5)) { ctx in
+                        let agents = hideGone ? agents.filter { $0.health(now: ctx.date) != .gone } : agents
                         VStack(alignment: .leading, spacing: 6) {
+                            if agents.isEmpty {
+                                Text("Every agent is gone. Clear Hide gone to see them.")
+                                    .font(.callout).foregroundStyle(.secondary)
+                            }
                             if grouped {
                                 ForEach(Dictionary(grouping: agents, by: \.projectName).sorted { $0.key < $1.key }, id: \.key) { name, list in
                                     Text(name).font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
@@ -169,7 +199,7 @@ struct AgentsSection: View {
                         }
                     }
                 }
-                .frame(maxHeight: 110)
+                .frame(maxHeight: 160)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
