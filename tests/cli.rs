@@ -4,6 +4,9 @@
 //! database, then runs client commands against it and checks stdout,
 //! stderr, and the exit code. Nothing here touches `src/`.
 
+mod common;
+
+use common::free_port;
 use std::io::{BufRead, BufReader, Write as _};
 use std::net::TcpStream;
 use std::path::PathBuf;
@@ -14,15 +17,6 @@ use std::time::{Duration, Instant};
 /// Path of the binary under test.
 fn binary() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_chattrs"))
-}
-
-/// A free loopback port: bind `:0`, read the port, drop the listener.
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .expect("bind a free port")
-        .local_addr()
-        .expect("read the bound port")
-        .port()
 }
 
 /// A running broker. Killed on drop so no test leaks a server.
