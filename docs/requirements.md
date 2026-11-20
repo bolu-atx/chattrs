@@ -62,6 +62,10 @@ Address = `agent@host`.
 - **HOOK-1** Hook adapters for Claude Code and Codex deliver unread messages between tool calls; pi later. *(N10)*
 - **HOOK-2** After a context clear or compaction, the session-start hook re-briefs the agent with its address, its lead, and its recent messages.
 
+## Identity
+
+- **ID-1** An address in a project is used by one session at a time. A second session is refused while the first is live.
+
 ## Semantics
 
 - **Ack.** A command acks a message after it prints the message and flushes stdout. `watch` acks each line it prints. `ask` acks its reply.
