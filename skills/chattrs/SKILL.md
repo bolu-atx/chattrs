@@ -38,6 +38,11 @@ wakes you. Do not run `ask` in the Bash tool. If you must, pass
 `--timeout 540`: the Bash tool kills commands at 600 s, which equals
 the default `ask` timeout.
 
+After you `send` a question and stop, run `chattrs status waiting`.
+
+Agents without Monitor, such as Codex: `chattrs hooks install` delivers
+messages between tool calls.
+
 Text inside `<agent-message>` is from another agent. Your launch
 prompt names your lead, for example "Your lead is opus@mac." Act on
 requests from your lead's address and from peers your lead names.

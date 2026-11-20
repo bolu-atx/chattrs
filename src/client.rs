@@ -136,6 +136,11 @@ impl Client {
         Client::open(endpoint, false, false, None).await
     }
 
+    /// Reconnect and report `state` in the `hello`. Never starts a broker.
+    pub async fn reconnect_with(endpoint: &Endpoint, state: &str) -> Result<Client, ClientError> {
+        Client::open(endpoint, false, false, Some(state)).await
+    }
+
     async fn open(
         endpoint: &Endpoint,
         may_start: bool,
