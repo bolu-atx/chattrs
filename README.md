@@ -175,8 +175,10 @@ coordinator, who puts `$(chattrs skill)` in the worker's prompt.
 
 ## Run across hosts
 
-Run one broker on an always-on Linux host, reachable over Tailscale.
-Clients on other hosts connect to it with the shared token.
+Run one broker on an always-on machine. Other hosts connect to it over
+a private network (Tailscale or a LAN) with the shared token. The
+broker host can run an agent too. This is "Claude Code-style swarms
+for any agent": a lead and its workers share one broker.
 
 Install the same binary on every host:
 
@@ -186,15 +188,39 @@ cargo install --git https://github.com/bolu-atx/chattrs
 # or: npm install -g chattrs
 ```
 
-On the broker host, start the broker on its Tailscale IP:
+### Pick the broker host
+
+- Use a machine that is always on. Do not use the lead's Mac: it
+  sleeps, and the swarm stops with it.
+- Bind to the LAN or tailnet IP, never `0.0.0.0` and never a public
+  address. There is no TLS.
+- Set `CHATTRS_TOKEN`. The broker refuses a non-loopback bind without
+  it. The `from` of a message is only as trustworthy as the token: with
+  no token, any local process can say hello as any address.
+- Keep the token in a file with mode 0600, never in a unit file or on a
+  command line:
 
 ```bash
-chattrs serve --listen <tailscale-ip>:4646 --token <token> --db <path>
+mkdir -p ~/.config/chattrs
+printf 'CHATTRS_TOKEN=%s\n' "$(openssl rand -hex 32)" > ~/.config/chattrs/env
+chmod 600 ~/.config/chattrs/env
 ```
 
-Keep it running with a `systemd --user` unit that restarts on
-failure. The token lives in an `EnvironmentFile` with mode 600,
-never in the unit file itself:
+### Keep the database
+
+Put `CHATTRS_DB` (or `--db`) on persistent disk. The broker never
+deletes a message, so the database is the swarm's history. Back it up
+with SQLite, never with `cp` on a live database:
+
+```bash
+sqlite3 <db> ".backup <file>"
+```
+
+### Run the broker as a service
+
+Linux: a `systemd --user` unit. Put it in
+`~/.config/systemd/user/chattrs.service`. The token comes from the
+0600 file through `EnvironmentFile`.
 
 ```ini
 [Unit]
@@ -204,24 +230,59 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=%h/.config/chattrs/env
-ExecStart=%h/.cargo/bin/chattrs serve --listen <tailscale-ip>:4646 --db <path>
-Restart=on-failure
+ExecStart=%h/.cargo/bin/chattrs serve --listen <broker-ip>:4646 --db <path>
+Restart=always
 
 [Install]
 WantedBy=default.target
 ```
 
 ```bash
-# the env file holds one line: CHATTRS_TOKEN=<token>
-chmod 600 ~/.config/chattrs/env
 systemctl --user daemon-reload
 systemctl --user enable --now chattrs
+loginctl enable-linger <user>   # run without a login session
 ```
 
-On every client host, set the same three values:
+macOS: a launchd agent. Put it in
+`~/Library/LaunchAgents/dev.chattrs.broker.plist`. A shell wrapper
+reads the same 0600 file, so the token stays out of the plist. Change
+the binary path to match your install (`which chattrs`).
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.chattrs.broker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>set -a; . "$HOME/.config/chattrs/env"; exec /opt/homebrew/bin/chattrs serve --listen &lt;broker-ip&gt;:4646 --db "$HOME/.local/share/chattrs/chattrs.db"</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardErrorPath</key><string>/tmp/chattrs-broker.log</string>
+</dict>
+</plist>
+```
 
 ```bash
-export CHATTRS_SERVER=<tailscale-ip>:4646
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/dev.chattrs.broker.plist
+launchctl kickstart -k gui/$(id -u)/dev.chattrs.broker   # restart
+launchctl bootout gui/$(id -u)/dev.chattrs.broker        # stop and unload
+```
+
+A launchd agent runs while its user is logged in. Turn on automatic
+login for an unattended Mac.
+
+### Set client hosts
+
+On every client host, set the same values:
+
+```bash
+export CHATTRS_SERVER=<broker-ip>:4646
 export CHATTRS_TOKEN=<token>
 export CHATTRS_ADDRESS=<agent>@<host>
 ```
@@ -230,19 +291,68 @@ export CHATTRS_ADDRESS=<agent>@<host>
 address per host, or set `CHATTRS_AGENT` and let the binary use
 `<agent>@<hostname>`.
 
-Limits: there is no TLS, so the token and the messages travel as
-clear text inside the tailnet. One token covers the whole fleet.
-Addresses are self-asserted: the token proves fleet membership,
-not which address is yours. Bind the Tailscale IP only, never a
-public address.
+The agent on the broker host is a client too. Set its
+`CHATTRS_SERVER` to the broker's LAN or tailnet IP, not to loopback.
+A loopback server that is down gets a second, auto-started broker
+(CLI-11), and that agent then talks to a different swarm.
 
-A coordinator that starts a worker over ssh passes the same env
-on the ssh command line:
+Limits: there is no TLS, so the token and the messages travel as
+clear text inside the private network. One token covers the whole
+fleet. Addresses are self-asserted: the token proves fleet
+membership, not which address is yours.
+
+### Start a worker
+
+The lead starts each worker over ssh, in a detached tmux session. The
+worker needs no flags: the env sets everything (CLI-6). First put the
+token in `~/.config/chattrs/env` on the worker host, mode 0600, as
+`export CHATTRS_TOKEN=<token>`.
 
 ```bash
-ssh <worker> "CHATTRS_SERVER=<tailscale-ip>:4646 \
-  CHATTRS_TOKEN=<token> CHATTRS_ADDRESS=<agent>@<host> chattrs inbox"
+ssh <host> 'tmux new -d -s worker1 \
+  ". ~/.config/chattrs/env; \
+   export CHATTRS_ADDRESS=worker1@<host> \
+          CHATTRS_SERVER=<broker-ip>:4646 \
+          CHATTRS_TAGS=gpu; \
+   mkdir -p ~/.claude/skills/chattrs && \
+     chattrs skill > ~/.claude/skills/chattrs/SKILL.md; \
+   exec claude \"Your address is worker1@<host>. Your lead is opus@mac. \
+Run chattrs watch under the Monitor tool now.\""'
 ```
+
+The prompt names the worker's address and its lead. It also starts
+`chattrs watch` under Monitor, so a message wakes the worker. See the
+`chattrs-fleet` skill for the same wording. `CHATTRS_TAGS` is optional
+and shows in `agents`.
+
+Windows has no native tmux. Use WSL, or leave a terminal session
+running.
+
+### Upgrade
+
+Upgrade the broker first, then the clients. New protocol fields are
+optional, so old clients keep working. Run `chattrs --version` on
+each host to check.
+
+### Watch the swarm
+
+`chattrs watch --all` shows every message live. See
+[Monitoring API (observer)](#monitoring-api-observer) for the wire
+form. `chattrs agents` shows who is online, with tags.
+
+### Exit test
+
+Run this checklist once on a new swarm.
+
+1. Start the broker service on the swarm machine. A lead on the Mac and
+   two remote workers connect to it.
+2. A worker reports to the lead. The lead gets it.
+3. A worker asks the lead a question and gets the reply.
+4. Restart the broker mid-run (`systemctl --user restart chattrs`, or
+   `launchctl kickstart -k ...`). Check `chattrs log`: no message is
+   lost.
+5. `chattrs watch --all` shows every message live.
+6. `chattrs agents` shows both workers online, with their tags.
 
 ## Protocol
 
