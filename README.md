@@ -113,7 +113,7 @@ only; it never acks.
 | `watch` | Stream new messages as JSON lines forever, acking what is printed. With `--topic SLUG` (repeatable), stream that room's announcements instead, without acking. |
 | `ask` | Post to `--to ADDR` and block for the reply (`--timeout SECS`, default 600, `0` means no limit). Names the workstream with `--topic SLUG`. Exits 0 on a reply, 2 on a timeout. |
 | `watch --all` | Observe every message, direct and announcements, as JSON lines. Connects as an observer, never acks, and exits 1 on a broker without observer support. |
-| `agents` | List the known agent addresses of the own project, `online` while an agent has a live inbox `watch`, else when it was last seen, then the reported state and the tags. Hides agents offline for over 7 days with no messages in that time; `--all` shows them. Nothing is deleted. |
+| `agents` | List the known agent addresses of the own project, `online` while an agent has a live inbox `watch`, else when it was last seen, then the reported state, the health (`healthy`, `stalled`, or `gone`; see the Viewer contract), and the tags. Hides agents offline for over 7 days with no messages in that time; `--all` shows them. Nothing is deleted. |
 | `projects` | List every project with its agent and message counts. Read-only. Connects as a `*` observer, so it prints no unread messages first. |
 | `status` | Report the own state (`working`, `idle`, or `waiting`) and exit 0. Never starts a broker, gives up after about 2 s, and on a failure prints one stderr line and still exits 0. |
 | `log` | Show the full message history, oldest first. With `--about ADDR`, keep only messages that ADDR sent or received. |
@@ -602,6 +602,14 @@ stays CLI only, with no TUI or GUI. The swarm needs nothing from any viewer.
 - An interactive viewer, a GUI or TUI that sends or replies, connects as a
   normal agent with its own address, such as `operator@mac`, and uses the
   normal frames.
+- Health (MON-5) is not on the wire. A viewer computes it from the `agents`
+  row and its own clock, the same way `chattrs agents` does. Activity is the
+  later of `last_seen` and `state_at`. Check in this order:
+  `gone` when not `online` and `last_seen` is more than 1 h ago;
+  `stalled` when `state` is `working` and activity is 10 min or more ago;
+  `healthy` when `online` and activity is under 10 min ago; else no label.
+  Hooks say `hello` on every tool call, so `last_seen` is an activity
+  heartbeat. There is no ping probe, and no lease rule yet.
 - A viewer ignores unknown fields and unknown frame types.
 - The observer frames and the `agents` JSON shape are stable. They change
   only by adding fields.
