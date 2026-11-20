@@ -155,12 +155,17 @@ check, `ok   <check>: ...` or `FAIL <check>: ... <fix hint>`, and exits 1 on
 any failure. It checks the config files, the token file each identity uses
 (mode 0600), that the broker accepts a connection, that the broker accepts
 the token for the project and address, the protocol version, the hooks, and
-the skill text. It never prints a token. It is read-only: it writes no file
-and reads no message. The token check says `hello` as an observer, which the
-broker never records as an agent. The welcome does not carry the token's
-role, so doctor shows the project only. A `[tokens]` glob cannot be tested;
-doctor skips it. Codex hook trust cannot be detected, so doctor always ends
-with a reminder to trust the hooks in `/hooks` in Codex.
+the skill text. It never prints a token. It writes no file and reads no
+message. The token check sends one normal `hello` as the current address,
+with `CHATTRS_SESSION`, so the broker logs no rejection. It shows the project
+and the broker version from the `welcome`. The `hello` updates the last-seen
+of the current address, so that address looks active to health for a moment.
+This is known and not fixed. Other `[tokens]` identities are listed and not
+probed. Without a current address, doctor checks only that the broker accepts
+a connection and prints a warning. Without `CHATTRS_SESSION`, doctor says
+`hello` without a session and prints a note: use `chattrs env`. A `tray@`
+identity says an observer `hello`. Codex hook trust cannot be detected, so
+doctor always ends with a reminder to trust the hooks in `/hooks` in Codex.
 
 ## Install
 
@@ -707,7 +712,7 @@ Client to broker:
 Broker to client:
 
 ```json
-{"type":"welcome", "server":"chattrs", "v":1, "address":"codex@box1", "project":"alpha"}
+{"type":"welcome", "server":"chattrs", "v":1, "address":"codex@box1", "project":"alpha", "version":"0.6.0"}
 {"type":"sent",    "id":12}   // optional "known":false: `to` never said hello
 {"type":"inbox",   "messages":[
   {"id":12,"from":"codex@box1","to":"opus@mac",
@@ -740,6 +745,9 @@ carries a token, loopback too. Optional `hello` fields:
   one. The broker never expires a state. A client shows a state older than
   15 minutes as `unknown` (MON-4). `chattrs status` sends such a `hello`.
 - `observer`: see [Monitoring](#monitoring-api-observer).
+
+`welcome` carries `"version"`, the broker's crate version. It is optional:
+an older broker omits it, and an older client ignores it. `doctor` shows it.
 
 `welcome` may carry `"watching":true` when the address already has a live
 inbox `watch`. The `watch` command then warns once on stderr and keeps

@@ -118,6 +118,7 @@ mod tests {
                 watching: false,
                 observer: false,
                 project: None,
+                version: Some("0.6.0".into()),
             },
             Outbound::Sent { id: 12, known: None },
             Outbound::Inbox { messages: vec![message.clone()] },
@@ -226,6 +227,7 @@ mod tests {
                 watching: false,
                 observer: false,
                 project: None,
+                version: None,
             })
             .unwrap(),
             serde_json::to_value(Outbound::Sent { id: 1, known: None }).unwrap(),
@@ -294,6 +296,18 @@ mod tests {
     }
 
     #[test]
+    fn welcome_version_is_optional_on_the_wire() {
+        let old = r#"{"type":"welcome","server":"chattrs","v":1,"address":"a@h"}"#;
+        assert!(matches!(decode::<Outbound>(old), Ok(Outbound::Welcome { version: None, .. })));
+        let new =
+            r#"{"type":"welcome","server":"chattrs","v":1,"address":"a@h","version":"0.6.0"}"#;
+        match decode::<Outbound>(new) {
+            Ok(Outbound::Welcome { version, .. }) => assert_eq!(version.as_deref(), Some("0.6.0")),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn observer_fields_are_optional_on_the_wire() {
         let hello: Inbound =
             serde_json::from_str(r#"{"type":"hello","v":1,"address":"a@h"}"#).unwrap();
@@ -324,6 +338,7 @@ mod tests {
             watching: false,
             observer: false,
             project: None,
+            version: None,
         })
         .unwrap();
         for line in [hello_line, watch_line, welcome_line] {

@@ -555,6 +555,7 @@ impl Broker {
             watching,
             observer,
             project: Some(project),
+            version: Some(env!("CARGO_PKG_VERSION").to_string()),
         }])
     }
 
