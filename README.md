@@ -113,7 +113,8 @@ only; it never acks.
 | `watch` | Stream new messages as JSON lines forever, acking what is printed. With `--topic SLUG` (repeatable), stream that room's announcements instead, without acking. |
 | `ask` | Post to `--to ADDR` and block for the reply (`--timeout SECS`, default 600, `0` means no limit). Names the workstream with `--topic SLUG`. Exits 0 on a reply, 2 on a timeout. |
 | `watch --all` | Observe every message, direct and announcements, as JSON lines. Connects as an observer, never acks, and exits 1 on a broker without observer support. |
-| `agents` | List known agent addresses, `online` while an agent has a live inbox `watch`, else when it was last seen. |
+| `agents` | List known agent addresses, `online` while an agent has a live inbox `watch`, else when it was last seen, then the reported state and the tags. |
+| `status` | Report the own state (`working`, `idle`, or `waiting`) and exit 0. Never starts a broker, gives up after about 2 s, and on a failure prints one stderr line and still exits 0. |
 | `log` | Show the full message history, oldest first. With `--about ADDR`, keep only messages that ADDR sent or received. |
 | `skill` | Print the bundled agent skill (`skills/chattrs/SKILL.md`) to stdout. Opens no connection, needs no address. |
 
@@ -368,7 +369,8 @@ Client → broker:
 {"type":"ack",   "ids":[12, 13]}
 {"type":"watch"}
 {"type":"watch", "topics":["release-26"]}
-{"type":"hello", "v":1, "address":"tray@mac", "observer":true}
+{"type":"hello", "v":1, "address":"codex@box1", "state":"working"}
+{"type":"hello", "v":1, "address":"viewer@mac", "observer":true}
 {"type":"watch", "all":true}
 {"type":"wait",  "reply_to":12}
 {"type":"agents"}
@@ -386,7 +388,7 @@ Broker → client:
 {"type":"message", "id":13,"from":"opus@mac","to":"codex@box1",
  "body":"hi","ts":1763200000001,"reply_to":12,"topic":null}
 {"type":"acked",   "ids":[12, 13]}
-{"type":"agents",  "agents":[{"address":"codex@box1","last_seen":1763200000000,"online":true,"tags":["os:linux","gpu"]}]}
+{"type":"agents",  "agents":[{"address":"codex@box1","last_seen":1763200000000,"online":true,"tags":["os:linux","gpu"],"state":"working","state_at":1763200000000}]}
 {"type":"log",     "messages":[
   {"id":12,"from":"codex@box1","to":"opus@mac",
    "body":"hi","ts":1763200000000,"reply_to":null,"topic":null,"acked_at":null}]}
@@ -429,6 +431,16 @@ also has `online`: `true` while the address has a live inbox `watch`
 connection (topic watches do not count), else `false`. The broker counts
 this in memory and never stores it; an older broker omits it, which reads as
 `false`. `agents` text shows `online` in place of the last-seen time.
+`hello` may also carry an optional `state`: `working`, `idle`, or `waiting`
+(else `bad_state`). The broker stores the state and the time it was set
+(`state_at`, ms on the broker clock) when a `hello` carries one; a `hello`
+without a state keeps both. An observer `hello` with a state gets
+`observer_read_only`. `agents` text shows the state after the online or
+last-seen column and before the tags, and shows nothing when the agent never
+reported one; `agents --json` always has `state` and `state_at`, `null`
+when never set. The broker never expires a state. A client shows a state
+older than 15 minutes as `unknown`; `agents` text does. `chattrs status
+<state>` sends such a `hello`.
 `welcome` may carry `"watching":true` when the address already has a live
 inbox `watch` at `hello` time; it is omitted otherwise, and from an older
 broker. The `watch` command then warns once per connect on stderr and keeps
@@ -438,7 +450,7 @@ delivery is at least once, and the id tells duplicates apart.
 
 ### Monitoring API (observer)
 
-A monitor, such as a tray app, uses only the wire protocol:
+A monitor, such as a tray, uses only the wire protocol:
 
 1. `hello` with `"observer":true`. The broker never records the address,
    never lists it in `agents`, and never counts it as online or `watching`.
@@ -448,7 +460,7 @@ A monitor, such as a tray app, uses only the wire protocol:
 3. `watch` with `"all":true` streams each new message, direct and
    announcements, as `message` frames. It sends no backlog and acks nothing.
    `all` on a connection that did not say `observer` gets `not_observer`.
-4. `agents` gives the online list. `log` gives history.
+4. `agents` gives presence, tags, and state. `log` gives history.
 
 An observer connection is read-only: `send`, `ack`, `wait`, and `inbox` get
 `observer_read_only`. A slow observer that falls behind is disconnected, so
@@ -456,6 +468,23 @@ it never delays a sender. To catch up after a connect or a drop, start
 `watch` with `all` first and buffer what it streams, then read
 `log` with `after` set to the last id you hold, and drop duplicates by
 message id.
+
+#### Viewer contract
+
+Viewers are separate programs that use this contract. The `chattrs` binary
+stays CLI only, with no TUI or GUI. The swarm needs nothing from any viewer.
+
+- A read-only viewer connects as an observer: `hello` with
+  `"observer":true`, then check the `welcome` echo. Start `watch` with
+  `"all":true` first, then read `log` after the last id you hold, and drop
+  duplicates by id. Use `agents` for presence, tags, and state. An observer
+  is read-only.
+- An interactive viewer, a GUI or TUI that sends or replies, connects as a
+  normal agent with its own address, such as `operator@mac`, and uses the
+  normal frames.
+- A viewer ignores unknown fields and unknown frame types.
+- The observer frames and the `agents` JSON shape are stable. They change
+  only by adding fields.
 
 On `watch`, the broker first subscribes the connection to its one
 broadcast, then sends every unread message in id order, then each new

@@ -52,3 +52,19 @@ issues or move cards by hand.
 
 - Branch: `feat/…`, `fix/…`, `docs/…`, `refactor/…`, `chore/…`.
 - Done = mergeable: checks green, no conflicts.
+
+## Phases
+
+### Hooks and agent status
+
+Outcome: workers get a lead's messages between tool calls without polling,
+and `chattrs agents` shows what each worker is doing. No viewer is needed.
+
+Issues: #63 (agent state, MON-4), #64, #65 (hook adapters, HOOK-1).
+
+Exit test: a Claude Code worker and a Codex worker, each with
+`chattrs hooks install`, get a lead's message between tool calls and before
+they stop, with no Monitor needed for Codex. `chattrs agents` shows each
+worker's state change through working, idle, and waiting. `chattrs hooks
+remove` restores each config file exactly. No viewer (tray, TUI, or GUI) is
+needed for any step.

@@ -48,11 +48,12 @@ Address = `agent@host`.
 
 - **MON-1** An observer `watch` streams every message, direct and announcements, and never acks. *(N8, N12)*
 - **MON-2** An observer connection is not recorded as an agent and does not show in `agents`. *(N9, N12)*
-- **MON-3** The wire protocol is the only monitoring interface. A tray app uses `hello`, `agents`, `log`, and the observer `watch`. *(N12)*
+- **MON-3** The wire protocol is the only monitoring interface. A viewer (tray, TUI, or GUI) uses `hello`, `agents`, `log`, and the observer `watch`. *(N12)*
+- **MON-4** An agent can report its state: working, idle, or waiting. `agents` shows the latest state and when it was set. A client shows a state older than 15 minutes as unknown. *(N9, N12)*
 
 ## Hooks
 
-- **HOOK-1** Hook adapters for Claude Code and pi deliver unread messages between tool calls. *(N10)*
+- **HOOK-1** Hook adapters for Claude Code and Codex deliver unread messages between tool calls; pi later. *(N10)*
 
 ## Semantics
 
