@@ -51,11 +51,11 @@ impl From<String> for RunError {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Config files fill the variables that the environment leaves unset,
     // before clap reads them. A bad file stops the command, except a hook,
-    // which must never break the agent.
+    // which must never break the agent. This runs before the tokio runtime
+    // starts, so no other thread can read the environment while it is set.
     if let Err(error) = config::load().map(|config| config.apply_env()) {
         eprintln!("chattrs: {error}");
         if std::env::args().nth(1).as_deref() != Some("hook") {
@@ -63,7 +63,14 @@ async fn main() {
         }
     }
     let args = Args::parse();
-    let code = match run(args).await {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("chattrs: cannot start the runtime: {error}");
+            std::process::exit(1);
+        }
+    };
+    let code = match runtime.block_on(run(args)) {
         Ok(()) => 0,
         Err(RunError::BrokenPipe) => 0,
         Err(RunError::Timeout) => 2,
