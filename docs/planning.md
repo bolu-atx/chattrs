@@ -48,6 +48,13 @@ issues or move cards by hand.
 - **Milestone closes** when its last issue closes and the exit test in its
   description passes. The PR that closes the last issue quotes the exit
   test result. Then close the milestone.
+- **Dogfood after a milestone closes:**
+  1. Build and install from a clean worktree at `origin/main`:
+     `cargo install --path . --locked`.
+  2. Re-run `chattrs hooks install`. It is safe to repeat. Restart the
+     local broker if one runs.
+  3. Check `chattrs --version`, and run one `send` and `watch` smoke test.
+  4. Report the installed commit to the owner.
 - **Blocked issue:** do not open a PR until its blockers are closed.
 
 - Branch: `feat/…`, `fix/…`, `docs/…`, `refactor/…`, `chore/…`.
