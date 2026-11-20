@@ -155,6 +155,22 @@ pub struct ExecArgs {
     #[arg(long, env = "CHATTRS_TAGS")]
     pub tags: Option<String>,
 
+    /// Run on this host over ssh (`~/.ssh/config` aliases work). Forwards only `--as`, `--lead`, and the program.
+    #[arg(long, value_name = "HOST")]
+    pub host: Option<String>,
+
+    /// Directory on the remote host to start in.
+    #[arg(long, value_name = "DIR", requires = "host")]
+    pub cwd: Option<String>,
+
+    /// Start in a detached remote tmux session and return. Needs tmux there.
+    #[arg(long, requires = "host")]
+    pub detach: bool,
+
+    /// Name of the tmux session. Default: the address user part.
+    #[arg(long, value_name = "NAME", requires = "detach")]
+    pub session_name: Option<String>,
+
     /// The program and its arguments. Everything after the program is its own.
     #[arg(
         required = true,

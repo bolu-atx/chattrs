@@ -216,7 +216,8 @@ fn exec_address_hint(args: &[String]) -> Option<String> {
         match arg.as_str() {
             "--" => return address.or_else(|| rest.next().map(|p| crate::exec_default_address(p))),
             "--as" => address = rest.next().cloned(),
-            "--project" | "--lead" | "--server" | "--tags" => {
+            "--project" | "--lead" | "--server" | "--tags" | "--host" | "--cwd"
+            | "--session-name" => {
                 rest.next();
             }
             _ if arg.starts_with("--as=") => {

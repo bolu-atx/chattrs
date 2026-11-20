@@ -18,6 +18,7 @@ mod cli;
 mod client;
 mod config;
 mod doctor;
+mod exec_host;
 mod hook;
 mod hook_install;
 mod model;
@@ -380,6 +381,9 @@ pub(crate) fn exec_default_address(program: &str) -> String {
 /// explicit `CHATTRS_TOKEN` in the parent env passes through unchanged.
 /// On Unix this replaces the chattrs process.
 fn cmd_exec(c: cli::ExecArgs) -> Result<(), RunError> {
+    if c.host.is_some() {
+        return cmd_exec_host(c);
+    }
     let program = c.command[0].clone();
     // Only a token the user exported passes on; exec never adds one.
     let has_token = std::env::var_os("CHATTRS_TOKEN").is_some_and(|t| !t.is_empty());
@@ -414,6 +418,43 @@ fn cmd_exec(c: cli::ExecArgs) -> Result<(), RunError> {
         eprintln!("chattrs: no token for {}; the broker may refuse", address.unwrap_or_default());
     }
     run_program(command, &program)
+}
+
+/// `exec --host`: run `chattrs exec` on the remote host over the system
+/// `ssh`. Only `--as`, `--lead` (when typed), the program, and its args
+/// go over. A detached start waits for ssh and prints how to attach and stop.
+fn cmd_exec_host(c: cli::ExecArgs) -> Result<(), RunError> {
+    let host = c.host.as_deref().unwrap_or_default();
+    if host.starts_with('-') {
+        return Err(RunError::Message(format!("`{host}` is not a host name")));
+    }
+    // `--lead` also reads CHATTRS_LEAD; only a typed flag goes to the remote.
+    let lead_typed = std::env::args().any(|a| a == "--lead" || a.starts_with("--lead="));
+    let lead = c.lead.as_deref().filter(|_| lead_typed);
+    let name = c.detach.then(|| {
+        c.session_name
+            .clone()
+            .unwrap_or_else(|| exec_host::session_name(c.address.as_deref(), &c.command[0]))
+    });
+    let argv = exec_host::remote_command(
+        host,
+        c.cwd.as_deref(),
+        c.address.as_deref(),
+        lead,
+        &c.command,
+        name.as_deref(),
+    );
+    let mut command = std::process::Command::new(&argv[0]);
+    command.args(&argv[1..]);
+    let Some(name) = name else {
+        return run_program(command, "ssh");
+    };
+    let status =
+        command.status().map_err(|error| RunError::Message(format!("cannot run ssh: {error}")))?;
+    if !status.success() {
+        std::process::exit(status.code().unwrap_or(1));
+    }
+    write(&exec_host::detach_hints(host, &name))
 }
 
 #[cfg(unix)]
