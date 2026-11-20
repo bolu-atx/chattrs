@@ -1,5 +1,5 @@
-//! Test helper shared by `tests/cli.rs` and the broker unit tests
-//! (`src/server/tests/helpers.rs` includes this file by path).
+//! Test helper shared by the CLI tests in `tests/` and the broker unit tests
+//! (`src/server/tests/fixture.rs` includes this file by path).
 
 use std::collections::hash_map::RandomState;
 use std::collections::HashSet;

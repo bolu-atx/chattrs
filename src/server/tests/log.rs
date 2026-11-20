@@ -1,6 +1,6 @@
 //! Broker tests: log.
 
-use super::helpers::*;
+use super::fixture::*;
 use crate::client;
 use crate::model::Outbound;
 use tempfile::TempDir;
@@ -360,7 +360,7 @@ fn dist_config_covers_all_targets_and_installers() {
 #[test]
 fn binary_reports_crate_version() {
     let bin = ensure_bin();
-    let out = super::helpers::ports::command(&bin)
+    let out = super::fixture::ports::command(&bin)
         .arg("--version")
         .output()
         .expect("run chattrs --version");

@@ -1,6 +1,6 @@
 //! Broker tests: mailbox.
 
-use super::helpers::*;
+use super::fixture::*;
 use tokio::io::AsyncWriteExt as _;
 
 use crate::client;

@@ -1,6 +1,6 @@
 //! Broker tests: auth.
 
-use super::helpers::*;
+use super::fixture::*;
 use crate::client;
 use crate::server::{check_listen, rejected_line, serve, WireError};
 use tempfile::TempDir;
