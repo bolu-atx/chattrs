@@ -23,6 +23,7 @@ mod protocol;
 mod server;
 mod skill;
 mod store;
+mod tokens;
 
 use clap::Parser;
 use cli::{Args, Command};
@@ -135,7 +136,9 @@ fn cmd_stop() -> Result<(), RunError> {
 
 async fn cmd_serve(c: cli::ServeArgs) -> Result<(), RunError> {
     let db = c.db.clone().unwrap_or_else(Store::default_path);
-    server::serve(&c.listen, &db, c.token.clone()).await.map_err(RunError::Message)
+    server::serve(&c.listen, &db, c.token.clone(), c.tokens.as_deref())
+        .await
+        .map_err(RunError::Message)
 }
 
 async fn cmd_send(c: cli::SendArgs) -> Result<(), RunError> {

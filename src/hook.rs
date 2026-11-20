@@ -280,6 +280,7 @@ mod tests {
             reply_to: None,
             topic: None,
             project: "default".into(),
+            from_role: None,
         }
     }
 

@@ -113,6 +113,11 @@ pub struct ServeArgs {
     /// without one.
     #[arg(long, env = "CHATTRS_TOKEN")]
     pub token: Option<String>,
+
+    /// Token table file (TOML, mode 0600): each token gets its own
+    /// project, address pattern, and role. When set, it replaces `--token`.
+    #[arg(long, env = "CHATTRS_TOKENS")]
+    pub tokens: Option<PathBuf>,
 }
 
 /// Connection flags shared by the client commands.

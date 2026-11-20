@@ -88,6 +88,7 @@ mod tests {
                 reply_to: None,
                 topic: None,
                 project: "default".into(),
+                from_role: None,
             },
             acked_at: None,
         };
@@ -100,6 +101,7 @@ mod tests {
             reply_to: None,
             topic: None,
             project: "default".into(),
+            from_role: None,
         };
         let frames = vec![
             Outbound::Welcome {
@@ -122,6 +124,7 @@ mod tests {
                 reply_to: None,
                 topic: Some("release-26".into()),
                 project: "default".into(),
+                from_role: None,
             }),
             Outbound::Agents { agents: vec![], projects: None },
             Outbound::Log { messages: vec![logged] },

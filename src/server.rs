@@ -26,7 +26,8 @@ use tokio::sync::{broadcast, mpsc};
 use crate::autostart;
 use crate::model::{self, Inbound, Message, Outbound};
 use crate::protocol;
-use crate::store::{self, Store};
+use crate::store::{self, Sender, Store};
+use crate::tokens::{self, Entry, Role, Tokens};
 
 /// One broker error: a machine-readable code and a human message.
 #[derive(Debug)]
@@ -51,6 +52,8 @@ pub struct Broker {
     store: Store,
     pushed: broadcast::Sender<Arc<Message>>,
     token: Option<String>,
+    /// The token table. When set, it replaces `token`.
+    tokens: Option<Tokens>,
     /// Live inbox `watch` connections per (project, address). In memory
     /// only.
     watchers: Arc<Mutex<Watchers>>,
@@ -110,6 +113,9 @@ struct ConnState {
     project: String,
     /// True after an observer `hello`: never recorded, never online.
     observer: bool,
+    /// The role of the token table entry that matched at `hello`. `None`
+    /// in legacy mode.
+    role: Option<Role>,
     /// True after an observer `watch` with `all`: every new message.
     watch_all: bool,
     watch_topics: Option<Vec<String>>,
@@ -290,32 +296,47 @@ impl Broker {
     /// that falls further behind is dropped.
     fn with_capacity(store: Store, token: Option<String>, capacity: usize) -> Broker {
         let (pushed, _) = broadcast::channel(capacity);
-        Broker { store, pushed, token, watchers: Arc::default() }
+        Broker { store, pushed, token, tokens: None, watchers: Arc::default() }
     }
 
-    /// Compare a presented token against the expected one without
-    /// short-circuiting on the first difference.
-    fn token_matches(presented: Option<&str>, expected: &str) -> bool {
-        let Some(presented) = presented else {
-            return false;
+    /// Use a token table in place of the shared token.
+    pub fn with_tokens(mut self, tokens: Tokens) -> Broker {
+        self.tokens = Some(tokens);
+        self
+    }
+
+    /// Check the presented token. With a token table, the matching entry
+    /// is returned. Without one, the shared token (if any) must match,
+    /// and no entry exists.
+    fn authenticate(&self, presented: Option<&str>) -> Result<Option<&Entry>, WireError> {
+        let bad = || WireError::new("bad_token", "token is missing or incorrect");
+        if let Some(table) = &self.tokens {
+            return table.find(presented).map(Some).ok_or_else(bad);
+        }
+        match (self.token.as_deref(), presented) {
+            (None, _) => Ok(None),
+            (Some(expected), Some(got)) if tokens::ct_eq(got.as_bytes(), expected.as_bytes()) => {
+                Ok(None)
+            }
+            _ => Err(bad()),
+        }
+    }
+
+    /// Apply the token table's project, address, and role rules to a
+    /// hello. Without a table every hello passes.
+    fn authorize(
+        &self,
+        entry: Option<&Entry>,
+        project: &str,
+        address: &str,
+        observer: bool,
+    ) -> Result<(), WireError> {
+        let (Some(table), Some(entry)) = (&self.tokens, entry) else {
+            return Ok(());
         };
-        let got = presented.as_bytes();
-        let want = expected.as_bytes();
-        let longest = got.len().max(want.len());
-        let mut diff = got.len() ^ want.len();
-        for i in 0..longest {
-            let pair = got.get(i).copied().unwrap_or(0) ^ want.get(i).copied().unwrap_or(0);
-            diff |= pair as usize;
-        }
-        diff == 0
-    }
-
-    /// True when a presented token passes this broker's check.
-    fn token_ok(&self, presented: Option<&str>) -> bool {
-        match self.token.as_deref() {
-            None => true,
-            Some(expected) => Self::token_matches(presented, expected),
-        }
+        table
+            .authorize(entry, project, address, observer)
+            .map_err(|reason| WireError::new("forbidden", reason))
     }
 
     async fn handle(self: Arc<Self>, stream: TcpStream) {
@@ -412,9 +433,8 @@ impl Broker {
         hello: Hello,
     ) -> Result<Vec<Outbound>, WireError> {
         let Hello { v, address, token, tags, observer, state, project } = hello;
-        if !self.token_ok(token.as_deref()) {
-            return Err(WireError::new("bad_token", "token is missing or incorrect"));
-        }
+        let entry = self.authenticate(token.as_deref())?;
+        let role = entry.map(|entry| entry.role);
         if v != model::PROTOCOL_VERSION {
             return Err(WireError::new("bad_version", "unsupported version, expected 1"));
         }
@@ -430,6 +450,7 @@ impl Broker {
                 "project is invalid, or `*` without an observer hello",
             ));
         }
+        self.authorize(entry, &project, &address, observer)?;
         if tags.len() > model::MAX_TAGS || tags.iter().any(|tag| tag.len() > model::MAX_TAG_BYTES) {
             return Err(WireError::new("bad_tags", "too many tags or a tag is too long"));
         }
@@ -444,6 +465,7 @@ impl Broker {
         }
         let watching = !observer && self.is_watched(&project, &address);
         conn.observer = observer;
+        conn.role = role;
         conn.address = Some(address.clone());
         conn.project = project.clone();
         Ok(vec![Outbound::Welcome {
@@ -487,10 +509,12 @@ impl Broker {
         };
         let (recipient, parent_topic) = self.resolve(conn, to, reply_to, &topic).await?;
         let stored_topic = topic.or(parent_topic);
-        let message = self
-            .store
-            .insert(conn.project.clone(), from, recipient, body, reply_to, stored_topic)
-            .await?;
+        let sender = Sender {
+            project: conn.project.clone(),
+            address: from,
+            role: conn.role.map(|role| role.as_str().to_string()),
+        };
+        let message = self.store.insert(sender, recipient, body, reply_to, stored_topic).await?;
         let id = message.id;
         let _ = self.pushed.send(Arc::new(message));
         Ok(vec![Outbound::Sent { id, known }])
@@ -693,9 +717,9 @@ pub fn is_loopback_listen(listen: &str) -> bool {
     listen.parse::<std::net::SocketAddr>().map(|addr| addr.ip().is_loopback()).unwrap_or(false)
 }
 
-/// Refuse a network-reachable bind that has no token.
-pub fn check_listen(listen: &str, token: Option<&str>) -> Result<(), String> {
-    if token.is_none() && !is_loopback_listen(listen) {
+/// Refuse a network-reachable bind that has no token or token table.
+pub fn check_listen(listen: &str, has_token: bool) -> Result<(), String> {
+    if !has_token && !is_loopback_listen(listen) {
         return Err(format!("non-loopback bind {listen} requires a token"));
     }
     Ok(())
@@ -703,8 +727,14 @@ pub fn check_listen(listen: &str, token: Option<&str>) -> Result<(), String> {
 
 /// Bind and serve until the process exits. A broker started on demand
 /// records its pid next to the DB and removes it when it exits.
-pub async fn serve(listen: &str, db: &Path, token: Option<String>) -> Result<(), String> {
-    check_listen(listen, token.as_deref())?;
+pub async fn serve(
+    listen: &str,
+    db: &Path,
+    token: Option<String>,
+    tokens: Option<&Path>,
+) -> Result<(), String> {
+    let tokens = tokens.map(Tokens::load).transpose()?;
+    check_listen(listen, token.is_some() || tokens.is_some())?;
     let listener = TcpListener::bind(listen).await.map_err(|e| format!("bind {listen}: {e}"))?;
     let bound = listener.local_addr().map_err(|e| e.to_string())?;
     let store = Store::open(db.to_path_buf()).await?;
@@ -713,7 +743,11 @@ pub async fn serve(listen: &str, db: &Path, token: Option<String>) -> Result<(),
     if owned {
         autostart::write_pidfile(db)?;
     }
-    let broker = Arc::new(Broker::new(store, token));
+    let mut broker = Broker::new(store, token);
+    if let Some(tokens) = tokens {
+        broker = broker.with_tokens(tokens);
+    }
+    let broker = Arc::new(broker);
     let result = run_listener(listener, broker).await;
     if owned {
         autostart::remove_pidfile(db);

@@ -10,17 +10,17 @@ async fn non_loopback_bind_without_token_refuses_to_start() {
     let dir = TempDir::new().unwrap();
     let db = dir.path().join("chattrs.db");
     for listen in ["0.0.0.0:0", "[::]:0"] {
-        let err = serve(listen, &db, None).await.unwrap_err();
+        let err = serve(listen, &db, None, None).await.unwrap_err();
         assert!(err.contains("token"), "got: {err}");
         assert!(!err.contains("s3"), "token never appears: {err}");
     }
-    assert!(check_listen("127.0.0.1:0", None).is_ok());
-    assert!(check_listen("0.0.0.0:0", Some("s3")).is_ok());
+    assert!(check_listen("127.0.0.1:0", false).is_ok());
+    assert!(check_listen("0.0.0.0:0", true).is_ok());
 }
 
 #[tokio::test]
 async fn loopback_bind_without_token_starts() {
-    assert!(check_listen("127.0.0.1:0", None).is_ok());
+    assert!(check_listen("127.0.0.1:0", false).is_ok());
     let (addr, _dir, handle) = spawn().await;
     let id = client::publish(&endpoint(&addr, "a@h"), outgoing("b@h", "hi")).await.unwrap();
     let messages = client::fetch_inbox(&endpoint(&addr, "b@h")).await.unwrap();

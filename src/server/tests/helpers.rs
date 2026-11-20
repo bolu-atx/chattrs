@@ -102,6 +102,24 @@ pub(crate) async fn spawn_with_token(
     (addr, dir, handle)
 }
 
+/// A broker with a token table parsed from `table`, and optionally a
+/// legacy shared token that the table overrides.
+pub(crate) async fn spawn_with_tokens(
+    table: &str,
+    legacy: Option<&str>,
+) -> (String, TempDir, tokio::task::JoinHandle<()>) {
+    let dir = TempDir::new().unwrap();
+    let store = Store::open(dir.path().join("chattrs.db")).await.unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let tokens = crate::tokens::Tokens::parse(table).unwrap();
+    let broker = Arc::new(Broker::new(store, legacy.map(str::to_string)).with_tokens(tokens));
+    let handle = tokio::spawn(async move {
+        let _ = run_listener(listener, broker).await;
+    });
+    (addr, dir, handle)
+}
+
 pub(crate) async fn seen(server: &str, address: &str) -> u64 {
     client::fetch_agents(&endpoint(server, "observer@h"))
         .await
