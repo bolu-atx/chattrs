@@ -20,7 +20,7 @@ fn spawn_cli(
     files: (&std::path::Path, &std::path::Path),
     db: &std::path::Path,
 ) -> ProcChild {
-    let child = std::process::Command::new(bin)
+    let child = super::helpers::ports::command(bin)
         .arg(subcommand)
         .arg("--server")
         .arg(dial_addr(addr))

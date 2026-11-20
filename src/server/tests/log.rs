@@ -360,8 +360,10 @@ fn dist_config_covers_all_targets_and_installers() {
 #[test]
 fn binary_reports_crate_version() {
     let bin = ensure_bin();
-    let out =
-        std::process::Command::new(&bin).arg("--version").output().expect("run chattrs --version");
+    let out = super::helpers::ports::command(&bin)
+        .arg("--version")
+        .output()
+        .expect("run chattrs --version");
     assert!(out.status.success(), "version exits zero: {out:?}");
     let text = String::from_utf8(out.stdout).expect("version is utf8");
     assert_eq!(

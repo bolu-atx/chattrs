@@ -293,7 +293,7 @@ fn chattrs_in(
     who: &str,
     args: &[&str],
 ) -> std::process::Output {
-    std::process::Command::new(bin)
+    super::helpers::ports::command(bin)
         .args(args)
         .arg("--server")
         .arg(addr)
