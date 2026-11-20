@@ -250,6 +250,16 @@ async fn next_push(conn: &mut ConnState) -> Push {
     }
 }
 
+/// The fields of a `hello` frame, handed to `on_hello` as one value.
+struct Hello {
+    v: u32,
+    address: String,
+    token: Option<String>,
+    tags: Vec<String>,
+    observer: bool,
+    state: Option<String>,
+}
+
 /// One event for the connection loop: a line from the peer or a push.
 enum Event {
     Line(Option<LineRead>),
@@ -258,7 +268,13 @@ enum Event {
 
 impl Broker {
     pub fn new(store: Store, token: Option<String>) -> Broker {
-        let (pushed, _) = broadcast::channel(1024);
+        Broker::with_capacity(store, token, 1024)
+    }
+
+    /// A broker whose broadcast holds `capacity` messages; a connection
+    /// that falls further behind is dropped.
+    fn with_capacity(store: Store, token: Option<String>, capacity: usize) -> Broker {
+        let (pushed, _) = broadcast::channel(capacity);
         Broker { store, pushed, token, watchers: Arc::default() }
     }
 
@@ -328,7 +344,7 @@ impl Broker {
         }
         self.count_watch(&mut conn, false);
         if let Some(address) = conn.address.clone().filter(|_| !conn.observer) {
-            let _ = self.store.touch_agent(address, Vec::new()).await;
+            let _ = self.store.touch_agent(address, Vec::new(), None).await;
         }
         let _ = writer.shutdown().await;
     }
@@ -341,8 +357,9 @@ impl Broker {
     ) -> Result<Vec<Outbound>, WireError> {
         if conn.address.is_none() {
             return match frame {
-                Inbound::Hello { v, address, token, tags, observer } => {
-                    self.on_hello(conn, v, address, token, tags, observer).await
+                Inbound::Hello { v, address, token, tags, observer, state } => {
+                    let hello = Hello { v, address, token, tags, observer, state };
+                    self.on_hello(conn, hello).await
                 }
                 _ => Err(WireError::new("hello_required", "hello must be the first frame")),
             };
@@ -375,12 +392,9 @@ impl Broker {
     async fn on_hello(
         &self,
         conn: &mut ConnState,
-        v: u32,
-        address: String,
-        token: Option<String>,
-        tags: Vec<String>,
-        observer: bool,
+        hello: Hello,
     ) -> Result<Vec<Outbound>, WireError> {
+        let Hello { v, address, token, tags, observer, state } = hello;
         if !self.token_ok(token.as_deref()) {
             return Err(WireError::new("bad_token", "token is missing or incorrect"));
         }
@@ -393,8 +407,14 @@ impl Broker {
         if tags.len() > model::MAX_TAGS || tags.iter().any(|tag| tag.len() > model::MAX_TAG_BYTES) {
             return Err(WireError::new("bad_tags", "too many tags or a tag is too long"));
         }
+        if state.as_deref().is_some_and(|state| !model::STATES.contains(&state)) {
+            return Err(WireError::new("bad_state", "state must be working, idle, or waiting"));
+        }
+        if observer && state.is_some() {
+            return Err(WireError::new("observer_read_only", "an observer cannot set a state"));
+        }
         if !observer {
-            self.store.touch_agent(address.clone(), tags).await?;
+            self.store.touch_agent(address.clone(), tags, state).await?;
         }
         let watching = !observer && self.is_watched(&address);
         conn.observer = observer;

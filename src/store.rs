@@ -19,8 +19,9 @@ pub struct Store {
 
 /// Latest schema version, tracked with `PRAGMA user_version`. Version 1 is
 /// the tables without the `topic` column; version 2 adds it; version 3 adds
-/// the `tags` column to `agents`.
-const SCHEMA_VERSION: i64 = 3;
+/// the `tags` column to `agents`; version 4 adds `state` and
+/// `state_at`.
+const SCHEMA_VERSION: i64 = 4;
 
 /// The columns of one stored message. Every query that returns messages
 /// selects this list and maps it with `message_from_row`.
@@ -155,17 +156,26 @@ impl Store {
     }
 
     /// Record that `address` connected now, creating its row on first `hello`.
-    /// Non-empty `tags` replace the stored tags; empty `tags` keep them.
-    pub async fn touch_agent(&self, address: String, tags: Vec<String>) -> Result<(), String> {
+    /// Non-empty `tags` replace the stored tags; empty `tags` keep them. A
+    /// `state` replaces the stored state and stamps `state_at`; `None`
+    /// keeps both.
+    pub async fn touch_agent(
+        &self,
+        address: String,
+        tags: Vec<String>,
+        state: Option<String>,
+    ) -> Result<(), String> {
         let tags_json = if tags.is_empty() {
             None
         } else {
             Some(serde_json::to_string(&tags).map_err(|e| e.to_string())?)
         };
         self.with(move |conn| {
+            let now = now_ms() as i64;
+            let state_at = state.as_ref().map(|_| now);
             conn.execute(
-                "INSERT INTO agents (address, last_seen, tags) VALUES (?1, ?2, ?3) ON CONFLICT(address) DO UPDATE SET last_seen = excluded.last_seen, tags = COALESCE(excluded.tags, tags)",
-                rusqlite::params![address, now_ms() as i64, tags_json],
+                "INSERT INTO agents (address, last_seen, tags, state, state_at) VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(address) DO UPDATE SET last_seen = excluded.last_seen, tags = COALESCE(excluded.tags, tags), state = COALESCE(excluded.state, state), state_at = COALESCE(excluded.state_at, state_at)",
+                rusqlite::params![address, now, tags_json, state, state_at],
             )
             .map_err(|e| e.to_string())?;
             Ok(())
@@ -234,7 +244,7 @@ impl Store {
         self.with(move |conn| {
             select_all(
                 conn,
-                "SELECT address, last_seen, tags FROM agents ORDER BY address",
+                "SELECT address, last_seen, tags, state, state_at FROM agents ORDER BY address",
                 [],
                 |row| {
                     let tags: Option<String> = row.get(2)?;
@@ -245,6 +255,8 @@ impl Store {
                         tags: tags
                             .and_then(|json| serde_json::from_str(&json).ok())
                             .unwrap_or_default(),
+                        state: row.get(3)?,
+                        state_at: row.get::<_, Option<i64>>(4)?.map(|at| at as u64),
                     })
                 },
             )
@@ -314,6 +326,9 @@ fn migrate(conn: &Connection) -> Result<(), String> {
     if version < 3 {
         add_tags(conn)?;
     }
+    if version < 4 {
+        add_state(conn)?;
+    }
     conn.execute(&format!("PRAGMA user_version = {SCHEMA_VERSION}"), [])
         .map_err(|e| e.to_string())?;
     Ok(())
@@ -341,6 +356,15 @@ fn add_topic(conn: &Connection) -> Result<(), String> {
 /// array; NULL means no tags.
 fn add_tags(conn: &Connection) -> Result<(), String> {
     conn.execute("ALTER TABLE agents ADD COLUMN tags TEXT", []).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// The version-4 step: add `state` and `state_at` to `agents`. NULL means
+/// the agent never reported a state.
+fn add_state(conn: &Connection) -> Result<(), String> {
+    conn.execute("ALTER TABLE agents ADD COLUMN state TEXT", []).map_err(|e| e.to_string())?;
+    conn.execute("ALTER TABLE agents ADD COLUMN state_at INTEGER", [])
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -602,7 +626,7 @@ mod tests {
                 .unwrap()
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 3, "open stamps the latest version");
+            assert_eq!(version, 4, "open stamps the latest version");
         }
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -654,13 +678,48 @@ mod tests {
         let agents = store.agents().await.unwrap();
         assert_eq!(agents.len(), 1);
         assert!(agents[0].tags.is_empty(), "an old row has no tags");
-        store.touch_agent("a@h".into(), vec!["gpu".into()]).await.unwrap();
-        store.touch_agent("a@h".into(), vec![]).await.unwrap();
+        store.touch_agent("a@h".into(), vec!["gpu".into()], None).await.unwrap();
+        store.touch_agent("a@h".into(), vec![], None).await.unwrap();
         assert_eq!(store.agents().await.unwrap()[0].tags, ["gpu"]);
         let version: i64 = rusqlite::Connection::open(&db)
             .unwrap()
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
+    }
+
+    #[tokio::test]
+    async fn version_three_database_migrates_to_agent_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = dir.path().join("chattrs.db");
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, sender TEXT NOT NULL, recipient TEXT NOT NULL, body TEXT NOT NULL, ts INTEGER NOT NULL, reply_to INTEGER, topic TEXT, acked_at INTEGER);
+                 CREATE TABLE agents (address TEXT PRIMARY KEY, last_seen INTEGER NOT NULL, tags TEXT);
+                 INSERT INTO agents (address, last_seen) VALUES ('a@h', 1763200000000);
+                 PRAGMA user_version = 3;",
+            )
+            .unwrap();
+        }
+        let store = Store::open(db.clone()).await.unwrap();
+        let agent = store.agents().await.unwrap().remove(0);
+        assert_eq!((agent.state, agent.state_at), (None, None), "an old row has no state");
+        store.touch_agent("a@h".into(), vec![], Some("working".into())).await.unwrap();
+        let set = store.agents().await.unwrap().remove(0);
+        assert_eq!(set.state.as_deref(), Some("working"));
+        assert!(set.state_at.is_some());
+        store.touch_agent("a@h".into(), vec![], None).await.unwrap();
+        let kept = store.agents().await.unwrap().remove(0);
+        assert_eq!(
+            (kept.state, kept.state_at),
+            (set.state, set.state_at),
+            "no-state hello keeps both"
+        );
+        let version: i64 = rusqlite::Connection::open(&db)
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 4);
     }
 }

@@ -33,6 +33,9 @@ pub const MAX_TAGS: usize = 32;
 /// Largest accepted tag, in bytes.
 pub const MAX_TAG_BYTES: usize = 64;
 
+/// The states an agent can report in `hello`.
+pub const STATES: [&str; 3] = ["working", "idle", "waiting"];
+
 /// The `log` page size when the frame omits `limit`.
 fn default_log_limit() -> u64 {
     MAX_LOG_LIMIT
@@ -109,6 +112,13 @@ pub struct Agent {
     /// it never sent tags.
     #[serde(default)]
     pub tags: Vec<String>,
+    /// The latest state an agent reported, or null when it never did. The
+    /// broker never expires it; clients judge staleness from `state_at`.
+    #[serde(default)]
+    pub state: Option<String>,
+    /// When `state` was set, in ms since the epoch on the broker clock.
+    #[serde(default)]
+    pub state_at: Option<u64>,
 }
 
 /// One message in `log` history: the message plus when it was read, if
@@ -140,6 +150,10 @@ pub enum Inbound {
         /// false.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         observer: bool,
+        /// `working`, `idle`, or `waiting`. Absent when the agent reports
+        /// no state; a hello without it keeps the stored one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        state: Option<String>,
     },
     /// Store a message for the `to` address. The broker fills in `from`.
     /// With no `to`, the broker answers `reply_to` to its sender instead.

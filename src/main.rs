@@ -116,6 +116,7 @@ async fn run(args: Args) -> Result<(), RunError> {
         Command::Skill => cmd_skill(),
         Command::Log(c) => cmd_log(c).await,
         Command::Agents(c) => cmd_agents(c).await,
+        Command::Status(c) => cmd_status(c).await,
     }
 }
 
@@ -271,6 +272,22 @@ async fn cmd_log(c: cli::LogArgs) -> Result<(), RunError> {
         for message in &messages {
             write(&output::log_text(message))?;
         }
+    }
+    Ok(())
+}
+
+/// Report a state and always succeed: a failure is one stderr line, never
+/// an exit code, so a hook calling `status` cannot break an agent.
+async fn cmd_status(c: cli::StatusArgs) -> Result<(), RunError> {
+    let result = match endpoint(&c.client) {
+        Ok(endpoint) => {
+            client::report_status(&endpoint, c.state.as_str()).await.map_err(|e| e.to_string())
+        }
+        Err(RunError::Message(message)) => Err(message),
+        Err(_) => Err("cannot resolve the own address".to_string()),
+    };
+    if let Err(message) = result {
+        eprintln!("chattrs: status not reported: {message}");
     }
     Ok(())
 }
