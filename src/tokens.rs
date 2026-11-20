@@ -156,7 +156,7 @@ impl Draft {
 
 /// Parse `key = "value"` with an optional `# comment` after the closing
 /// quote. The value has no escape sequences.
-fn parse_pair(text: &str) -> Option<(&str, String)> {
+pub(crate) fn parse_pair(text: &str) -> Option<(&str, String)> {
     let (key, rest) = text.split_once('=')?;
     let rest = rest.trim().strip_prefix('"')?;
     let (value, tail) = rest.split_once('"')?;

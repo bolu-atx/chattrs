@@ -28,10 +28,15 @@ struct Broker {
 
 impl Broker {
     fn start() -> Broker {
+        Broker::start_with(&[])
+    }
+
+    fn start_with(extra: &[&str]) -> Broker {
         let dir = tempfile::TempDir::new().expect("make a temp dir");
         let db = dir.path().join("c.db");
         let mut child = Command::new(binary())
             .args(["serve", "--listen", "127.0.0.1:0", "--db", db.to_str().expect("db path")])
+            .args(extra)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -103,7 +108,10 @@ fn clear_env(command: &mut Command) {
         .env_remove("CHATTRS_SERVER")
         .env_remove("CHATTRS_DB")
         .env_remove("CHATTRS_LEAD")
-        .env_remove("CHATTRS_PROJECT");
+        .env_remove("CHATTRS_PROJECT")
+        .env_remove("CHATTRS_TAGS")
+        .env_remove("CHATTRS_SESSION")
+        .env("HOME", "/nonexistent-chattrs-test-home");
 }
 
 /// Run one client command with `--server` and `CHATTRS_ADDRESS` set.
@@ -940,4 +948,107 @@ fn log_tail_prints_only_the_newest_messages() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(!stdout.contains("one") && !stdout.contains("two"), "{stdout:?}");
     assert!(stdout.find("three").unwrap() < stdout.find("four").unwrap(), "{stdout:?}");
+}
+
+/// Run `chattrs <args>` with a clean env, a temp HOME, and a temp cwd.
+fn run_in(
+    home: &std::path::Path,
+    cwd: &std::path::Path,
+    envs: &[(&str, &str)],
+    args: &[&str],
+) -> Output {
+    let mut command = Command::new(binary());
+    command.args(args).current_dir(cwd);
+    clear_env(&mut command);
+    command.env("HOME", home).envs(envs.iter().copied());
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    command.output().expect("run chattrs")
+}
+
+fn write_private(path: &std::path::Path, text: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+#[test]
+fn user_config_token_file_reaches_a_token_broker() {
+    let broker = Broker::start_with(&["--token", "sekret"]);
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    write_private(&home.join("tok"), "sekret\n");
+    write_private(
+        &home.join(".config/chattrs/config.toml"),
+        &format!("server = \"{}\"\ntoken_file = \"{}\"\n", broker.addr, home.join("tok").display()),
+    );
+    let envs = [("CHATTRS_ADDRESS", "a@h")];
+    let ok = run_in(home, home, &envs, &["send", "--to", "b@h", "hi"]);
+    assert_eq!(ok.status.code(), Some(0), "{}", stderr_text(&ok));
+    // An explicit token beats the file and is refused.
+    let bad = run_in(home, home, &envs, &["send", "--token", "wrong", "--to", "b@h", "hi"]);
+    assert_eq!(bad.status.code(), Some(1));
+    // The env beats the file as well.
+    let bad = run_in(
+        home,
+        home,
+        &[("CHATTRS_TOKEN", "wrong"), ("CHATTRS_ADDRESS", "a@h")],
+        &["send", "--to", "b@h", "hi"],
+    );
+    assert_eq!(bad.status.code(), Some(1));
+}
+
+#[test]
+fn repo_file_gives_the_project_and_loses_to_env_and_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path();
+    std::fs::create_dir(cwd.join(".git")).unwrap();
+    std::fs::write(cwd.join(".chattrs.toml"), "project = \"repo\"\nlead = \"l@h\"\n").unwrap();
+    let env_out = |envs: &[(&str, &str)], extra: &[&str]| {
+        let mut args = vec!["env", "--as", "w@h"];
+        args.extend(extra);
+        stdout_text(&run_in(cwd, cwd, envs, &args))
+    };
+    let out = env_out(&[], &[]);
+    assert!(out.contains("export CHATTRS_PROJECT='repo'\n"), "{out}");
+    assert!(out.contains("export CHATTRS_LEAD='l@h'\n"), "{out}");
+    let out = env_out(&[("CHATTRS_PROJECT", "fromenv")], &[]);
+    assert!(out.contains("CHATTRS_PROJECT='fromenv'"), "{out}");
+    let out = env_out(&[("CHATTRS_PROJECT", "fromenv")], &["--project", "flag"]);
+    assert!(out.contains("CHATTRS_PROJECT='flag'"), "{out}");
+}
+
+#[test]
+fn a_secret_in_the_repo_file_stops_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(".git")).unwrap();
+    std::fs::write(dir.path().join(".chattrs.toml"), "token = \"x\"\n").unwrap();
+    let out = run_in(dir.path(), dir.path(), &[], &["env", "--as", "w@h"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(stderr_text(&out).contains(".chattrs.toml:1"), "{}", stderr_text(&out));
+}
+
+#[test]
+fn env_output_evals_in_sh_with_a_fresh_session_and_no_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let cwd = dir.path();
+    write_private(&cwd.join("tok"), "sekret\n");
+    write_private(
+        &cwd.join(".config/chattrs/config.toml"),
+        &format!("token_file = \"{}\"\n", cwd.join("tok").display()),
+    );
+    let hostile = [("CHATTRS_TAGS", "it's $(touch pwned) \\\"x")];
+    let first = stdout_text(&run_in(cwd, cwd, &hostile, &["env", "--as", "w@h"]));
+    let second = stdout_text(&run_in(cwd, cwd, &hostile, &["env", "--as", "w@h"]));
+    assert!(!first.contains("sekret") && !first.contains("CHATTRS_TOKEN"), "{first}");
+    let session = |text: &str| {
+        text.lines().find(|l| l.starts_with("export CHATTRS_SESSION=")).unwrap().to_string()
+    };
+    assert_ne!(session(&first), session(&second));
+    let script = format!("eval '{}'; printf '%s|%s|%s' \"$CHATTRS_ADDRESS\" \"$CHATTRS_TAGS\" \"${{CHATTRS_TOKEN-unset}}\"", first.replace('\'', "'\\''"));
+    let sh = Command::new("sh").args(["-c", &script]).current_dir(cwd).output().unwrap();
+    assert_eq!(stdout_text(&sh), "w@h|it's $(touch pwned) \\\"x|unset");
+    assert!(!cwd.join("pwned").exists());
+    let with = stdout_text(&run_in(cwd, cwd, &[], &["env", "--as", "w@h", "--with-token"]));
+    assert!(with.contains("export CHATTRS_TOKEN='sekret'\n"), "{with}");
 }

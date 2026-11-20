@@ -445,27 +445,63 @@ connection count and last activity. A restart of the broker clears it.
   about a second live watch.
 - An observer never registers and is never refused.
 
+### Config files
+
+Two optional files feed the same values as the `CHATTRS_*` variables
+(CLI-6). From lowest to highest precedence:
+
+1. `~/.config/chattrs/config.toml`: `server`, `token_file`, `tags`.
+2. `.chattrs.toml` in the current directory or the nearest parent, up to
+   the first `.git` directory: `project`, `lead`.
+3. Environment variables.
+4. Command-line flags.
+
+Both files hold flat `key = "value"` lines and `#` comments. An unknown
+key is an error that names the file and line.
+
+```toml
+# ~/.config/chattrs/config.toml
+server = "10.0.0.5:4646"
+token_file = "/home/me/.config/chattrs/token"
+```
+
+```toml
+# .chattrs.toml (committed)
+project = "alpha"
+lead = "opus@mac"
+```
+
+The repo file holds no secrets. A `token` or `token_file` key in it is an
+error. `token_file` names a file that holds only the token. On unix, the
+file must have mode 0600 or tighter. The token applies when neither
+`CHATTRS_TOKEN` nor `--token` is set. `eval "$(chattrs env --as <address>)"`
+prints the variables for one session.
+
 ### Start a worker
 
 The lead starts each worker over ssh, in a detached tmux session. The
-worker needs no flags: the env sets everything (CLI-6). First put the
-token in `~/.config/chattrs/env` on the worker host, mode 0600, as
-`export CHATTRS_TOKEN=<token>`.
+worker needs no flags (CLI-6). Put the server and the token file in the
+user config on the worker host (see [Config files](#config-files)), and
+the project and lead in the repo's `.chattrs.toml`. Then one line starts
+the worker:
 
 ```bash
-ssh <host> 'tmux new -d -s worker1 \
-  ". ~/.config/chattrs/env; \
-   export CHATTRS_ADDRESS=worker1@<host> \
-          CHATTRS_SERVER=<broker-ip>:4646 \
-          CHATTRS_PROJECT=<project> \
-          CHATTRS_LEAD=opus@mac \
-          CHATTRS_SESSION=$(uuidgen) \
-          CHATTRS_TAGS=gpu; \
-   mkdir -p ~/.claude/skills/chattrs && \
-     chattrs skill > ~/.claude/skills/chattrs/SKILL.md; \
-   exec claude \"Your address is worker1@<host>. Your lead is opus@mac. \
-Run chattrs watch under the Monitor tool now.\""'
+ssh <host> 'tmux new -d -s w1 '"'"'eval "$(chattrs env --as worker1@<host>)"; exec claude "Your address is worker1@<host>. Run chattrs watch under the Monitor tool now."'"'"''
 ```
+
+On the host itself, this is the same line:
+
+```bash
+tmux new -d -s w1 'eval "$(chattrs env --as worker1@box)"; exec claude "..."'
+```
+
+`chattrs env` prints `export` lines for `CHATTRS_SERVER`,
+`CHATTRS_ADDRESS`, `CHATTRS_PROJECT`, `CHATTRS_LEAD`, `CHATTRS_TAGS` (when
+known), and a new `CHATTRS_SESSION` on every run. It does not print the
+token unless you pass `--with-token`; every command reads the token from
+`token_file` instead. On a systemd host, start tmux with
+`systemd-run --user --scope tmux new -d ...` so the session survives the
+ssh logout.
 
 `CHATTRS_LEAD` and `CHATTRS_SESSION` survive `/clear`; the launch prompt
 does not. `CHATTRS_SESSION` is new for each launch, because the env stays
