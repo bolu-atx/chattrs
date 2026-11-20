@@ -137,7 +137,7 @@ fn edit_agent(
     }
     let mut root = parse_root(original.as_deref(), &path)?;
     if install {
-        install_hooks(&mut root);
+        install_hooks(&mut root, agent);
     } else {
         remove_hooks(&mut root);
     }
@@ -178,7 +178,7 @@ fn group_hooks(group: &Value) -> &[Value] {
 }
 
 /// Add one chattrs group to each event array that lacks one.
-fn install_hooks(root: &mut Map<String, Value>) {
+fn install_hooks(root: &mut Map<String, Value>, agent: Agent) {
     let Some(hooks) = root.entry("hooks").or_insert_with(|| json!({})).as_object_mut() else {
         return;
     };
@@ -191,7 +191,7 @@ fn install_hooks(root: &mut Map<String, Value>) {
         }
         groups.push(json!({"hooks": [{
             "type": "command",
-            "command": format!("{COMMAND_PREFIX}{argument}"),
+            "command": format!("{COMMAND_PREFIX}{argument} --agent {}", agent.name()),
             "timeout": HOOK_TIMEOUT_SECS,
         }]}));
     }
@@ -287,9 +287,9 @@ mod tests {
     #[test]
     fn install_twice_changes_nothing_the_second_time() {
         let mut once = root(FOREIGN);
-        install_hooks(&mut once);
+        install_hooks(&mut once, Agent::Codex);
         let mut twice = once.clone();
-        install_hooks(&mut twice);
+        install_hooks(&mut twice, Agent::Codex);
         assert_eq!(render(&once), render(&twice));
     }
 
@@ -297,7 +297,7 @@ mod tests {
     fn install_then_remove_restores_the_original_text() {
         for original in [FOREIGN, "{}\n"] {
             let mut config = root(original);
-            install_hooks(&mut config);
+            install_hooks(&mut config, Agent::Claude);
             assert_ne!(render(&config), original);
             remove_hooks(&mut config);
             assert_eq!(render(&config), original);
@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn install_keeps_foreign_hooks_and_key_order() {
         let mut config = root(FOREIGN);
-        install_hooks(&mut config);
+        install_hooks(&mut config, Agent::Claude);
         let keys: Vec<_> = config.keys().cloned().collect();
         assert_eq!(keys, ["model", "hooks", "theme"]);
         assert_eq!(config["hooks"]["Stop"].as_array().unwrap().len(), 2);

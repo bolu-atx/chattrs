@@ -27,18 +27,23 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
         return;
     };
     let input = read_input();
-    if event == HookEvent::SessionStart {
-        print_json(&session_start_output(address, &input));
-        return;
-    }
-    if event == HookEvent::Stop && input["stop_hook_active"].as_bool() == Some(true) {
-        return;
-    }
     let endpoint = Endpoint {
         server: client.server.clone(),
         address: address.to_string(),
         token: client.token.clone(),
     };
+    if event == HookEvent::Stop && input["stop_hook_active"].as_bool() == Some(true) {
+        // This stop follows a block, so the agent is now really done.
+        let _ = tokio::time::timeout(BUDGET, Client::reconnect_with(&endpoint, "idle")).await;
+        return;
+    }
+    if event == HookEvent::SessionStart {
+        // The context prints even when the broker cannot be reached.
+        let _ = tokio::time::timeout(BUDGET, Client::reconnect_with(&endpoint, "idle")).await;
+        let codex = client.agent.as_deref() == Some("codex");
+        print_json(&session_start_output(address, codex));
+        return;
+    }
     // A timeout drops the exchange; unacked messages stay unread.
     let _ = tokio::time::timeout(BUDGET, deliver(event, &endpoint)).await;
 }
@@ -52,10 +57,25 @@ fn read_input() -> Value {
     serde_json::from_str(&text).unwrap_or(Value::Null)
 }
 
+/// The state a hook sets in its own `hello`: a prompt starts work and a
+/// stop ends it. A tool call changes nothing.
+fn hello_state(event: HookEvent) -> Option<&'static str> {
+    match event {
+        HookEvent::UserPromptSubmit => Some("working"),
+        HookEvent::Stop => Some("idle"),
+        HookEvent::PostToolUse | HookEvent::SessionStart => None,
+    }
+}
+
 /// Fetch unread messages, print them as hook output, flush, and only then
-/// ack exactly those ids. Any failure ends quietly.
+/// ack exactly those ids. Any failure ends quietly. A `stop` that blocks
+/// to deliver puts the agent back to working, because the agent goes on.
 async fn deliver(event: HookEvent, endpoint: &Endpoint) {
-    let Ok(mut client) = Client::reconnect(endpoint).await else {
+    let opened = match hello_state(event) {
+        Some(state) => Client::reconnect_with(endpoint, state).await,
+        None => Client::reconnect(endpoint).await,
+    };
+    let Ok(mut client) = opened else {
         return;
     };
     let Ok(messages) = client.unread().await else {
@@ -69,6 +89,9 @@ async fn deliver(event: HookEvent, endpoint: &Endpoint) {
     }
     let ids: Vec<u64> = messages.iter().map(|message| message.id).collect();
     let _ = client.ack(&ids).await;
+    if event == HookEvent::Stop {
+        let _ = Client::reconnect_with(endpoint, "working").await;
+    }
 }
 
 /// Print one JSON object and flush. Returns false when stdout failed.
@@ -102,12 +125,11 @@ fn context_output(event_name: &str, text: &str) -> Value {
 }
 
 /// The `SessionStart` context: the address, the skill, and, for Claude
-/// Code only, the Monitor reminder. Codex sends `turn_id`; Claude Code does
-/// not. Codex has no Monitor tool.
-fn session_start_output(address: &str, input: &Value) -> Value {
+/// Code only, the Monitor reminder. Codex has no Monitor tool.
+fn session_start_output(address: &str, codex: bool) -> Value {
     let mut text =
         format!("Your chattrs address is {address}. Load the chattrs skill: run `chattrs skill`.");
-    if input.get("turn_id").is_none() {
+    if !codex {
         text.push_str(" Run `chattrs watch` under the Monitor tool to wake on messages.");
     }
     context_output("SessionStart", &text)
@@ -148,10 +170,10 @@ mod tests {
 
     #[test]
     fn session_start_names_monitor_for_claude_and_not_codex() {
-        let claude = session_start_output("c@h", &json!({"hook_event_name": "SessionStart"}));
+        let claude = session_start_output("c@h", false);
         let text = claude["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(text.contains("c@h") && text.contains("Monitor"));
-        let codex = session_start_output("c@h", &json!({"turn_id": "t", "model": "m"}));
+        let codex = session_start_output("c@h", true);
         let text = codex["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(text.contains("chattrs skill") && !text.contains("Monitor"));
     }

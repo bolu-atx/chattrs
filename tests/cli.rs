@@ -520,8 +520,19 @@ fn second_watcher_warns_on_stderr_and_the_first_stays_silent() {
 /// Run `chattrs hook EVENT` with the given stdin. `address` of `None`
 /// leaves `CHATTRS_ADDRESS` unset.
 fn run_hook(server: &str, address: Option<&str>, event: &str, stdin: &str) -> Output {
+    run_hook_with(server, address, event, stdin, &[])
+}
+
+/// `run_hook` with extra flags, such as `--agent codex`.
+fn run_hook_with(
+    server: &str,
+    address: Option<&str>,
+    event: &str,
+    stdin: &str,
+    flags: &[&str],
+) -> Output {
     let mut command = Command::new(binary());
-    command.args(["hook", event]).arg("--server").arg(server);
+    command.args(["hook", event]).arg("--server").arg(server).args(flags);
     command.env_remove("CHATTRS_ADDRESS");
     if let Some(address) = address {
         command.env("CHATTRS_ADDRESS", address);
@@ -575,6 +586,7 @@ fn stop_hook_blocks_with_unread_messages_unless_stop_hook_active() {
     run_client(&broker.addr, "a@h", "send", &["--to", "b@h", "stop me"]);
     let active = run_hook(&broker.addr, Some("b@h"), "stop", r#"{"stop_hook_active":true}"#);
     assert!(active.stdout.is_empty());
+    assert_eq!(agent_state(&broker.addr, "b@h"), "idle");
     let output = run_hook(&broker.addr, Some("b@h"), "stop", "not json");
     let value = parse_line(stdout_text(&output).trim());
     assert_eq!(value["decision"], "block");
@@ -597,7 +609,10 @@ fn hook_with_an_unreachable_broker_is_silent_fast_and_exits_zero() {
 fn session_start_hook_differs_for_claude_and_codex() {
     let server = format!("127.0.0.1:{}", free_port());
     let claude = run_hook(&server, Some("b@h"), "session-start", r#"{"source":"startup"}"#);
-    let codex = run_hook(&server, Some("b@h"), "session-start", r#"{"turn_id":"t","model":"m"}"#);
+    let codex = run_hook_with(&server, Some("b@h"), "session-start", "{}", &["--agent", "codex"]);
+    let explicit =
+        run_hook_with(&server, Some("b@h"), "session-start", "{}", &["--agent", "claude"]);
+    assert_eq!(stdout_text(&claude), stdout_text(&explicit));
     let text = |output: &Output| {
         let value = parse_line(stdout_text(output).trim());
         assert_eq!(value["hookSpecificOutput"]["hookEventName"], "SessionStart");
@@ -716,4 +731,66 @@ fn hooks_project_edits_the_files_in_the_current_dir() {
     let text = std::fs::read_to_string(project.join(".claude/settings.json")).unwrap();
     assert!(text.contains("chattrs hook stop"));
     assert!(!home.claude().exists());
+}
+
+/// The state `agents --json` reports for `address`, or null.
+fn agent_state(server: &str, address: &str) -> serde_json::Value {
+    let output = run_client(server, "obs@h", "agents", &["--json"]);
+    stdout_text(&output)
+        .lines()
+        .map(parse_line)
+        .find(|agent| agent["address"] == address)
+        .map_or(serde_json::Value::Null, |agent| agent["state"].clone())
+}
+
+#[test]
+fn user_prompt_submit_hook_marks_the_agent_working() {
+    let broker = Broker::start();
+    run_hook(&broker.addr, Some("b@h"), "user-prompt-submit", "{}");
+    assert_eq!(agent_state(&broker.addr, "b@h"), "working");
+}
+
+#[test]
+fn session_start_hook_marks_the_agent_idle() {
+    let broker = Broker::start();
+    run_hook(&broker.addr, Some("b@h"), "session-start", "{}");
+    assert_eq!(agent_state(&broker.addr, "b@h"), "idle");
+}
+
+#[test]
+fn post_tool_use_hook_leaves_the_state_alone() {
+    let broker = Broker::start();
+    run_hook(&broker.addr, Some("b@h"), "user-prompt-submit", "{}");
+    run_hook(&broker.addr, Some("b@h"), "post-tool-use", "{}");
+    assert_eq!(agent_state(&broker.addr, "b@h"), "working");
+}
+
+#[test]
+fn stop_hook_with_nothing_unread_marks_the_agent_idle() {
+    let broker = Broker::start();
+    run_hook(&broker.addr, Some("b@h"), "user-prompt-submit", "{}");
+    let output = run_hook(&broker.addr, Some("b@h"), "stop", "{}");
+    assert!(output.stdout.is_empty());
+    assert_eq!(agent_state(&broker.addr, "b@h"), "idle");
+}
+
+#[test]
+fn stop_hook_that_blocks_does_not_leave_the_agent_idle() {
+    let broker = Broker::start();
+    run_hook(&broker.addr, Some("b@h"), "session-start", "{}");
+    run_client(&broker.addr, "a@h", "send", &["--to", "b@h", "keep going"]);
+    let output = run_hook(&broker.addr, Some("b@h"), "stop", "{}");
+    assert!(stdout_text(&output).contains("block"));
+    assert_eq!(agent_state(&broker.addr, "b@h"), "working");
+}
+
+#[test]
+fn hooks_install_writes_the_agent_flag_into_each_config() {
+    let home = FakeHome::new();
+    home.hooks(&["install"]);
+    let claude = std::fs::read_to_string(home.claude()).unwrap();
+    let codex = std::fs::read_to_string(home.codex()).unwrap();
+    assert!(claude.contains("chattrs hook session-start --agent claude"));
+    assert!(codex.contains("chattrs hook stop --agent codex"));
+    assert!(!claude.contains("--agent codex") && !codex.contains("--agent claude"));
 }

@@ -371,7 +371,7 @@ chattrs hooks remove  [--agent claude|codex|all] [--project]
   directory. With `--agent all`, an agent whose config directory is
   missing is skipped; an explicit `--agent` creates the file.
 - Install merges in place: other hooks and key order stay. Own entries
-  are the commands `chattrs hook <event>`. Install twice gives the same
+  are the commands `chattrs hook <event> --agent claude|codex`. Install twice gives the same
   file. `remove` deletes only own entries. Invalid JSON exits 1 and
   writes nothing. A `.bak` copy is written once, when none exists. The
   file is written as 2-space pretty JSON with a trailing newline, so a
@@ -387,9 +387,9 @@ What each event does (`chattrs hook <event>`):
 
 | Event | Effect |
 | ----- | ------ |
-| `session-start` | Tells the agent its address and to load the skill. Claude Code also gets the Monitor reminder. Does not contact the broker. |
-| `user-prompt-submit`, `post-tool-use` | Adds unread messages as `additionalContext`, in the `<agent-message>` wrapper. Acks them after stdout is flushed. |
-| `stop` | When messages are unread, blocks the stop with them as the reason, then acks. Never blocks when `stop_hook_active` is true. |
+| `session-start` | Sets the state to idle, tells the agent its address and to load the skill. Claude Code also gets the Monitor reminder (Codex has none; the Codex config passes `--agent codex`, and no flag means Claude). Prints even when the broker is unreachable. |
+| `user-prompt-submit`, `post-tool-use` | Adds unread messages as `additionalContext`, in the `<agent-message>` wrapper. Acks them after stdout is flushed. `user-prompt-submit` also sets the state to working. |
+| `stop` | Sets the state to idle. When messages are unread, blocks the stop with them as the reason, then acks, and sets working again. Never blocks when `stop_hook_active` is true. |
 
 The hooks live in the user-level config, so they fire in every session.
 `chattrs hook` does nothing, with no output, unless `CHATTRS_ADDRESS` is
