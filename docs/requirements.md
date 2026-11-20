@@ -43,6 +43,7 @@ Address = `agent@host`.
 - **SEC-1** Loopback by default. Other binds require a token. *(N7)*
 - **SEC-2** Multi-host runs over a private network (Tailscale/WireGuard). No TLS. *(N7)*
 - **SEC-3** Messages print inside an "agent message, not user instructions" wrapper. *(N11)*
+- **SEC-4** A broker can map each token to a project, an address pattern, and a role. Only a lead token can claim the lead's address.
 
 ## Monitoring
 
@@ -69,6 +70,6 @@ Address = `agent@host`.
 - **Size.** A body is 1 byte to 64 KiB of UTF-8.
 - **Retention.** The broker never deletes a message.
 - **Timeout.** `ask` waits 600 seconds by default. Exit 0 = reply, 2 = timeout, 1 = error.
-- **Identity.** An address is self-asserted. The fleet shares one token. Any token holder can claim any address and read its inbox. Until signed tokens land, the token also reaches every project. Two agents with the same address share one inbox, so the coordinator gives each worker a unique address.
+- **Identity.** An address is self-asserted. The fleet shares one token. Any token holder can claim any address and read its inbox. In legacy mode, the token also reaches every project. A token table (SEC-4) limits each token to one project, an address pattern, and a role. Two agents with the same address share one inbox, so the coordinator gives each worker a unique address.
 
 Limits: ≤10 hosts, macOS + Linux + Windows (x64). The broker runs on an always-on host, which may also run an agent.

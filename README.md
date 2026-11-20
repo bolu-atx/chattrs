@@ -137,6 +137,8 @@ Common flags:
   would share one identity.
 - `--token TOKEN` — fleet token (`CHATTRS_TOKEN`). `serve` needs it for a
   non-loopback bind; every other command sends it in `hello`.
+- `serve --tokens PATH` — token table file (`CHATTRS_TOKENS`). It replaces
+  the shared token. See [Token table](#token-table).
 - `--json` — print JSON lines; every line carries a `type`, and
   `message` lines also carry `"untrusted":true`.
 - `serve --db PATH` — SQLite path (`CHATTRS_DB`, default
@@ -309,11 +311,90 @@ A loopback server that is down gets a second, auto-started broker
 (CLI-11), and that agent then talks to a different swarm.
 
 Limits: there is no TLS, so the token and the messages travel as
-clear text inside the private network. One token covers the whole
-fleet. Addresses are self-asserted: the token proves fleet
-membership, not which address is yours. Until signed tokens land, the
-shared `CHATTRS_TOKEN` reaches every project: a project keeps agents
-apart by accident, not by access control.
+clear text inside the private network. With the shared `CHATTRS_TOKEN`
+(legacy mode), one token covers the whole fleet. Addresses are
+self-asserted: the token proves fleet membership, not which address is
+yours. The shared token reaches every project: a project keeps agents
+apart by accident, not by access control. To bind each token to one
+project, address pattern, and role, use a token table.
+
+### Token table
+
+Meets SEC-4. A token table gives each agent its own token. The broker
+reads it from `serve --tokens <path>` or `CHATTRS_TOKENS`. It is a TOML
+file, and the broker refuses to start when its mode is wider than 0600
+(unix; the check is skipped on Windows). Make a token with
+`openssl rand -hex 32`.
+
+```toml
+# The lead of project alpha. Only a lead token can claim this address.
+[[token]]
+token = "<64 hex characters>"
+project = "alpha"
+addr = "lead@box1"
+role = "lead"
+
+# Any worker on box1, in alpha only.
+[[token]]
+token = "<64 hex characters>"
+project = "alpha"
+addr = "*@box1"
+role = "agent"
+
+# A read-only viewer that sees every project.
+[[token]]
+token = "<64 hex characters>"
+project = "*"
+addr = "tray@mac"
+role = "observer"
+```
+
+The parser accepts a small subset of TOML, with no extra crate:
+
+- Blank lines, `#` comment lines, and a trailing `# comment` after a
+  header or a value.
+- A `[[token]]` header starts an entry.
+- `key = "value"` lines inside an entry. The keys are `token`,
+  `project`, `addr`, and `role`. Each is required and appears once. A
+  value is a double-quoted string with no escape sequences.
+- Nothing else. Any other line, an unknown key, a bad value, or a repeated
+  token stops the broker with an error that names the line.
+
+Fields:
+
+- `project` is a project name, or `"*"`. `"*"` is only valid for
+  `observer`.
+- `addr` is an exact address, or a pattern where `*` matches any run of
+  characters, such as `*@box1`.
+- `role` is `lead`, `agent`, or `observer`.
+
+On `hello`, the broker compares the token with every entry in constant
+time, then checks the hello:
+
+- No entry matches: `bad_token`, and the broker closes the connection.
+- The hello project differs from the entry project (and the entry is not
+  `"*"`), the hello address does not match `addr`, or a role rule fails:
+  `forbidden`.
+- Lead rule: an address that a `lead` entry names exactly, in that
+  project, can only be claimed by a `lead` entry.
+- Observer rule: an `observer` entry works only with an observer hello
+  (`"observer":true`). An `agent` entry cannot send an observer hello.
+  An observer is read-only (MON-1).
+
+The broker stamps each message with the role of the sender's entry, as
+`from_role`. The wrapper prints it as `from-role="lead"`. A message with
+no role has no attribute.
+
+Rules for the file:
+
+- With a tokens file, `CHATTRS_TOKEN` on the broker is ignored and a
+  client that sends the shared token gets `bad_token`.
+- Without a tokens file, `CHATTRS_TOKEN` works as before: one shared
+  token, full access to every project, and no `from_role`.
+- To revoke a token, delete its `[[token]]` block and restart the broker.
+  The broker reads the file once, at start.
+- Keep the file out of the repo and out of any unit file. Clients still
+  send their own token with `CHATTRS_TOKEN` or `--token`.
 
 ### Projects
 
@@ -604,8 +685,14 @@ stays CLI only, with no TUI or GUI. The swarm needs nothing from any viewer.
   duplicates by id. Use `agents` for presence, tags, and state. An observer
   is read-only.
 - Messages and agent rows carry `project`. A viewer that observes `*`
-  groups by it. Until signed tokens land, the shared token reaches every
-  project.
+  groups by it. In legacy mode, the shared token reaches every project.
+  With a token table, an observer sees every project only when its entry
+  has `project = "*"`.
+- A message from a broker with a token table also carries `from_role`
+  (`lead` or `agent`), the role of the sender's token. It is
+  absent from a broker without a table and from rows stored before the
+  table. A viewer can show it next to `from`, and must not treat it as
+  proof beyond what the token table proves.
 - An interactive viewer, a GUI or TUI that sends or replies, connects as a
   normal agent with its own address, such as `operator@mac`, and uses the
   normal frames.
