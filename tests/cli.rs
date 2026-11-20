@@ -1113,3 +1113,96 @@ fn first_command_retries_when_a_starting_broker_drops_the_connection() {
     let stopped = stop.output().expect("stop the broker");
     assert_eq!(stopped.status.code(), Some(0), "stop exits zero: {stopped:?}");
 }
+
+/// Stops the broker that autostart left under a fake home, even when an
+/// assert fails first.
+struct StopOnDrop {
+    home: PathBuf,
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        let mut stop = Command::new(binary());
+        stop.arg("stop");
+        clean_home_env(&mut stop, &self.home);
+        stop.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        let _ = stop.status();
+    }
+}
+
+/// Point every path the client reads at `home` and clear the overrides.
+fn clean_home_env(command: &mut Command, home: &std::path::Path) {
+    clear_env(command);
+    command
+        .env("HOME", home)
+        .env("CODEX_HOME", home.join(".codex"))
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("CHATTRS_ADDRESS")
+        .current_dir(home);
+}
+
+/// Parse `export NAME='value'` lines, undoing the `'\''` escape.
+fn parse_exports(text: &str) -> std::collections::HashMap<String, String> {
+    text.lines()
+        .filter_map(|line| line.strip_prefix("export ")?.split_once('='))
+        .map(|(name, value)| {
+            let inner =
+                value.strip_prefix('\'').and_then(|v| v.strip_suffix('\'')).unwrap_or(value);
+            (name.to_string(), inner.replace("'\\''", "'"))
+        })
+        .collect()
+}
+
+#[test]
+fn readme_solo_path_works_in_a_clean_home() {
+    // The README's solo steps on a brand-new machine: no data directory, no
+    // config. The first command that needs a broker must start one.
+    let started = Instant::now();
+    let dir = tempfile::TempDir::new().expect("make a temp home");
+    let home = dir.path().to_path_buf();
+    let _stop = StopOnDrop { home: home.clone() };
+    let server = format!("127.0.0.1:{}", free_port());
+    std::fs::create_dir_all(home.join(".claude")).expect("claude dir");
+    std::fs::create_dir_all(home.join(".codex")).expect("codex dir");
+    let run = |args: &[&str], envs: &[(&str, &str)]| -> Output {
+        let mut command = Command::new(binary());
+        command.args(args);
+        clean_home_env(&mut command, &home);
+        command.envs(envs.iter().copied());
+        command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command.output().expect("run chattrs")
+    };
+
+    let hooks = run(&["hooks", "install"], &[]);
+    assert_eq!(hooks.status.code(), Some(0), "hooks install: {hooks:?}");
+    for file in [".claude/settings.json", ".codex/hooks.json"] {
+        let text = std::fs::read_to_string(home.join(file)).expect("config file written");
+        assert!(text.contains("chattrs hook"), "{file} has the hook: {text}");
+    }
+
+    let skill = run(&["skill"], &[]);
+    assert_eq!(skill.status.code(), Some(0), "skill: {skill:?}");
+    assert!(!skill.stdout.is_empty(), "the skill text is not empty");
+    let skill_file = home.join(".claude/skills/chattrs/SKILL.md");
+    std::fs::create_dir_all(skill_file.parent().expect("skill dir")).expect("skill dir");
+    std::fs::write(&skill_file, &skill.stdout).expect("write the skill");
+
+    let env = run(&["env", "--as", "w1@mac", "--lead", "lead@mac", "--server", &server], &[]);
+    assert_eq!(env.status.code(), Some(0), "env: {env:?}");
+    let exports = parse_exports(&stdout_text(&env));
+    for name in ["CHATTRS_ADDRESS", "CHATTRS_SESSION", "CHATTRS_LEAD"] {
+        assert!(exports.contains_key(name), "{name} is exported: {exports:?}");
+    }
+    let worker: Vec<(&str, &str)> =
+        exports.iter().map(|(name, value)| (name.as_str(), value.as_str())).collect();
+
+    let lead = [("CHATTRS_ADDRESS", "lead@mac"), ("CHATTRS_SERVER", server.as_str())];
+    let sent = run(&["send", "--to", "w1@mac", "hello"], &lead);
+    assert_eq!(sent.status.code(), Some(0), "send autostarts a broker: {sent:?}");
+    let inbox = run(&["inbox"], &worker);
+    assert_eq!(inbox.status.code(), Some(0), "inbox: {inbox:?}");
+    assert!(stdout_text(&inbox).contains("hello"), "the worker sees the message: {inbox:?}");
+
+    assert!(started.elapsed() < Duration::from_secs(10), "too slow: {:?}", started.elapsed());
+}
