@@ -150,6 +150,8 @@ pub(crate) fn set_keepalive(stream: &TcpStream) {
 /// watches, the highest id sent on it, and the reply ids it waits for.
 #[derive(Default)]
 struct ConnState {
+    /// The remote `ip:port`, for the rejected-hello log line.
+    peer: String,
     address: Option<String>,
     /// The effective project after `hello`: a name, or `*` for an
     /// observer that sees every project.
@@ -403,10 +405,11 @@ impl Broker {
     }
 
     async fn handle(self: Arc<Self>, stream: TcpStream) {
+        let peer = stream.peer_addr().map_or_else(|_| "unknown".to_string(), |a| a.to_string());
         let (read_half, mut writer) = stream.into_split();
         let (line_sender, mut lines) = mpsc::channel(1);
         spawn_reader(read_half, line_sender);
-        let mut conn = ConnState::default();
+        let mut conn = ConnState { peer, ..ConnState::default() };
         loop {
             let event = tokio::select! {
                 item = lines.recv() => Event::Line(item),
@@ -462,9 +465,15 @@ impl Broker {
         if conn.address.is_none() {
             return match frame {
                 Inbound::Hello { v, address, token, tags, observer, state, project, session } => {
+                    let who = (project.clone(), address.clone());
                     let hello =
                         Hello { v, address, token, tags, observer, state, project, session };
-                    self.on_hello(conn, hello).await
+                    let result = self.on_hello(conn, hello).await;
+                    if let Err(error) = &result {
+                        let project = who.0.as_deref().unwrap_or(model::DEFAULT_PROJECT);
+                        eprintln!("{}", rejected_line(&conn.peer, project, &who.1, error));
+                    }
+                    result
                 }
                 _ => Err(WireError::new("hello_required", "hello must be the first frame")),
             };
@@ -804,6 +813,33 @@ impl Broker {
         };
         Ok(vec![Outbound::Log { messages }])
     }
+}
+
+/// Cap a client-supplied value at 128 bytes on a char boundary. The
+/// caller prints it with `{:?}`, which quotes it and escapes quotes,
+/// backslashes, and control characters, so it cannot forge log fields.
+fn log_cap(value: &str) -> String {
+    const MAX: usize = 128;
+    if value.len() <= MAX {
+        return value.to_string();
+    }
+    let mut end = MAX;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &value[..end])
+}
+
+/// The one stderr line for a rejected hello (SEC-5). It never holds the
+/// token. The reason messages are fixed text with no secret.
+fn rejected_line(peer: &str, project: &str, address: &str, error: &WireError) -> String {
+    format!(
+        "chattrs: rejected hello from {peer} project={:?} address={:?} reason={} ({})",
+        log_cap(project),
+        log_cap(address),
+        error.code,
+        error.message
+    )
 }
 
 async fn write_frame(writer: &mut OwnedWriteHalf, frame: &Outbound) {

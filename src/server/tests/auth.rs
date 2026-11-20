@@ -2,7 +2,7 @@
 
 use super::helpers::*;
 use crate::client;
-use crate::server::{check_listen, serve};
+use crate::server::{check_listen, rejected_line, serve, WireError};
 use tempfile::TempDir;
 
 #[tokio::test]
@@ -70,4 +70,16 @@ async fn hello_with_right_token_is_welcomed() {
     assert_eq!(messages[0].id, id);
     assert_eq!(messages[0].body, "hi");
     handle.abort();
+}
+
+#[test]
+fn rejected_line_quotes_and_escapes_client_values_and_caps_length() {
+    let error = WireError::new("bad_token", "token is missing or incorrect");
+    let line = rejected_line("1.2.3.4:5", "p\nq", "a\r\nchattrs: fake@h\u{1b}[0m", &error);
+    assert_eq!(line.lines().count(), 1, "{line:?}");
+    assert!(!line.contains('\u{1b}') && line.contains("project=\"p\\nq\""), "{line:?}");
+    let forged = rejected_line("1.2.3.4:5", "alpha", "x\" reason=bad_token", &error);
+    assert!(forged.contains("address=\"x\\\" reason=bad_token\" reason=bad_token ("), "{forged}");
+    let long = rejected_line("1.2.3.4:5", "p", &"a".repeat(500), &error);
+    assert!(long.len() < 300 && long.contains("...\""), "{long}");
 }
