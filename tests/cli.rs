@@ -732,6 +732,40 @@ fn hook_reads_the_repo_config_from_the_hook_cwd_not_the_process_cwd() {
 }
 
 #[test]
+fn hook_takes_the_lead_from_the_hook_cwd_config() {
+    let process_dir = tempfile::tempdir().unwrap();
+    let hook_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        process_dir.path().join(".chattrs.toml"),
+        "project = \"procproj\"\nlead = \"plead@m\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        hook_dir.path().join(".chattrs.toml"),
+        "project = \"hookproj\"\nlead = \"hlead@m\"\n",
+    )
+    .unwrap();
+    let text = session_context_in(process_dir.path(), hook_dir.path());
+    assert!(text.contains("Your lead is hlead@m."), "{text}");
+    assert!(!text.contains("plead@m"), "{text}");
+}
+
+#[test]
+fn hook_has_no_lead_when_the_hook_cwd_config_sets_none() {
+    let process_dir = tempfile::tempdir().unwrap();
+    let hook_dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        process_dir.path().join(".chattrs.toml"),
+        "project = \"procproj\"\nlead = \"plead@m\"\n",
+    )
+    .unwrap();
+    std::fs::write(hook_dir.path().join(".chattrs.toml"), "project = \"hookproj\"\n").unwrap();
+    let text = session_context_in(process_dir.path(), hook_dir.path());
+    assert!(!text.contains("plead@m"), "{text}");
+    assert!(!text.contains("Your lead"), "{text}");
+}
+
+#[test]
 fn hook_derives_the_project_from_git_in_the_hook_cwd() {
     let process_dir = tempfile::tempdir().unwrap();
     std::fs::write(process_dir.path().join(".chattrs.toml"), "project = \"procproj\"\n").unwrap();

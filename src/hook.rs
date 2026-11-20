@@ -42,9 +42,10 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
     let input = read_input();
     // The project resolves from where the agent works, not from where the
     // hook command started.
+    let mut lead = client::env_lead();
     if let Some(cwd) = input["cwd"].as_str().filter(|cwd| !cwd.is_empty()) {
         if std::env::set_current_dir(cwd).is_ok() {
-            resolve_project_from(std::path::Path::new(cwd));
+            lead = resolve_from(std::path::Path::new(cwd));
         }
     }
     let mut trace = Trace::new(event, input.clone());
@@ -67,7 +68,7 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
         let brief = Brief {
             address,
             project: Some(crate::project::current().0.clone()),
-            lead: client::env_lead(),
+            lead,
             codex: client.agent.as_deref() == Some("codex"),
         };
         print_json(&session_start_output(&brief, &history));
@@ -78,22 +79,30 @@ pub async fn run(event: HookEvent, client: &ClientArgs) {
     trace.write();
 }
 
-/// Resolve the project from the session `cwd`: its `.chattrs.toml` and its
-/// git repo. The config that `main` exported came from the process cwd, so
-/// it must not win over the one found here. An explicit `CHATTRS_PROJECT`
-/// still wins. A bad config file keeps the project that `main` exported.
-fn resolve_project_from(cwd: &std::path::Path) {
+/// Resolve the project and the lead from the session `cwd`: its
+/// `.chattrs.toml` and, for the project, its git repo. The config that `main`
+/// exported came from the process cwd, so it must not win over the one found
+/// here. An explicit `CHATTRS_PROJECT` or `CHATTRS_LEAD` still wins. A bad
+/// config file keeps what `main` exported. Sets the project and returns the
+/// lead.
+fn resolve_from(cwd: &std::path::Path) -> Option<String> {
     let (explicit, applied) = crate::project::split_applied(std::env::var("CHATTRS_PROJECT").ok());
+    let env_lead = client::env_lead();
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let config = match crate::config::load_from(home.as_deref(), cwd) {
-        Ok(config) => config.project,
-        Err(_) => applied,
+    let (project, lead) = match crate::config::load_from(home.as_deref(), cwd) {
+        Ok(config) => {
+            let explicit_lead = env_lead.filter(|_| !crate::config::lead_from_config());
+            let config_lead = config.lead.map(|lead| lead.trim().to_string());
+            (config.project, explicit_lead.or(config_lead.filter(|lead| !lead.is_empty())))
+        }
+        Err(_) => (applied, env_lead),
     };
     crate::project::set_current(crate::project::resolve(
         explicit.as_deref(),
-        config.as_deref(),
+        project.as_deref(),
         cwd,
     ));
+    lead
 }
 
 /// One debug record per hook run, written when `CHATTRS_HOOK_DEBUG` names a

@@ -12,6 +12,7 @@
 //! flat subset of TOML that `tokens::parse_pair` reads.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::tokens::{glob_matches, parse_pair};
 
@@ -249,8 +250,10 @@ impl Config {
     /// Call it once, before parsing arguments.
     pub fn apply_env(&self) {
         for (name, value) in self.missing_env(|name| std::env::var_os(name).is_some()) {
-            if name == "CHATTRS_PROJECT" {
-                PROJECT_FROM_CONFIG.store(true, std::sync::atomic::Ordering::Relaxed);
+            match name {
+                "CHATTRS_PROJECT" => PROJECT_FROM_CONFIG.store(true, Ordering::Relaxed),
+                "CHATTRS_LEAD" => LEAD_FROM_CONFIG.store(true, Ordering::Relaxed),
+                _ => {}
             }
             std::env::set_var(name, value);
         }
@@ -258,12 +261,19 @@ impl Config {
 }
 
 /// Set when `apply_env` exported the config `project` as `CHATTRS_PROJECT`.
-static PROJECT_FROM_CONFIG: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static PROJECT_FROM_CONFIG: AtomicBool = AtomicBool::new(false);
+
+/// Set when `apply_env` exported the config `lead` as `CHATTRS_LEAD`.
+static LEAD_FROM_CONFIG: AtomicBool = AtomicBool::new(false);
 
 /// Whether `CHATTRS_PROJECT` holds the config project and not an explicit one.
 pub fn project_from_config() -> bool {
-    PROJECT_FROM_CONFIG.load(std::sync::atomic::Ordering::Relaxed)
+    PROJECT_FROM_CONFIG.load(Ordering::Relaxed)
+}
+
+/// Whether `CHATTRS_LEAD` holds the config lead and not an explicit one.
+pub fn lead_from_config() -> bool {
+    LEAD_FROM_CONFIG.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]
