@@ -59,8 +59,13 @@ struct AgentsSection: View {
                                 HStack {
                                     Text(a.address).font(.system(.caption, design: .monospaced))
                                     Spacer()
-                                    Text(a.lastSeen.map { ageText(lastSeenMs: $0, now: ctx.date) } ?? "?")
-                                        .font(.caption).foregroundStyle(.secondary)
+                                    if a.online == true {
+                                        Circle().fill(.green).frame(width: 7, height: 7)
+                                        Text("online").font(.caption).foregroundStyle(.secondary)
+                                    } else {
+                                        Text(a.lastSeen.map { ageText(lastSeenMs: $0, now: ctx.date) } ?? "?")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
                                 }
                             }
                         }
