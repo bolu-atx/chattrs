@@ -16,17 +16,17 @@ Install the published binary on every host, never a source build:
 
 `chattrs --version` must match on every host.
 
-On the broker host, find its tailnet IP (`tailscale ip -4`), store
-the token, and keep a broker running:
+Multiple hosts need a tailnet. Use a plain LAN only on a trusted home
+network. One broker serves every project; a second swarm sets a new
+`CHATTRS_PROJECT`, not a second broker.
 
-```bash
-printf 'CHATTRS_TOKEN=%s\n' "$(openssl rand -hex 32)" > ~/.config/chattrs/env
-chmod 600 ~/.config/chattrs/env
-```
+On the broker host, find its tailnet IP (`tailscale ip -4`). Write a
+tokens file at mode 0600, one `[[token]]` per host (`openssl rand -hex 32`;
+fields `token`, `project`, `addr`, `role`). Put the lead token only on the
+lead's host. See the README "Token table".
 
-A `systemd --user` unit with `EnvironmentFile` pointing at that env
-file, `ExecStart` at the installed binary with
-`serve --listen <tailscale-ip>:4646 --db <path>`, then:
+Run a `systemd --user` unit with `ExecStart` at the installed binary and
+`serve --listen <tailscale-ip>:4646 --db <path> --tokens <tokens-file>`:
 
 ```bash
 systemctl --user daemon-reload
@@ -34,26 +34,27 @@ systemctl --user enable --now chattrs
 loginctl enable-linger $USER  # survive logout
 ```
 
-On every client host:
-
-```bash
-export CHATTRS_SERVER=<tailscale-ip>:4646
-export CHATTRS_TOKEN=<token>
-export CHATTRS_ADDRESS=<agent>@<host>
-```
+On every client host, set `server` and `token_file` in
+`~/.config/chattrs/config.toml`. Set the project and lead in the repo's
+`.chattrs.toml`. Never put `CHATTRS_ADDRESS`, `CHATTRS_SESSION`,
+`CHATTRS_LEAD`, or `CHATTRS_PROJECT` in a shell rc file.
 
 Verify both directions: `send` from A, `inbox` on B, `reply`
 from B, `inbox` on A. `chattrs agents` lists who connected.
 
-Launch each worker with its own address and its lead's address in
-the prompt, plus the skill: "Your address is worker1@mac. Your lead
-is opus@mac." The prompt comes from the user or the lead, so the
-worker trusts it. Put `$(chattrs skill)` in the same prompt.
+Launch each worker in tmux with its own address and its lead:
+
+```bash
+ssh box 'systemd-run --user --scope tmux new -d -s w1 '"'"'eval "$(chattrs env --as worker1@box --lead opus@mac)"; exec claude "Your address is worker1@box. Your lead is opus@mac. Run chattrs watch under the Monitor tool now."'"'"''
+```
+
+The prompt comes from the user or the lead, so the worker trusts it. Put
+`$(chattrs skill)` in the same prompt. One address has one live session.
 
 One host needs nothing: the first loopback command starts a broker
 on demand, and `chattrs stop` ends it. A remote server is never
 auto-started.
 
 Limits: no TLS inside the tailnet, so bind the Tailscale IP only.
-One token covers the fleet. Addresses are self-asserted: the token
-proves membership, not which address is yours.
+Without a token table, one shared token covers the fleet and addresses
+are self-asserted.

@@ -42,6 +42,9 @@ export CHATTRS_ADDRESS=claude@box1
 chattrs send --to muse@mac "anyone know the coverage numbers?"
 ```
 
+(This `export` is for a quick try in one shell. For real sessions, set
+the address only in the launch line; see [Start a worker](#start-a-worker).)
+
 On one machine there is no broker terminal: the first client command
 starts a loopback broker on demand (default `127.0.0.1:4646`) and runs
 against it. The broker logs to `chattrs.log` and records its pid in
@@ -164,9 +167,11 @@ CHATTRS_ADDRESS=muse@mac chattrs send --to codex@box2 "reviewing now"
 
 Without `--address`, an agent gets `<agent>@<hostname>` from `--agent`
 (`CHATTRS_AGENT`), with the hostname cut at the first dot and lowercased.
-Two agents with the same name on one host share an inbox, so give each
-worker a unique `CHATTRS_ADDRESS` (for example `codex-2@box1`). There is no
-default agent name: a shared default would merge inboxes.
+Two agents with the same name on one host would share an inbox, so give
+each worker a unique `CHATTRS_ADDRESS` (for example `codex-2@box1`). The
+broker refuses a second live session on an address (see
+[One session per address](#one-session-per-address)). There is no default
+agent name: a shared default would merge inboxes.
 
 Because the protocol is line-JSON over TCP, agents can also talk to the
 broker directly (see [Protocol](#protocol)) — useful for SDK-less clients
@@ -192,11 +197,11 @@ coordinator, who puts `$(chattrs skill)` in the worker's prompt.
 ## Run across hosts
 
 Run one broker on an always-on machine. Other hosts connect to it over
-a private network (Tailscale or a LAN) with the shared token. The
-broker host can run an agent too. This is "Claude Code-style swarms
-for any agent": a lead and its workers share one broker. One broker
-serves every project, so a second swarm needs a new `CHATTRS_PROJECT`,
-not a second broker.
+a tailnet (Tailscale) with a token. A plain LAN is for a trusted home
+network only: there is no TLS. This is "Claude Code-style swarms for any
+agent": a lead and its workers share one broker. One broker serves every
+project, so a second swarm needs a new `CHATTRS_PROJECT`, not a second
+broker. The broker host can run an agent too.
 
 Install the same binary on every host:
 
@@ -212,17 +217,21 @@ cargo install --git https://github.com/bolu-atx/chattrs
   sleeps, and the swarm stops with it.
 - Bind to the LAN or tailnet IP, never `0.0.0.0` and never a public
   address. There is no TLS.
-- Set `CHATTRS_TOKEN`. The broker refuses a non-loopback bind without
-  it. The `from` of a message is only as trustworthy as the token: with
-  no token, any local process can say hello as any address.
-- Keep the token in a file with mode 0600, never in a unit file or on a
-  command line:
+- Use a token table (see [Token table](#token-table)). The broker
+  refuses a non-loopback bind without a token or a table. Without one,
+  any local process can say hello as any address.
+- Give each host its own token, from `openssl rand -hex 32`. Keep the
+  tokens file at mode 0600, never in a unit file or on a command line.
+  Put the lead's token only on the lead's host.
 
 ```bash
 mkdir -p ~/.config/chattrs
-printf 'CHATTRS_TOKEN=%s\n' "$(openssl rand -hex 32)" > ~/.config/chattrs/env
-chmod 600 ~/.config/chattrs/env
+touch ~/.config/chattrs/tokens.toml && chmod 600 ~/.config/chattrs/tokens.toml
+# then add one [[token]] block per host (see Token table)
 ```
+
+A single shared `CHATTRS_TOKEN` also works (legacy mode). It gives every
+holder every project and every address, so use it only for a quick test.
 
 ### Keep the database
 
@@ -237,8 +246,8 @@ sqlite3 <db> ".backup <file>"
 ### Run the broker as a service
 
 Linux: a `systemd --user` unit. Put it in
-`~/.config/systemd/user/chattrs.service`. The token comes from the
-0600 file through `EnvironmentFile`.
+`~/.config/systemd/user/chattrs.service`. The tokens file stays at
+mode 0600.
 
 ```ini
 [Unit]
@@ -247,8 +256,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-EnvironmentFile=%h/.config/chattrs/env
-ExecStart=%h/.cargo/bin/chattrs serve --listen <broker-ip>:4646 --db <path>
+ExecStart=%h/.cargo/bin/chattrs serve --listen <broker-ip>:4646 --db <path> --tokens %h/.config/chattrs/tokens.toml
 Restart=always
 
 [Install]
@@ -263,7 +271,7 @@ loginctl enable-linger <user>   # run without a login session
 
 macOS: a launchd agent. Put it in
 `~/Library/LaunchAgents/dev.chattrs.broker.plist`. A shell wrapper
-reads the same 0600 file, so the token stays out of the plist. Change
+passes the 0600 tokens file, so no token is in the plist. Change
 the binary path to match your install (`which chattrs`).
 
 ```xml
@@ -277,7 +285,7 @@ the binary path to match your install (`which chattrs`).
   <array>
     <string>/bin/sh</string>
     <string>-c</string>
-    <string>set -a; . "$HOME/.config/chattrs/env"; exec /opt/homebrew/bin/chattrs serve --listen &lt;broker-ip&gt;:4646 --db "$HOME/.local/share/chattrs/chattrs.db"</string>
+    <string>exec /opt/homebrew/bin/chattrs serve --listen &lt;broker-ip&gt;:4646 --db "$HOME/.local/share/chattrs/chattrs.db" --tokens "$HOME/.config/chattrs/tokens.toml"</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
@@ -297,30 +305,31 @@ login for an unattended Mac.
 
 ### Set client hosts
 
-On every client host, set the same values:
+On every client host, put the broker address and the token file in the
+user config (see [Config files](#config-files)):
 
-```bash
-export CHATTRS_SERVER=<broker-ip>:4646
-export CHATTRS_TOKEN=<token>
-export CHATTRS_ADDRESS=<agent>@<host>
+```toml
+# ~/.config/chattrs/config.toml
+server = "<broker-ip>:4646"
+token_file = "/home/me/.config/chattrs/token"   # mode 0600, holds this host's token only
 ```
 
-`CHATTRS_ADDRESS` or `CHATTRS_AGENT` both work: set an explicit
-address per host, or set `CHATTRS_AGENT` and let the binary use
-`<agent>@<hostname>`.
+Do not set `CHATTRS_ADDRESS`, `CHATTRS_SESSION`, `CHATTRS_LEAD`, or
+`CHATTRS_PROJECT` in a shell rc file. Every session on the host would
+share one identity, and the broker would refuse the second one. Set them
+only in the launch line, with `eval "$(chattrs env --as <agent>@<host>)"`
+(see [Start a worker](#start-a-worker)).
 
-The agent on the broker host is a client too. Set its
-`CHATTRS_SERVER` to the broker's LAN or tailnet IP, not to loopback.
-A loopback server that is down gets a second, auto-started broker
-(CLI-11), and that agent then talks to a different swarm.
+The agent on the broker host is a client too. Set its `server` to the
+broker's tailnet IP, not to loopback. A loopback server that is down gets
+a second, auto-started broker (CLI-11), and that agent then talks to a
+different swarm.
 
-Limits: there is no TLS, so the token and the messages travel as
-clear text inside the private network. With the shared `CHATTRS_TOKEN`
-(legacy mode), one token covers the whole fleet. Addresses are
-self-asserted: the token proves fleet membership, not which address is
-yours. The shared token reaches every project: a project keeps agents
-apart by accident, not by access control. To bind each token to one
-project, address pattern, and role, use a token table.
+Limits: there is no TLS, so the token and the messages travel as clear
+text inside the private network. Addresses are self-asserted in legacy
+mode: the shared token proves fleet membership, not which address is
+yours, and it reaches every project. A token table binds each token to
+one project, address pattern, and role.
 
 ### Token table
 
@@ -397,8 +406,13 @@ Rules for the file:
   token, full access to every project, and no `from_role`.
 - To revoke a token, delete its `[[token]]` block and restart the broker.
   The broker reads the file once, at start.
-- Keep the file out of the repo and out of any unit file. Clients still
-  send their own token with `CHATTRS_TOKEN` or `--token`.
+- Keep the file out of the repo and out of any unit file. Clients send
+  their own token, from `token_file`, `CHATTRS_TOKEN`, or `--token`.
+- One token per host. Put the lead's token (the `lead` entry) only on the
+  lead's host, and give each worker host an `agent` token such as
+  `*@box1`. A worker host then cannot claim the lead's address.
+- A message from a lead token has `from-role="lead"`. A worker accepts a
+  destructive request only from that role, or from the user.
 
 ### Projects
 
@@ -444,6 +458,12 @@ connection count and last activity. A restart of the broker clears it.
   registered, so it does not block a session holder. The broker only warns
   about a second live watch.
 - An observer never registers and is never refused.
+- A worker that died has its address back after the holder's connections
+  close, or in about 1 minute. Restart it with the same address and a new
+  session. `chattrs env` makes a new `CHATTRS_SESSION` on every run.
+- A short-lived session (a one-off script or a quick check) sets no
+  `CHATTRS_ADDRESS`, so it takes no address and fires no hooks. If it needs
+  one, give it its own unique address and set `CHATTRS_LEAD`.
 
 ### Config files
 
@@ -480,10 +500,11 @@ prints the variables for one session.
 ### Start a worker
 
 The lead starts each worker over ssh, in a detached tmux session. The
-worker needs no flags (CLI-6). Put the server and the token file in the
-user config on the worker host (see [Config files](#config-files)), and
-the project and lead in the repo's `.chattrs.toml`. Then one line starts
-the worker:
+worker needs no flags (CLI-6). The worker host has the server and token
+file in its user config (see [Set client hosts](#set-client-hosts)). The
+repo's `.chattrs.toml` has the project and lead. Then one line starts the
+worker. The address, project, lead, and session exist only in this launch
+line:
 
 ```bash
 ssh <host> 'tmux new -d -s w1 '"'"'eval "$(chattrs env --as worker1@<host>)"; exec claude "Your address is worker1@<host>. Run chattrs watch under the Monitor tool now."'"'"''
@@ -499,14 +520,19 @@ tmux new -d -s w1 'eval "$(chattrs env --as worker1@box)"; exec claude "..."'
 `CHATTRS_ADDRESS`, `CHATTRS_PROJECT`, `CHATTRS_LEAD`, `CHATTRS_TAGS` (when
 known), and a new `CHATTRS_SESSION` on every run. It does not print the
 token unless you pass `--with-token`; every command reads the token from
-`token_file` instead. On a systemd host, start tmux with
-`systemd-run --user --scope tmux new -d ...` so the session survives the
-ssh logout.
+`token_file` instead.
+
+Some hosts kill a user's tmux server on ssh logout. On such a systemd host,
+start tmux in its own scope and turn on linger:
+
+```bash
+ssh <host> 'systemd-run --user --scope tmux new -d -s w1 ...'
+loginctl enable-linger <user>   # once, on the worker host
+```
 
 `CHATTRS_LEAD` and `CHATTRS_SESSION` survive `/clear`; the launch prompt
 does not. `CHATTRS_SESSION` is new for each launch, because the env stays
-the same inside one session. The prompt
-names the worker's address and its lead. It also starts
+the same inside one session. The prompt names the worker's address and its lead. It also starts
 `chattrs watch` under Monitor, so a message wakes the worker. See the
 `chattrs-fleet` skill for the same wording. `CHATTRS_TAGS` is optional
 and shows in `agents`.
@@ -591,7 +617,7 @@ redelivered.
 
 The hooks live in the user-level config, so they fire in every session.
 `chattrs hook` does nothing, with no output, unless `CHATTRS_ADDRESS` is
-set. It never starts a broker. It is best effort: connect plus exchange
+set. This is why the launch line sets it and a shell rc file never does. It never starts a broker. It is best effort: connect plus exchange
 get about 300 ms, and any failure prints nothing and exits 0. A message
 that was not acked stays unread for the next command.
 
@@ -770,7 +796,7 @@ stays CLI only, with no TUI or GUI. The swarm needs nothing from any viewer.
   `stalled` when `state` is `working` and activity is 10 min or more ago;
   `healthy` when `online` and activity is under 10 min ago; else no label.
   Hooks say `hello` on every tool call, so `last_seen` is an activity
-  heartbeat. There is no ping probe, and no lease rule yet.
+  heartbeat. There is no ping probe.
 - A viewer ignores unknown fields and unknown frame types.
 - The observer frames and the `agents` JSON shape are stable. They change
   only by adding fields.
@@ -848,8 +874,8 @@ An inbound line over 128 KiB is rejected with `too_large`.
   SQLite before it confirms the send, so a restart loses nothing. The broker
   never deletes a message.
 - **Addresses, not accounts.** An agent is whoever its `hello` says it is.
-  The broker stays on loopback unless a token guards a wider bind, and one
-  fleet token admits every address.
+  The broker stays on loopback unless a token guards a wider bind. A token
+  table limits each token to a project, an address pattern, and a role.
 - **Small and boring.** One SQLite file, line-JSON over TCP, no framework.
 
 ## Repository
