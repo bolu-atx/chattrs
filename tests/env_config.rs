@@ -188,3 +188,19 @@ fn env_derives_the_project_from_a_repo() {
     assert!(out.contains("export CHATTRS_PROJECT='my-repo'\n"), "{out}");
     assert!(out.contains("# project source: git\n"), "{out}");
 }
+
+#[test]
+fn a_blank_lead_variable_falls_through_to_the_repo_config() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join(".chattrs.toml"), "lead = \"cfg@h\"\n").unwrap();
+    for blank in ["", " "] {
+        let out = common::command(binary())
+            .current_dir(dir.path())
+            .env("CHATTRS_LEAD", blank)
+            .args(["env", "--as", "w1@h"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&out.stdout);
+        assert!(text.contains("CHATTRS_LEAD='cfg@h'"), "[{blank}]: {text}");
+    }
+}
