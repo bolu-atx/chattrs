@@ -9,7 +9,6 @@ struct TrayApp: App {
     init() {
         NSApplication.shared.setActivationPolicy(.accessory)
         let s = AppStore()
-        s.start()
         do {
             try ControlServer.start(path: Settings.controlPath) { line in
                 DispatchQueue.main.sync { MainActor.assumeIsolated { s.handleControl(line) } }
@@ -17,6 +16,7 @@ struct TrayApp: App {
         } catch {
             FileHandle.standardError.write(Data("chattrs-tray: control socket: \(error)\n".utf8))
         }
+        s.start()
         _store = StateObject(wrappedValue: s)
     }
 
