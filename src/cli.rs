@@ -40,6 +40,8 @@ pub enum Command {
     Status(StatusArgs),
     /// Print the bundled agent skill to stdout.
     Skill,
+    /// Print shell `export` lines that set up a session: `eval "$(chattrs env --as a@h)"`.
+    Env(EnvArgs),
     /// Run as an agent hook: read the hook JSON on stdin, print hook JSON.
     Hook(HookArgs),
     /// Install or remove the chattrs hooks in Claude Code and Codex configs.
@@ -118,6 +120,38 @@ pub struct ServeArgs {
     /// project, address pattern, and role. When set, it replaces `--token`.
     #[arg(long, env = "CHATTRS_TOKENS")]
     pub tokens: Option<PathBuf>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct EnvArgs {
+    /// Own address of the session, as `user@host`.
+    #[arg(long = "as", value_name = "ADDRESS")]
+    pub address: String,
+
+    /// Project of the session (`CHATTRS_PROJECT`, then the repo config).
+    #[arg(long, env = "CHATTRS_PROJECT")]
+    pub project: Option<String>,
+
+    /// Address of the lead (`CHATTRS_LEAD`, then the repo config).
+    #[arg(long, env = "CHATTRS_LEAD")]
+    pub lead: Option<String>,
+
+    /// Broker address to export.
+    #[arg(long, default_value = DEFAULT_SERVER, env = "CHATTRS_SERVER")]
+    pub server: String,
+
+    /// Agent tags to export, comma-separated.
+    #[arg(long, env = "CHATTRS_TAGS")]
+    pub tags: Option<String>,
+
+    /// Token to export with `--with-token`.
+    #[arg(long, env = "CHATTRS_TOKEN")]
+    pub token: Option<String>,
+
+    /// Also print `CHATTRS_TOKEN`. Without it the token stays out of the
+    /// output; commands read it from `token_file` in the user config.
+    #[arg(long)]
+    pub with_token: bool,
 }
 
 /// Connection flags shared by the client commands.

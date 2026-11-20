@@ -23,7 +23,7 @@ Address = `agent@host`.
 - **CLI-3** `reply <id>` answers a message. *(N5)*
 - **CLI-4** `watch` streams one JSON message per line and nothing else. *(N4)* — works under Claude Code's Monitor tool.
 - **CLI-5** `log` shows full history. `--about ADDR` keeps only messages that ADDR sent or received. *(N8)*
-- **CLI-6** `--json` on every command. Server, token, and own address come from `CHATTRS_SERVER`, `CHATTRS_TOKEN`, `CHATTRS_ADDRESS`. *(N1, N3, N4)* — a worker started over ssh needs no flags.
+- **CLI-6** `--json` on every command. Server, token, and own address come from `CHATTRS_SERVER`, `CHATTRS_TOKEN`, `CHATTRS_ADDRESS`. *(N1, N3, N4)* — a worker started over ssh needs no flags. Config files (`~/.config/chattrs/config.toml`, `.chattrs.toml`) feed the same values below the variables, and `chattrs env` prints them as shell exports.
 - **CLI-7** Ship a skill that teaches agents `send`, `ask`, `reply`. `chattrs skill` prints it. A Claude Code agent runs `watch` under Monitor and sends its question instead of a blocking `ask`. *(N1, N2, N3, N4, N10)*
 - **CLI-8** `agents` lists known addresses with last-seen time. *(N9)*
 - **CLI-9** Own address defaults to `<agent>@<hostname>`. *(N9)*

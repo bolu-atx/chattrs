@@ -15,6 +15,7 @@
 mod autostart;
 mod cli;
 mod client;
+mod config;
 mod hook;
 mod hook_install;
 mod model;
@@ -50,10 +51,26 @@ impl From<String> for RunError {
     }
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Config files fill the variables that the environment leaves unset,
+    // before clap reads them. A bad file stops the command, except a hook,
+    // which must never break the agent. This runs before the tokio runtime
+    // starts, so no other thread can read the environment while it is set.
+    if let Err(error) = config::load().map(|config| config.apply_env()) {
+        eprintln!("chattrs: {error}");
+        if std::env::args().nth(1).as_deref() != Some("hook") {
+            std::process::exit(1);
+        }
+    }
     let args = Args::parse();
-    let code = match run(args).await {
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            eprintln!("chattrs: cannot start the runtime: {error}");
+            std::process::exit(1);
+        }
+    };
+    let code = match runtime.block_on(run(args)) {
         Ok(()) => 0,
         Err(RunError::BrokenPipe) => 0,
         Err(RunError::Timeout) => 2,
@@ -117,6 +134,7 @@ async fn run(args: Args) -> Result<(), RunError> {
         Command::Ask(c) => cmd_ask(c).await,
         Command::Inbox(c) => cmd_inbox(c).await,
         Command::Skill => cmd_skill(),
+        Command::Env(c) => cmd_env(c),
         Command::Log(c) => cmd_log(c).await,
         Command::Agents(c) => cmd_agents(c).await,
         Command::Projects(c) => cmd_projects(c).await,
@@ -258,6 +276,33 @@ async fn cmd_inbox(c: cli::InboxArgs) -> Result<(), RunError> {
     let endpoint = endpoint(&c.client)?;
     let mut conn = client::Client::connect(&endpoint).await?;
     deliver_unread(&mut conn, c.json).await
+}
+
+/// A fresh session id: 16 random bytes as 32 hex digits. Each
+/// `RandomState` is seeded from the OS, so no crate is needed.
+fn new_session_id() -> String {
+    use std::hash::{BuildHasher as _, Hasher as _};
+    let word = || std::collections::hash_map::RandomState::new().build_hasher().finish();
+    format!("{:016x}{:016x}", word(), word())
+}
+
+fn cmd_env(c: cli::EnvArgs) -> Result<(), RunError> {
+    if !model::is_valid_address(&c.address) {
+        return Err(RunError::Message(format!("`{}` is not a user@host address", c.address)));
+    }
+    let mut pairs = vec![
+        ("CHATTRS_SERVER", c.server),
+        ("CHATTRS_ADDRESS", c.address),
+        ("CHATTRS_SESSION", new_session_id()),
+    ];
+    let optional = [
+        ("CHATTRS_PROJECT", c.project),
+        ("CHATTRS_LEAD", c.lead),
+        ("CHATTRS_TAGS", c.tags),
+        ("CHATTRS_TOKEN", c.token.filter(|_| c.with_token)),
+    ];
+    pairs.extend(optional.into_iter().filter_map(|(name, value)| Some((name, value?))));
+    write(&output::export_lines(&pairs))
 }
 
 fn cmd_skill() -> Result<(), RunError> {

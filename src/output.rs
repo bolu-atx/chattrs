@@ -295,6 +295,17 @@ pub fn write_stdout(text: &str) -> std::io::Result<()> {
     lock.flush()
 }
 
+/// Quote `value` for a POSIX shell: single quotes, with each embedded
+/// single quote written as `'\''`.
+pub fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// One `export NAME='value'` line per pair, each ending in a newline.
+pub fn export_lines(pairs: &[(&str, String)]) -> String {
+    pairs.iter().map(|(name, value)| format!("export {name}={}\n", shell_quote(value))).collect()
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
