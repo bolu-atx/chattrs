@@ -391,14 +391,26 @@ What each event does (`chattrs hook <event>`):
 | Event | Effect |
 | ----- | ------ |
 | `session-start` | Sets the state to idle, tells the agent its address and to load the skill. Claude Code also gets the Monitor reminder (Codex has none; the Codex config passes `--agent codex`, and no flag means Claude). Prints even when the broker is unreachable. |
-| `user-prompt-submit`, `post-tool-use` | Adds unread messages as `additionalContext`, in the `<agent-message>` wrapper. Acks them after stdout is flushed. `user-prompt-submit` also sets the state to working. |
-| `stop` | Sets the state to idle. When messages are unread, blocks the stop with them as the reason, then acks, and sets working again. Never blocks when `stop_hook_active` is true. |
+| `user-prompt-submit`, `post-tool-use` | Adds unread messages as `additionalContext`, in the `<agent-message>` wrapper. `user-prompt-submit` also sets the state to working. |
+| `stop` | Sets the state to idle. When messages are unread, blocks the stop with them as the reason, and sets working again. Never blocks when `stop_hook_active` is true. |
+
+Each delivering event claims before it prints. It fetches the unread
+messages, acks them all, and prints only the ids the ack changed to read.
+Two hook runs that fire at once therefore split the messages and never
+print one twice. If the ack fails or times out, the run prints nothing.
+The cost: a message claimed but not printed (stdout closed) is not
+redelivered.
 
 The hooks live in the user-level config, so they fire in every session.
 `chattrs hook` does nothing, with no output, unless `CHATTRS_ADDRESS` is
 set. It never starts a broker. It is best effort: connect plus exchange
 get about 300 ms, and any failure prints nothing and exits 0. A message
 that was not acked stays unread for the next command.
+
+Debugging aid: set `CHATTRS_HOOK_DEBUG=<file>` and each `chattrs hook` run
+appends one JSON line with `pid`, `ts_ms`, `event`, the raw stdin as
+`input`, and the ids it `fetched` and `emitted`. Use it to see which hook
+runs fire for one tool call and which ones deliver.
 
 ## Protocol
 

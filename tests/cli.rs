@@ -590,6 +590,80 @@ fn stop_hook_blocks_with_unread_messages_unless_stop_hook_active() {
 }
 
 #[test]
+fn concurrent_hooks_deliver_a_message_exactly_once() {
+    let broker = Broker::start();
+    run_client(&broker.addr, "b@h", "inbox", &[]);
+    run_client(&broker.addr, "a@h", "send", &["--to", "b@h", "only once"]);
+    let runs: Vec<_> = (0..2)
+        .map(|_| {
+            let server = broker.addr.clone();
+            std::thread::spawn(move || run_hook(&server, Some("b@h"), "post-tool-use", "{}"))
+        })
+        .collect();
+    let outputs: Vec<Output> = runs.into_iter().map(|run| run.join().expect("hook")).collect();
+    let emitted = outputs.iter().filter(|output| !output.stdout.is_empty()).count();
+    assert_eq!(emitted, 1, "exactly one run emits the message");
+}
+
+#[test]
+fn hook_emits_nothing_when_the_ack_fails() {
+    // A broker that serves welcome and inbox, then drops the connection at
+    // the ack.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let server = listener.local_addr().expect("addr").to_string();
+    std::thread::spawn(move || {
+        while let Ok((stream, _)) = listener.accept() {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+            let mut stream = stream;
+            let mut line = String::new();
+            while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                let reply = if line.contains("\"hello\"") {
+                    r#"{"type":"welcome","server":"t","v":1,"address":"b@h"}"#
+                } else if line.contains("\"inbox\"") {
+                    r#"{"type":"inbox","messages":[{"id":1,"from":"a@h","to":"b@h","body":"lost?","ts":0}]}"#
+                } else {
+                    break;
+                };
+                writeln!(stream, "{reply}").expect("reply");
+                line.clear();
+            }
+        }
+    });
+    for event in ["post-tool-use", "user-prompt-submit", "stop"] {
+        let output = run_hook(&server, Some("b@h"), event, "{}");
+        assert_eq!(output.status.code(), Some(0));
+        assert!(output.stdout.is_empty(), "{event} emitted without a confirmed claim");
+    }
+}
+
+#[test]
+fn hook_debug_file_gets_one_json_line_per_run() {
+    let broker = Broker::start();
+    run_client(&broker.addr, "b@h", "inbox", &[]);
+    run_client(&broker.addr, "a@h", "send", &["--to", "b@h", "trace me"]);
+    let dir = tempfile::TempDir::new().expect("temp dir");
+    let log = dir.path().join("hook.log");
+    for _ in 0..2 {
+        let mut command = Command::new(binary());
+        command.args(["hook", "post-tool-use"]).arg("--server").arg(&broker.addr);
+        command.env("CHATTRS_ADDRESS", "b@h").env("CHATTRS_HOOK_DEBUG", &log);
+        command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = command.spawn().expect("spawn the hook");
+        child.stdin.take().expect("stdin").write_all(br#"{"tool_name":"Bash"}"#).expect("stdin");
+        child.wait_with_output().expect("run the hook");
+    }
+    let text = std::fs::read_to_string(&log).expect("debug file");
+    let lines: Vec<serde_json::Value> = text.lines().map(parse_line).collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["event"], "PostToolUse");
+    assert_eq!(lines[0]["input"]["tool_name"], "Bash");
+    assert!(lines[0]["pid"].as_u64().is_some() && lines[0]["ts_ms"].as_u64().is_some());
+    assert_eq!(lines[0]["fetched"].as_array().unwrap().len(), 1);
+    assert_eq!(lines[0]["emitted"].as_array().unwrap().len(), 1);
+    assert!(lines[1]["fetched"].as_array().unwrap().is_empty());
+}
+
+#[test]
 fn hook_with_an_unreachable_broker_is_silent_fast_and_exits_zero() {
     let server = format!("127.0.0.1:{}", free_port());
     let started = Instant::now();
