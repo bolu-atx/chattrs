@@ -19,7 +19,7 @@ use tokio::net::TcpStream;
 use crate::cli::{DoctorArgs, DEFAULT_SERVER};
 use crate::config::{self, Config};
 use crate::model::{self, Inbound, Outbound};
-use crate::{hook_install, protocol, setup, skill, RunError};
+use crate::{hook, protocol, setup, skill, RunError};
 
 /// How long the connect and the `welcome` may each take.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -60,7 +60,7 @@ impl Report {
 /// the exit code.
 pub async fn run(args: DoctorArgs) -> Result<(), RunError> {
     let mut report = Report::default();
-    match hook_install::home() {
+    match hook::install::home() {
         Ok(home) => {
             check_host(&mut report, &args, &home).await;
             check_agents(&mut report, &home);
@@ -400,7 +400,7 @@ fn check_agents(report: &mut Report, home: &Path) {
         report.pass("skill", "no agent found, nothing to check");
     }
     for target in found {
-        match hook_install::missing_hooks(target.agent) {
+        match hook::install::missing_hooks(target.agent) {
             Ok((path, missing)) if missing.is_empty() => {
                 report.pass("hooks", format!("{}: installed in {}", target.name, path.display()))
             }

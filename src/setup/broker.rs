@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::cli::{SetupArgs, DEFAULT_PORT};
-use crate::{hook_install, model, setup_join, store::Store};
+use crate::{hook, model, setup::join, store::Store};
 
 const LABEL: &str = "com.chattrs.broker";
 const OBSERVER_ADDR: &str = "tray@*";
@@ -293,7 +293,7 @@ pub fn run(args: &SetupArgs) -> Result<(), String> {
     let plan = plan(args)?;
     let ip = resolve_bind(args.bind.as_deref(), tailscale_ipv4)?;
     let listen = SocketAddr::new(ip, args.port.unwrap_or(DEFAULT_PORT));
-    let home = hook_install::home()?;
+    let home = hook::install::home()?;
     let tokens_path = home.join(".config/chattrs/tokens.toml");
     let exe = std::env::current_exe().map_err(|e| format!("find the chattrs binary: {e}"))?;
     let unit = unit(&home, &exe, &serve_args(listen, &Store::default_path(), &tokens_path))?;
@@ -316,7 +316,7 @@ pub fn run(args: &SetupArgs) -> Result<(), String> {
     eprintln!("chattrs: wrote {}", unit.path.display());
     println!("Treat these like passwords.");
     for item in &issued {
-        println!("{}: {}", item.label, setup_join::format(&item.token, listen, &item.pattern));
+        println!("{}: {}", item.label, join::format(&item.token, listen, &item.pattern));
     }
     eprintln!("chattrs: to start the broker, run: {}", unit.shown);
     if args.enable {

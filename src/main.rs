@@ -18,17 +18,14 @@ mod cli;
 mod client;
 mod config;
 mod doctor;
-mod exec_host;
+mod exec;
 mod hook;
-mod hook_install;
 mod model;
 mod output;
 mod project;
 mod protocol;
 mod server;
 mod setup;
-mod setup_broker;
-mod setup_join;
 mod skill;
 mod store;
 mod tokens;
@@ -176,7 +173,7 @@ async fn run(args: Args) -> Result<(), RunError> {
             hook::run(c.event, &c.client).await;
             Ok(())
         }
-        Command::Hooks(c) => hook_install::run(c.action).map_err(RunError::Message),
+        Command::Hooks(c) => hook::install::run(c.action).map_err(RunError::Message),
     }
 }
 
@@ -438,9 +435,9 @@ fn cmd_exec_host(c: cli::ExecArgs) -> Result<(), RunError> {
     let name = c.detach.then(|| {
         c.session_name
             .clone()
-            .unwrap_or_else(|| exec_host::session_name(c.address.as_deref(), &c.command[0]))
+            .unwrap_or_else(|| exec::host::session_name(c.address.as_deref(), &c.command[0]))
     });
-    let argv = exec_host::remote_command(
+    let argv = exec::host::remote_command(
         host,
         c.cwd.as_deref(),
         c.address.as_deref(),
@@ -458,7 +455,7 @@ fn cmd_exec_host(c: cli::ExecArgs) -> Result<(), RunError> {
     if !status.success() {
         std::process::exit(status.code().unwrap_or(1));
     }
-    write(&exec_host::detach_hints(host, &name))
+    write(&exec::host::detach_hints(host, &name))
 }
 
 #[cfg(unix)]
