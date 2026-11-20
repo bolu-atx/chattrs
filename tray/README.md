@@ -30,6 +30,8 @@ Click the gear in the menu window. Set the broker as `host:port` and an optional
 - The token is stored in the Keychain (service `chattrs-tray`).
 - `CHATTRS_TOKEN` overrides the stored token. Use it for development.
 - After a bad token, the app stops retrying until you save new settings.
+- The app never touches the Keychain on the main thread. After a rebuild, macOS may ask to let the new binary read the token. The menu and the control socket keep working while that prompt is open. A token sent with `connect` is used at once.
+- In settings, leave the token field empty to keep the saved token.
 
 ## Control socket
 

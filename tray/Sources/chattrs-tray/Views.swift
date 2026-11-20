@@ -291,7 +291,7 @@ struct SettingsView: View {
     @EnvironmentObject var store: AppStore
     let done: () -> Void
     @State private var host = Settings.server
-    @State private var token = Settings.storedToken
+    @State private var token = ""
     @State private var invalid = false
 
     var body: some View {
@@ -306,7 +306,8 @@ struct SettingsView: View {
             }
             VStack(alignment: .leading, spacing: 4) {
                 Text("Token").font(.subheadline.weight(.semibold))
-                SecureField("No token", text: $token).textFieldStyle(.roundedBorder)
+                SecureField(store.tokenSet ? "Saved token (leave empty to keep it)" : "No token", text: $token)
+                    .textFieldStyle(.roundedBorder)
                 Text(Settings.envTokenSet
                      ? "CHATTRS_TOKEN is set and overrides this token."
                      : "The fleet token. It is stored in the Keychain.")
@@ -317,8 +318,7 @@ struct SettingsView: View {
                 Button("Cancel", action: done).keyboardShortcut(.cancelAction)
                 Button("Save and connect") {
                     guard Settings.parse(host) != nil else { invalid = true; return }
-                    Settings.save(server: host.trimmingCharacters(in: .whitespaces), token: token)
-                    store.start()
+                    store.save(server: host, token: token.isEmpty ? nil : token)
                     done()
                 }
                 .keyboardShortcut(.defaultAction)

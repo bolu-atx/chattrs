@@ -40,13 +40,12 @@ public enum Settings {
 
     public static var envTokenSet: Bool { !(env["CHATTRS_TOKEN"] ?? "").isEmpty }
 
-    /// Token field value: Keychain only (the env override is not shown).
-    public static var storedToken: String { Keychain.get() ?? "" }
+    /// Every Keychain read and write runs here, never on the main thread: a
+    /// Keychain prompt (after a rebuild changes the code signature) must not
+    /// block the UI or the control socket. Serial, so a read sees the last write.
+    public static let keychainQueue = DispatchQueue(label: "chattrs.tray.keychain")
 
-    public static func save(server: String, token: String) {
-        UserDefaults.standard.set(server, forKey: key)
-        Keychain.set(token)
-    }
+    public static func saveServer(_ server: String) { UserDefaults.standard.set(server, forKey: key) }
 
     public static func parse(_ hostPort: String) -> (host: String, port: UInt16)? {
         let s = hostPort.trimmingCharacters(in: .whitespaces)
@@ -68,6 +67,7 @@ public enum Settings {
         return dir.appendingPathComponent("chattrs-tray/control.sock").path
     }
 
+    /// Reads the Keychain: call on `keychainQueue`.
     public static func config() -> BrokerConfig? {
         guard let hp = parse(server) else { return nil }
         let envToken = env["CHATTRS_TOKEN"] ?? ""
