@@ -273,7 +273,10 @@ async fn cmd_log(c: cli::LogArgs) -> Result<(), RunError> {
     }
     let mut conn = client::Client::connect(&endpoint).await?;
     deliver_unread(&mut conn, c.json).await?;
-    let messages = conn.log(c.about.clone()).await?;
+    let messages = match c.tail {
+        Some(n) => conn.log_tail(c.about.clone(), n).await?,
+        None => conn.log(c.about.clone()).await?,
+    };
     if c.json {
         for message in &messages {
             write(&output::log_json(message))?;

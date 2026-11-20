@@ -230,10 +230,34 @@ impl Store {
         after: u64,
         limit: u64,
     ) -> Result<Vec<LoggedMessage>, String> {
+        self.log_rows(project, address, after, limit, "ORDER BY id").await
+    }
+
+    /// Like `log`, but the newest `n` rows above `after`, still in id order.
+    pub async fn log_tail(
+        &self,
+        project: String,
+        address: Option<String>,
+        after: u64,
+        n: u64,
+    ) -> Result<Vec<LoggedMessage>, String> {
+        let mut rows = self.log_rows(project, address, after, n, "ORDER BY id DESC").await?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    async fn log_rows(
+        &self,
+        project: String,
+        address: Option<String>,
+        after: u64,
+        limit: u64,
+        order: &'static str,
+    ) -> Result<Vec<LoggedMessage>, String> {
         self.with(move |conn| {
             select_all(
                 conn,
-                &format!("SELECT {MESSAGE_COLUMNS}, acked_at FROM messages WHERE id > ?1 AND (?2 IS NULL OR sender = ?2 OR recipient = ?2) AND (?4 = '{ALL_PROJECTS}' OR project = ?4) ORDER BY id LIMIT ?3"),
+                &format!("SELECT {MESSAGE_COLUMNS}, acked_at FROM messages WHERE id > ?1 AND (?2 IS NULL OR sender = ?2 OR recipient = ?2) AND (?4 = '{ALL_PROJECTS}' OR project = ?4) {order} LIMIT ?3"),
                 rusqlite::params![after as i64, address, limit as i64, project],
                 |row| {
                     Ok(LoggedMessage {

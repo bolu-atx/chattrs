@@ -370,3 +370,123 @@ fn binary_reports_crate_version() {
         "the binary names its crate version"
     );
 }
+
+/// Send `count` messages from `from` to `to` over one connection.
+async fn seed(addr: &str, from: &str, to: &str, count: usize) -> Vec<u64> {
+    let mut raw = raw_connect(addr).await;
+    let hello = format!("{{\"type\":\"hello\",\"v\":1,\"address\":\"{from}\"}}\n");
+    raw_hello(&mut raw, &hello).await;
+    let mut ids = Vec::new();
+    for i in 0..count {
+        let frame = serde_json::json!({"type": "send", "to": to, "body": format!("m{i}")});
+        raw_send(&mut raw, &format!("{frame}\n")).await;
+        match raw_recv(&mut raw).await.unwrap() {
+            Outbound::Sent { id, .. } => ids.push(id),
+            other => panic!("expected sent, got {other:?}"),
+        }
+    }
+    ids
+}
+
+async fn tail_ids(addr: &str, filter: Option<&str>, n: u32) -> Vec<u64> {
+    let mut conn = client::Client::connect(&endpoint(addr, "reader@h")).await.unwrap();
+    let rows = conn.log_tail(filter.map(str::to_string), n).await.unwrap();
+    rows.into_iter().map(|row| row.message.id).collect()
+}
+
+#[tokio::test]
+async fn log_tail_returns_the_newest_rows_in_id_order() {
+    let (addr, _dir, handle) = spawn().await;
+    let ab = seed(&addr, "a@h", "b@h", 5).await;
+    let xy = seed(&addr, "x@h", "y@h", 5).await;
+    let mut all = ab.clone();
+    all.extend(&xy);
+
+    assert_eq!(tail_ids(&addr, None, 3).await, all[7..].to_vec());
+    assert_eq!(tail_ids(&addr, Some("a@h"), 3).await, ab[2..].to_vec());
+    assert_eq!(tail_ids(&addr, Some("y@h"), 99).await, xy);
+    handle.abort();
+}
+
+#[tokio::test]
+async fn log_tail_respects_after_and_the_cap() {
+    let (addr, _dir, handle) = spawn().await;
+    let ids = seed(&addr, "a@h", "b@h", 600).await;
+    let mut raw = raw_connect(&addr).await;
+    raw_hello(&mut raw, "{\"type\":\"hello\",\"v\":1,\"address\":\"r@h\"}\n").await;
+
+    raw_send(&mut raw, "{\"type\":\"log\",\"tail\":9999}\n").await;
+    match raw_recv(&mut raw).await.unwrap() {
+        Outbound::Log { messages } => {
+            assert_eq!(messages.len(), 500);
+            assert_eq!(messages[0].message.id, ids[100]);
+            assert_eq!(messages[499].message.id, ids[599]);
+        }
+        other => panic!("{other:?}"),
+    }
+    let frame = format!("{{\"type\":\"log\",\"tail\":5,\"after\":{}}}\n", ids[597]);
+    raw_send(&mut raw, &frame).await;
+    match raw_recv(&mut raw).await.unwrap() {
+        Outbound::Log { messages } => {
+            let got: Vec<u64> = messages.iter().map(|m| m.message.id).collect();
+            assert_eq!(got, ids[598..].to_vec());
+        }
+        other => panic!("{other:?}"),
+    }
+    handle.abort();
+}
+
+#[tokio::test]
+async fn rebrief_history_stays_fast_and_newest_with_a_long_history() {
+    let (addr, _dir, handle) = spawn().await;
+    let old = seed(&addr, "a@h", "b@h", 1).await;
+    let ids = seed(&addr, "a@h", "b@h", 600).await;
+
+    let start = std::time::Instant::now();
+    let history = crate::hook::rebrief_history(&endpoint(&addr, "b@h"), "b@h").await;
+    assert!(start.elapsed() < std::time::Duration::from_millis(800), "{:?}", start.elapsed());
+    let got: Vec<u64> = history.iter().map(|row| row.message.id).collect();
+    assert_eq!(got, ids[400..].to_vec(), "the newest 200 rows, in order");
+    assert!(!got.contains(&old[0]));
+    handle.abort();
+}
+
+#[tokio::test]
+async fn log_tail_keeps_the_last_rows_of_an_old_brokers_page() {
+    // An old broker ignores `tail` and answers with its first page.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        let mut logs = 0;
+        while let Some(line) = lines.next_line().await.unwrap() {
+            if line.contains("\"hello\"") {
+                let welcome =
+                    "{\"type\":\"welcome\",\"server\":\"old\",\"v\":1,\"address\":\"r@h\"}\n";
+                write.write_all(welcome.as_bytes()).await.unwrap();
+            } else if line.contains("\"log\"") {
+                logs += 1;
+                let rows: Vec<_> = (1..=500u64)
+                    .map(|id| {
+                        serde_json::json!({
+                            "id": id, "from": "a@h", "to": "b@h", "body": "x", "ts": 0,
+                            "acked_at": null
+                        })
+                    })
+                    .collect();
+                let frame = serde_json::json!({"type": "log", "messages": rows});
+                write.write_all(format!("{frame}\n").as_bytes()).await.unwrap();
+            }
+        }
+        logs
+    });
+    let mut conn = client::Client::connect(&endpoint(&addr, "r@h")).await.unwrap();
+    let rows = conn.log_tail(None, 10).await.unwrap();
+    let ids: Vec<u64> = rows.iter().map(|row| row.message.id).collect();
+    assert_eq!(ids, (491..=500).collect::<Vec<u64>>());
+    drop(conn);
+    assert_eq!(server.await.unwrap(), 1, "one request, no paging");
+}

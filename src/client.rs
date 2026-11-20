@@ -330,7 +330,12 @@ impl Client {
         let mut after = 0;
         loop {
             let page = match self
-                .request(&Inbound::Log { address: filter.clone(), after, limit: LOG_PAGE_SIZE })
+                .request(&Inbound::Log {
+                    address: filter.clone(),
+                    after,
+                    limit: LOG_PAGE_SIZE,
+                    tail: None,
+                })
                 .await?
             {
                 Outbound::Log { messages } => messages,
@@ -349,6 +354,25 @@ impl Client {
                 return Ok(history);
             }
         }
+    }
+
+    /// Fetch the newest `n` messages in one round trip, oldest first. An
+    /// old broker ignores `tail` and answers with its first page, so the
+    /// client keeps only the last `n` rows it gets and never pages on.
+    pub async fn log_tail(
+        &mut self,
+        filter: Option<String>,
+        n: u32,
+    ) -> Result<Vec<LoggedMessage>, ClientError> {
+        let frame = Inbound::Log { address: filter, after: 0, limit: LOG_PAGE_SIZE, tail: Some(n) };
+        let Outbound::Log { mut messages } = self.request(&frame).await? else {
+            return Err(ClientError::Protocol(
+                "server sent an unexpected frame instead of log".to_string(),
+            ));
+        };
+        let extra = messages.len().saturating_sub(n as usize);
+        messages.drain(..extra);
+        Ok(messages)
     }
 
     /// List the agents of this project, sorted by address. Without `all`,
