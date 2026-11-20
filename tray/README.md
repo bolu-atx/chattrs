@@ -59,7 +59,9 @@ The app uses only the chattrs wire protocol: requirements MON-1, MON-2, and MON-
 
 Once the broker has more than one project, a project menu appears under the header. "All projects" groups the agent list by project and labels each message with its project. Picking one project filters the agents, the timeline, and the feed. A broker before projects sends no `project`, which the app reads as `default`. The same address in two projects shows as two agents.
 
-Each online agent has a status dot: green for working, amber for waiting, grey for idle. A hollow dot means unknown: no state, or a `state_at` older than 15 minutes on the tray's clock. An offline agent shows no dot and its last-seen age, whatever its state.
+Each online agent has a status dot: green for working, amber for waiting, grey for idle. A hollow dot means unknown: no state, or a `state_at` older than 15 minutes on the tray's clock. An offline agent shows no dot and its last-seen age, whatever its state. A red dot means stalled (MON-5): the agent says it is working but has shown no activity for 10 minutes. An agent offline for over an hour is gone: its name dims further, it sorts last, and the label says "gone". The tray computes health with the README Viewer contract rule, since the broker does not send it.
+
+A message sent with a lead token (`from_role` is `lead`, only from a broker with a tokens file) shows a small "lead" tag after the sender.
 
 The app is read-only. It never sends `send`, `ack`, `wait`, or `inbox`. Nothing in chattrs depends on it running.
 
