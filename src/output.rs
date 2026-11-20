@@ -145,9 +145,50 @@ pub fn log_text(message: &LoggedMessage) -> String {
 /// A reported state older than this shows as `unknown` (MON-4).
 const STATE_FRESH_MS: u64 = 15 * 60 * 1000;
 
+/// An agent with no activity for this long is stalled when `working` (MON-5).
+const STALL_MS: u64 = 10 * 60 * 1000;
+/// An offline agent unseen for longer than this is gone (MON-5).
+const GONE_MS: u64 = 60 * 60 * 1000;
+
+/// How an agent looks, derived on the client from presence, state, and
+/// activity (MON-5). Activity is the later of `last_seen` and `state_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Health {
+    Healthy,
+    Stalled,
+    Gone,
+}
+
+impl Health {
+    fn label(self) -> &'static str {
+        match self {
+            Health::Healthy => "healthy",
+            Health::Stalled => "stalled",
+            Health::Gone => "gone",
+        }
+    }
+}
+
+/// The agent's health at `now` (ms since the epoch), or `None` when it is
+/// neither healthy, stalled, nor gone. `gone` wins over `stalled` for an
+/// offline agent; `stalled` wins over `healthy`.
+pub fn health(agent: &Agent, now: u64) -> Option<Health> {
+    let active = agent.last_seen.max(agent.state_at.unwrap_or(0));
+    let idle = now.saturating_sub(active);
+    if !agent.online && now.saturating_sub(agent.last_seen) > GONE_MS {
+        Some(Health::Gone)
+    } else if agent.state.as_deref() == Some("working") && idle >= STALL_MS {
+        Some(Health::Stalled)
+    } else if agent.online && idle < STALL_MS {
+        Some(Health::Healthy)
+    } else {
+        None
+    }
+}
+
 /// One agent as a text line: the address, `online` or its last-seen
-/// timestamp, its state when it reported one, and its comma-joined tags
-/// when it has any.
+/// timestamp, its state when it reported one, its health when it has a
+/// label, and its comma-joined tags when it has any.
 pub fn agent_text(agent: &Agent) -> String {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -164,6 +205,10 @@ fn agent_text_at(agent: &Agent, now: u64) -> String {
         let shown = if now.saturating_sub(state_at) > STATE_FRESH_MS { "unknown" } else { state };
         line.push_str("  ");
         line.push_str(shown);
+    }
+    if let Some(health) = health(agent, now) {
+        line.push_str("  ");
+        line.push_str(health.label());
     }
     if !agent.tags.is_empty() {
         line.push_str("  ");
@@ -259,9 +304,10 @@ pub(crate) mod tests {
             state_at: None,
             project: "default".into(),
         };
-        assert_eq!(agent_text(&agent), "a@h  2025-11-15T09:46:40Z  gpu\n");
+        let now = agent.last_seen;
+        assert_eq!(agent_text_at(&agent, now), "a@h  2025-11-15T09:46:40Z  gpu\n");
         agent.online = true;
-        assert_eq!(agent_text(&agent), "a@h  online  gpu\n");
+        assert_eq!(agent_text_at(&agent, now), "a@h  online  healthy  gpu\n");
         let json: serde_json::Value = serde_json::from_str(&agent_json(&agent)).unwrap();
         assert_eq!(json["online"], true);
         agent.online = false;
@@ -281,12 +327,63 @@ pub(crate) mod tests {
             state_at: Some(at),
             project: "default".into(),
         };
-        assert_eq!(agent_text_at(&agent, at + 60_000), "a@h  online  working  gpu\n");
-        assert_eq!(agent_text_at(&agent, at + 15 * 60_000), "a@h  online  working  gpu\n");
-        assert_eq!(agent_text_at(&agent, at + 15 * 60_000 + 1), "a@h  online  unknown  gpu\n");
+        assert_eq!(agent_text_at(&agent, at + 60_000), "a@h  online  working  healthy  gpu\n");
+        assert_eq!(agent_text_at(&agent, at + 15 * 60_000), "a@h  online  working  stalled  gpu\n");
+        assert_eq!(
+            agent_text_at(&agent, at + 15 * 60_000 + 1),
+            "a@h  online  unknown  stalled  gpu\n"
+        );
         let json: serde_json::Value = serde_json::from_str(&agent_json(&agent)).unwrap();
         assert_eq!(json["state"], "working");
         assert_eq!(json["state_at"], at);
+    }
+
+    fn agent_at(online: bool, state: Option<&str>, last_seen: u64, state_at: Option<u64>) -> Agent {
+        Agent {
+            address: "a@h".into(),
+            last_seen,
+            online,
+            tags: vec![],
+            state: state.map(String::from),
+            state_at,
+            project: "default".into(),
+        }
+    }
+
+    #[test]
+    fn health_boundaries() {
+        let t = 10_000_000_000;
+        let min = 60_000;
+        let online_idle = agent_at(true, Some("idle"), t, None);
+        assert_eq!(health(&online_idle, t + 10 * min - 1), Some(Health::Healthy));
+        assert_eq!(health(&online_idle, t + 10 * min), None);
+        let working = agent_at(true, Some("working"), t, Some(t));
+        assert_eq!(health(&working, t + 10 * min - 1), Some(Health::Healthy));
+        assert_eq!(health(&working, t + 10 * min), Some(Health::Stalled));
+        // A later last_seen counts as activity.
+        let beat = agent_at(true, Some("working"), t + 5 * min, Some(t));
+        assert_eq!(health(&beat, t + 10 * min), Some(Health::Healthy));
+        let offline = agent_at(false, None, t, None);
+        assert_eq!(health(&offline, t + 60 * min), None);
+        assert_eq!(health(&offline, t + 60 * min + 1), Some(Health::Gone));
+        // Online is never gone; offline is never healthy.
+        assert_eq!(health(&agent_at(true, None, t, None), t + 120 * min), None);
+        assert_eq!(health(&agent_at(false, None, t, None), t + min), None);
+        // Gone wins over stalled for an offline agent.
+        let left = agent_at(false, Some("working"), t, Some(t));
+        assert_eq!(health(&left, t + 120 * min), Some(Health::Gone));
+    }
+
+    #[test]
+    fn agent_text_shows_health_before_tags_and_json_has_no_health() {
+        let t = 1763200000000;
+        let mut agent = agent_at(true, Some("working"), t, Some(t));
+        agent.tags = vec!["gpu".into()];
+        assert_eq!(agent_text_at(&agent, t + 11 * 60_000), "a@h  online  working  stalled  gpu\n");
+        let gone = agent_at(false, None, t, None);
+        assert_eq!(agent_text_at(&gone, t + 2 * 3_600_000), "a@h  2025-11-15T09:46:40Z  gone\n");
+        assert_eq!(agent_text_at(&gone, t + 60_000), "a@h  2025-11-15T09:46:40Z\n");
+        assert!(!agent_json(&agent).contains("health"));
     }
 
     #[test]
