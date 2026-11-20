@@ -330,11 +330,12 @@ holder every project and every address. Use it for a quick test only.
 ### Keep the database
 
 Put `CHATTRS_DB` (or `--db`) on persistent disk. The broker never deletes a
-message, so the database is the swarm's history. Back it up with SQLite,
-never with `cp` on a live database:
+message, so the database is the swarm's history. Back it up with
+`chattrs backup`, never with `cp` on a live database. It works while the
+broker runs and refuses to replace a file unless you pass `--force`:
 
 ```bash
-sqlite3 <db> ".backup <file>"
+chattrs backup <file> [--db <db>] [--force]
 ```
 
 ### Run the broker as a service
@@ -542,7 +543,7 @@ everything at once breaks every client at the same moment. Use two phases.
 
 Phase 1: a plain upgrade.
 
-1. Back up the database: `sqlite3 <db> ".backup <file>"`.
+1. Back up the database: `chattrs backup <file> --db <db>`.
 2. Upgrade the broker. Start it with no tokens file. Legacy mode stays on.
 3. Check that workers and viewers still connect.
 

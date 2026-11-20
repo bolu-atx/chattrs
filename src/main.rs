@@ -13,6 +13,7 @@
 //! ```
 
 mod autostart;
+mod backup;
 mod cli;
 mod client;
 mod config;
@@ -162,6 +163,7 @@ async fn run(args: Args) -> Result<(), RunError> {
         Command::Skill => cmd_skill(),
         Command::Env(c) => cmd_env(c),
         Command::Setup(c) => setup::run(c).map_err(RunError::Message),
+        Command::Backup(c) => backup::run(c),
         Command::Doctor(c) => doctor::run(c).await,
         Command::Log(c) => cmd_log(c).await,
         Command::Agents(c) => cmd_agents(c).await,
