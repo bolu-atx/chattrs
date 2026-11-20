@@ -4,9 +4,9 @@ pub(crate) mod host;
 
 use crate::cli;
 use crate::commands::write;
-use crate::config;
 use crate::model;
 use crate::session::{session_pairs, Session};
+use crate::settings::{Settings, TokenSource};
 use crate::RunError;
 
 /// The default address of `chattrs exec PROGRAM`: `<basename>@<host>`.
@@ -20,13 +20,14 @@ pub(crate) fn exec_default_address(program: &str) -> String {
 /// in the program reads the token from the config, as the hooks do. An
 /// explicit `CHATTRS_TOKEN` in the parent env passes through unchanged.
 /// On Unix this replaces the chattrs process.
-pub(crate) fn cmd_exec(c: cli::ExecArgs) -> Result<(), RunError> {
+pub(crate) fn cmd_exec(c: cli::ExecArgs, settings: &Settings) -> Result<(), RunError> {
     if c.host.is_some() {
         return cmd_exec_host(c);
     }
     let program = c.command[0].clone();
     // Only a token the user exported passes on; exec never adds one.
-    let has_token = std::env::var_os("CHATTRS_TOKEN").is_some_and(|t| !t.is_empty());
+    let has_token = settings.token_source == TokenSource::Env
+        && settings.token.as_deref().is_some_and(|token| !token.is_empty());
     let address = match c.address {
         Some(address) => address,
         None => {
@@ -39,9 +40,10 @@ pub(crate) fn cmd_exec(c: cli::ExecArgs) -> Result<(), RunError> {
             address
         }
     };
+    let cwd = std::env::current_dir().unwrap_or_default();
     let session = Session {
         address,
-        project: c.project,
+        project: settings.project(c.project.as_deref(), &cwd),
         lead: c.lead,
         server: c.server,
         tags: c.tags,
@@ -51,10 +53,8 @@ pub(crate) fn cmd_exec(c: cli::ExecArgs) -> Result<(), RunError> {
     let address = pairs.iter().find(|(name, _)| *name == "CHATTRS_ADDRESS").map(|p| p.1.clone());
     let mut command = std::process::Command::new(&program);
     command.args(&c.command[1..]).envs(pairs);
-    if config::token_from_config() {
-        // `load_config` put the config token in our env; do not hand it on.
-        command.env_remove("CHATTRS_TOKEN");
-    } else if !has_token {
+    // A config token never enters our env, so the program never gets it.
+    if settings.token_source != TokenSource::Config && !has_token {
         eprintln!("chattrs: no token for {}; the broker may refuse", address.unwrap_or_default());
     }
     run_program(command, &program)

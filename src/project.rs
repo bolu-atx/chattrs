@@ -1,5 +1,5 @@
 //! The project of a client. One resolver serves every client path: the
-//! `hello`, hooks, `doctor`, and `env`.
+//! `hello`, hooks, `doctor`, and `env`. `Settings::project` calls it.
 //!
 //! Precedence: `CHATTRS_PROJECT` (or `--project`), then the config `project`,
 //! then the name of the repo, then `default`. The repo name is the basename
@@ -10,10 +10,9 @@
 use std::io::Read as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
-use crate::{config, model};
+use crate::model;
 
 const GIT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -73,38 +72,6 @@ pub fn resolve(
         Some(project) => (project, ProjectSource::Git),
         None => (model::DEFAULT_PROJECT.to_string(), ProjectSource::Default),
     }
-}
-
-/// Split a value from `CHATTRS_PROJECT` into `(explicit, config)`.
-/// `config::apply_env` exports the config project as that variable, so the
-/// two look alike once clap has run. This tells them apart.
-pub fn split_applied(value: Option<String>) -> (Option<String>, Option<String>) {
-    let from_config = config::project_from_config()
-        && value.is_some()
-        && value.as_deref() == std::env::var("CHATTRS_PROJECT").ok().as_deref();
-    if from_config {
-        (None, value)
-    } else {
-        (value, None)
-    }
-}
-
-static CURRENT: OnceLock<(String, ProjectSource)> = OnceLock::new();
-
-/// Fix the project of this process before the first `current()` call. A hook
-/// uses it, since its project comes from the session cwd.
-pub fn set_current(project: (String, ProjectSource)) {
-    let _ = CURRENT.set(project);
-}
-
-/// The project of this process, from the environment and the current
-/// directory. Resolved once, since a `watch` reconnects often.
-pub fn current() -> &'static (String, ProjectSource) {
-    CURRENT.get_or_init(|| {
-        let (explicit, config) = split_applied(std::env::var("CHATTRS_PROJECT").ok());
-        let dir = std::env::current_dir().unwrap_or_default();
-        resolve(explicit.as_deref(), config.as_deref(), &dir)
-    })
 }
 
 /// The repo name for `dir`, or `None` outside a repo, without `git`, or when

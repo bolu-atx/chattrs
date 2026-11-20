@@ -16,9 +16,10 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
-use crate::cli::{DoctorArgs, DEFAULT_SERVER};
+use crate::cli::DoctorArgs;
 use crate::config::{self, Config};
 use crate::model::{self, Inbound, Outbound};
+use crate::settings::{process_env, Settings};
 use crate::{hook, protocol, setup, skill, RunError};
 
 /// How long the connect and the `welcome` may each take.
@@ -80,8 +81,8 @@ async fn check_host(report: &mut Report, args: &DoctorArgs, home: &Path) {
     let config_ok = loaded.is_some();
     let config = loaded.unwrap_or_default();
     check_token_map(report, &config);
-    let server = args.server.clone().or_else(|| config.server.clone());
-    let server = server.unwrap_or_else(|| DEFAULT_SERVER.to_string());
+    let settings = Settings::resolve(&process_env, &config);
+    let server = args.server.clone().unwrap_or_else(|| settings.server.clone());
     let reachable = check_reachable(report, &server).await;
     let Some(address) = address_of(args) else {
         // A warning, not a failure: no code path may pick an address to say
@@ -100,7 +101,7 @@ async fn check_host(report: &mut Report, args: &DoctorArgs, home: &Path) {
     } else if !reachable {
         "broker unreachable"
     } else {
-        return check_probes(report, args, &config, &server, &address).await;
+        return check_probes(report, args, &config, &settings, (&server, &address)).await;
     };
     not_checked(report, reason);
 }
@@ -269,14 +270,11 @@ async fn check_probes(
     report: &mut Report,
     args: &DoctorArgs,
     config: &Config,
-    server: &str,
-    address: &str,
+    settings: &Settings,
+    (server, address): (&str, &str),
 ) {
     let cwd = std::env::current_dir().unwrap_or_default();
-    let (explicit, from_config) = crate::project::split_applied(args.project.clone());
-    let from_config = from_config.or(config.project.clone());
-    let (project, source) =
-        crate::project::resolve(explicit.as_deref(), from_config.as_deref(), &cwd);
+    let (project, source) = settings.project(args.project.as_deref(), &cwd);
     report.pass("project", format!("{project} ({})", source.word()));
     let hello_project = (source != crate::project::ProjectSource::Default).then_some(project);
     let own_token = match args.token.clone().filter(|token| !token.is_empty()) {

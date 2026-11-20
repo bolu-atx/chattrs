@@ -4,7 +4,8 @@ use crate::cli;
 use crate::commands::write;
 use crate::model;
 use crate::output;
-use crate::project;
+use crate::project::ProjectSource;
+use crate::settings::Settings;
 use crate::RunError;
 
 /// A fresh session id: 16 random bytes as 32 hex digits. Each
@@ -18,7 +19,8 @@ pub(crate) fn new_session_id() -> String {
 /// The session settings that `env` and `exec` both turn into variables.
 pub(crate) struct Session {
     pub(crate) address: String,
-    pub(crate) project: Option<String>,
+    /// The resolved project and where it came from.
+    pub(crate) project: (String, ProjectSource),
     pub(crate) lead: Option<String>,
     pub(crate) server: String,
     pub(crate) tags: Option<String>,
@@ -38,10 +40,8 @@ pub(crate) fn session_pairs(s: Session, with_token: bool) -> Result<SessionPairs
         ("CHATTRS_ADDRESS", s.address),
         ("CHATTRS_SESSION", new_session_id()),
     ];
-    let (explicit, from_config) = project::split_applied(s.project);
-    let cwd = std::env::current_dir().unwrap_or_default();
-    let (project, source) = project::resolve(explicit.as_deref(), from_config.as_deref(), &cwd);
-    let project = (source != project::ProjectSource::Default).then_some(project);
+    let (project, source) = s.project;
+    let project = (source != ProjectSource::Default).then_some(project);
     let optional = [
         ("CHATTRS_PROJECT", project),
         ("CHATTRS_LEAD", s.lead),
@@ -52,10 +52,11 @@ pub(crate) fn session_pairs(s: Session, with_token: bool) -> Result<SessionPairs
     Ok((pairs, source.word()))
 }
 
-pub(crate) fn cmd_env(c: cli::EnvArgs) -> Result<(), RunError> {
+pub(crate) fn cmd_env(c: cli::EnvArgs, settings: &Settings) -> Result<(), RunError> {
+    let cwd = std::env::current_dir().unwrap_or_default();
     let session = Session {
         address: c.address,
-        project: c.project,
+        project: settings.project(c.project.as_deref(), &cwd),
         lead: c.lead,
         server: c.server,
         tags: c.tags,

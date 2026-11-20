@@ -36,6 +36,7 @@ CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to
 | `src/main.rs` | Thin entry: load config, parse `cli`, start the runtime, dispatch, map `RunError` to an exit code |
 | `src/commands.rs` | The command bodies for `serve`, `stop`, `send`, `reply`, `ask`, `inbox`, `watch`, `log`, `agents`, `projects`, `status`, `skill`, plus the shared `write`, `endpoint`, and `deliver_unread` helpers |
 | `src/session.rs` | `chattrs env`: the `Session` settings and `session_pairs` that `env` and `exec` share |
+| `src/settings.rs` | `Settings::resolve`: the variables merged with the config files (flag > variable > file > default), and `apply`, which fills what clap left unset; no process-env writes |
 | `src/cli.rs` | Clap `Args` + subcommand structs, connection flags |
 | `src/model.rs` | Wire types (`Inbound`, `Outbound`), limits, address validation, serde shapes |
 | `src/exec.rs` | `chattrs exec`: run a program with the session variables, or on a remote host with `--host` |

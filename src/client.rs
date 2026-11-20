@@ -52,6 +52,11 @@ pub struct Endpoint {
     pub server: String,
     pub address: String,
     pub token: Option<String>,
+    /// The project to say in the `hello`; `None` means the default project,
+    /// so the `hello` stays as old clients send it.
+    pub project: Option<String>,
+    /// The raw `CHATTRS_TAGS` list for the `hello`.
+    pub tags: Option<String>,
 }
 
 /// One message to publish: its recipient, body, reply id, and topic.
@@ -119,28 +124,6 @@ fn hello_tags(custom: Option<&str>) -> Vec<String> {
     tags
 }
 
-/// The project to say in the `hello` when none is given: `CHATTRS_PROJECT`,
-/// then the config, then the git repo name. `None` means the default
-/// project, so the `hello` stays as old clients send it.
-fn implicit_project() -> Option<String> {
-    // Unit tests run inside this repo, so they would join project `chattrs`
-    // while the binaries they spawn join `default`. Opt out.
-    if cfg!(test) {
-        return None;
-    }
-    let (project, source) = crate::project::current();
-    (*source != crate::project::ProjectSource::Default).then(|| project.clone())
-}
-
-/// The lead from `CHATTRS_LEAD`, or `None` when it is unset or blank. The
-/// one place the variable is read. It names the address an agent takes
-/// orders from, and only the launch environment sets it.
-pub fn env_lead() -> Option<String> {
-    let value = std::env::var("CHATTRS_LEAD").ok()?;
-    let value = value.trim();
-    (!value.is_empty()).then(|| value.to_string())
-}
-
 /// The session from `CHATTRS_SESSION`, or `None` when it is unset or
 /// blank. The one place the variable is read. The launch environment
 /// sets it, so it survives `/clear`.
@@ -199,14 +182,10 @@ impl Client {
             v: model::PROTOCOL_VERSION,
             address: endpoint.address.clone(),
             token: endpoint.token.clone(),
-            tags: if observer {
-                Vec::new()
-            } else {
-                hello_tags(std::env::var("CHATTRS_TAGS").ok().as_deref())
-            },
+            tags: if observer { Vec::new() } else { hello_tags(endpoint.tags.as_deref()) },
             observer,
             state: state.map(str::to_string),
-            project: project.map(str::to_string).or_else(implicit_project),
+            project: project.map(str::to_string).or_else(|| endpoint.project.clone()),
             session: env_session(),
         };
         // On a startable server a broker may be coming up, ours or a
