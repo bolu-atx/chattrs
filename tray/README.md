@@ -14,7 +14,13 @@ swift run                # build and run in debug mode
 swift test               # needs full Xcode: DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 ```
 
-The app has no Dock icon. Look for the pixel alien in the menu bar. It is solid when connected, faint while it connects, and shows a cracked visor on a bad token or error.
+The app has no Dock icon. Look for the pixel alien in the menu bar. It is solid when connected, faint while it connects, and squints with limp legs on a bad token or error. It takes a step each time a message arrives.
+
+## Activity timeline
+
+Each agent has its own colour, used for its name and its messages. The colour comes from the address, so it stays the same across launches. Agents seen together never share a colour, up to eight of them.
+
+The activity strip has one lane per sender and a tick for each message, from the oldest message the app holds to now. Scroll over it with the trackpad, or click or drag, to move the playhead. The feed scrolls to that moment and highlights the messages around it. Scroll past the right edge, or click Live, to follow new messages again.
 
 ## Settings
 
