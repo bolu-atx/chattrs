@@ -1291,3 +1291,90 @@ fn env_with_token_picks_the_token_for_the_address() {
     assert_eq!(token_for("w1@box", None).as_deref(), Some("tok-plain"));
     assert_eq!(token_for("lead@mac", Some("explicit")).as_deref(), Some("explicit"));
 }
+
+/// Run chattrs in `home` with `args`, feeding `stdin` text.
+fn run_with_stdin(home: &std::path::Path, args: &[&str], stdin: &str) -> Output {
+    use std::io::Write as _;
+    let mut command = common::command(binary());
+    command.args(args);
+    clean_home_env(&mut command, home);
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn chattrs");
+    child.stdin.take().expect("stdin").write_all(stdin.as_bytes()).expect("write stdin");
+    child.wait_with_output().expect("run chattrs")
+}
+
+#[test]
+fn setup_broker_then_join_gives_each_identity_its_token() {
+    let broker = tempfile::TempDir::new().expect("broker home");
+    let client = tempfile::TempDir::new().expect("client home");
+    let first = run_with_stdin(
+        broker.path(),
+        &["setup", "--broker", "--hosts", "mac,bobox", "--bind", "127.0.0.1"],
+        "",
+    );
+    assert_eq!(first.status.code(), Some(0), "setup --broker: {first:?}");
+    let tokens = broker.path().join(".config/chattrs/tokens.toml");
+    let unit = if cfg!(target_os = "macos") {
+        broker.path().join("Library/LaunchAgents/com.chattrs.broker.plist")
+    } else {
+        broker.path().join(".config/systemd/user/chattrs.service")
+    };
+    assert!(tokens.is_file() && unit.is_file(), "tokens and unit are written");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&tokens).expect("tokens").permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "tokens.toml is private");
+    }
+    let unit_text = std::fs::read_to_string(&unit).expect("unit");
+    assert!(unit_text.contains("127.0.0.1:4646") && unit_text.contains("--tokens"), "{unit_text}");
+    let stdout = stdout_text(&first);
+    assert!(stdout.starts_with("Treat these like passwords."), "{stdout}");
+    let joins: Vec<(&str, &str)> =
+        stdout.lines().filter_map(|line| line.split_once(": chattrs://")).collect();
+    let find = |label: &str| {
+        let (_, rest) = joins.iter().find(|(l, _)| *l == label).expect(label);
+        format!("chattrs://{rest}")
+    };
+    assert_eq!(joins.len(), 4, "{stdout}");
+
+    let again = run_with_stdin(
+        broker.path(),
+        &["setup", "--broker", "--hosts", "mac", "--bind", "127.0.0.1"],
+        "",
+    );
+    assert_ne!(again.status.code(), Some(0), "a second run refuses");
+    assert!(String::from_utf8_lossy(&again.stderr).contains("tokens.toml"));
+    let wild = run_with_stdin(
+        client.path(),
+        &["setup", "--broker", "--hosts", "mac", "--bind", "0.0.0.0"],
+        "",
+    );
+    assert_ne!(wild.status.code(), Some(0), "a wildcard bind is refused");
+
+    let input = format!("{}\n{}\n", find("lead lead@mac"), find("agent bobox"));
+    let joined = run_with_stdin(client.path(), &["setup", "--join", "-"], &input);
+    assert_eq!(joined.status.code(), Some(0), "setup --join: {joined:?}");
+    let leaked = String::from_utf8_lossy(&joined.stdout).to_string()
+        + &String::from_utf8_lossy(&joined.stderr);
+    assert!(!leaked.contains("chattrs://"), "no join string in the output");
+    let token_of = |address: &str| {
+        let out = run_with_stdin(client.path(), &["env", "--as", address, "--with-token"], "");
+        assert_eq!(out.status.code(), Some(0), "env: {out:?}");
+        parse_exports(&stdout_text(&out)).remove("CHATTRS_TOKEN")
+    };
+    let secret = |join: String| join.split_once('@').map(|(head, _)| head[10..].to_string());
+    assert_eq!(token_of("lead@mac"), secret(find("lead lead@mac")));
+    assert_eq!(token_of("w1@bobox"), secret(find("agent bobox")));
+    let config =
+        std::fs::read_to_string(client.path().join(".config/chattrs/config.toml")).expect("config");
+    assert!(config.contains("server = \"127.0.0.1:4646\""), "{config}");
+    assert!(client.path().join(".config/chattrs/any-bobox.token").is_file());
+
+    let repeat = run_with_stdin(client.path(), &["setup", "--join", &find("agent bobox")], "");
+    assert_ne!(repeat.status.code(), Some(0), "re-joining a pattern refuses");
+    let forced =
+        run_with_stdin(client.path(), &["setup", "--join", &find("agent bobox"), "--force"], "");
+    assert_eq!(forced.status.code(), Some(0), "--force replaces: {forced:?}");
+}

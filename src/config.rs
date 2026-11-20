@@ -188,8 +188,10 @@ pub fn address_hint(args: &[String], var: impl Fn(&str) -> Option<String>) -> Op
             }
         })
     };
+    let is_setup = args.first().is_some_and(|arg| arg == "setup");
     let host = |agent: String| format!("{agent}@{}", crate::cli::short_hostname());
     flag("--as")
+        .filter(|_| !is_setup)
         .or_else(|| flag("--address"))
         .or_else(|| flag("--agent").filter(|_| !is_hook).map(host))
         .or_else(|| var("CHATTRS_ADDRESS").filter(|value| !value.is_empty()))

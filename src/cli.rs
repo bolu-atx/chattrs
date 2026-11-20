@@ -6,6 +6,9 @@ use std::path::PathBuf;
 /// Broker address clients connect to and the server listens on by default.
 pub const DEFAULT_SERVER: &str = "127.0.0.1:4646";
 
+/// The port in `DEFAULT_SERVER`, for `setup --broker`.
+pub const DEFAULT_PORT: u16 = 4646;
+
 /// Distributed messaging for cross-agent coordination.
 #[derive(Parser, Debug)]
 #[command(name = "chattrs", version)]
@@ -46,8 +49,8 @@ pub enum Command {
     Hook(HookArgs),
     /// Install or remove the chattrs hooks in Claude Code and Codex configs.
     Hooks(HooksArgs),
-    /// Set up this host: hooks and skill for each agent found, and a starter config.
-    Setup,
+    /// Set up this host (hooks, skill, config), a broker host (`--broker`), or join a broker (`--join`).
+    Setup(SetupArgs),
 }
 
 /// The agent events a hook serves, in the kebab-case form of the Claude
@@ -454,4 +457,47 @@ mod tests {
         let err = client_args().resolve_address().unwrap_err();
         assert!(err.contains("CHATTRS_ADDRESS or CHATTRS_AGENT"), "got: {err}");
     }
+}
+
+#[derive(clap::Args, Debug, Default)]
+pub struct SetupArgs {
+    /// Set up a broker: write the tokens file and the service unit, and print join strings.
+    #[arg(long, requires = "hosts", conflicts_with = "join")]
+    pub broker: bool,
+
+    /// Agent hosts to issue a token for, comma-separated.
+    #[arg(long, value_delimiter = ',', requires = "broker")]
+    pub hosts: Vec<String>,
+
+    /// Lead address (default `lead@<first host>`).
+    #[arg(long, requires = "broker")]
+    pub lead: Option<String>,
+
+    /// Projects to issue tokens for, comma-separated (default `default`).
+    #[arg(long, value_delimiter = ',', requires = "broker")]
+    pub projects: Vec<String>,
+
+    /// IP the broker binds (default: the Tailscale IPv4). Never 0.0.0.0 or ::.
+    #[arg(long, requires = "broker")]
+    pub bind: Option<String>,
+
+    /// Broker port (default 4646).
+    #[arg(long, requires = "broker")]
+    pub port: Option<u16>,
+
+    /// Enable and start the service after writing the unit.
+    #[arg(long, requires = "broker")]
+    pub enable: bool,
+
+    /// Join string from a broker; repeatable. `-` reads one per line from stdin.
+    #[arg(long, value_name = "STRING")]
+    pub join: Vec<String>,
+
+    /// Address pattern for a single join string that has no `?as=`.
+    #[arg(long = "as", value_name = "PATTERN", requires = "join")]
+    pub join_as: Option<String>,
+
+    /// Replace an existing token file and config entry for the same pattern.
+    #[arg(long, requires = "join")]
+    pub force: bool,
 }

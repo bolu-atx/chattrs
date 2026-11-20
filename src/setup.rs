@@ -9,7 +9,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cli::{HooksAction, HooksAgent, HooksTarget};
+use crate::cli::{HooksAction, HooksAgent, HooksTarget, SetupArgs};
 use crate::{hook_install, skill};
 
 /// The starter config. Every line is a comment, so it changes nothing until
@@ -80,8 +80,20 @@ fn setup_agent(target: &Target) -> Result<(), String> {
     Ok(())
 }
 
-/// Run `chattrs setup`.
-pub fn run() -> Result<(), String> {
+/// Run `chattrs setup`. `--broker` sets up a broker host and nothing else.
+/// `--join` stores the tokens first, then the host setup runs as usual.
+pub fn run(args: SetupArgs) -> Result<(), String> {
+    if args.broker {
+        return crate::setup_broker::run(&args);
+    }
+    if !args.join.is_empty() {
+        crate::setup_join::run(&args)?;
+    }
+    run_host()
+}
+
+/// Hooks, skill, and config for this host.
+fn run_host() -> Result<(), String> {
     let home = hook_install::home()?;
     let claude_dir = home.join(".claude");
     let codex_dir = hook_install::codex_home(&home);
