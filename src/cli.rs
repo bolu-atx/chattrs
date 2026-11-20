@@ -51,6 +51,8 @@ pub enum Command {
     Hooks(HooksArgs),
     /// Check this host end to end: config, broker, token, hooks, skill. Read-only.
     Doctor(DoctorArgs),
+    /// Copy the broker database to a file while the broker runs.
+    Backup(BackupArgs),
     /// Set up this host (hooks, skill, config), a broker host (`--broker`), or join a broker (`--join`).
     Setup(SetupArgs),
 }
@@ -525,4 +527,18 @@ pub struct DoctorArgs {
     /// Token that overrides every token file.
     #[arg(long, env = "CHATTRS_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct BackupArgs {
+    /// Destination file.
+    pub file: PathBuf,
+
+    /// Source database (default: the broker's default, as for `serve --db`).
+    #[arg(long, env = "CHATTRS_DB")]
+    pub db: Option<PathBuf>,
+
+    /// Replace an existing destination file.
+    #[arg(long)]
+    pub force: bool,
 }

@@ -12,7 +12,7 @@ exclude = ["tray"]
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 gethostname = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 socket2 = "0.6"
