@@ -89,7 +89,12 @@ mod tests {
             topic: None,
         };
         let frames = vec![
-            Outbound::Welcome { server: "chattrs".into(), v: 1, address: "codex@box1".into() },
+            Outbound::Welcome {
+                server: "chattrs".into(),
+                v: 1,
+                address: "codex@box1".into(),
+                watching: false,
+            },
             Outbound::Sent { id: 12, known: None },
             Outbound::Inbox { messages: vec![message.clone()] },
             Outbound::Message(message),
@@ -148,6 +153,7 @@ mod tests {
                 server: "chattrs".into(),
                 v: 1,
                 address: "a@h".into(),
+                watching: false,
             })
             .unwrap(),
             serde_json::to_value(Outbound::Sent { id: 1, known: None }).unwrap(),
@@ -190,5 +196,14 @@ mod tests {
         assert_eq!(frame, Outbound::Sent { id: 3, known: None });
         let line = encode(&frame).unwrap();
         assert_eq!(line.trim_end(), "{\"type\":\"sent\",\"id\":3}");
+    }
+
+    #[test]
+    fn welcome_without_watching_decodes_to_false() {
+        let line = r#"{"type":"welcome","server":"chattrs","v":1,"address":"a@h"}"#;
+        match decode::<Outbound>(line) {
+            Ok(Outbound::Welcome { watching, .. }) => assert!(!watching),
+            other => panic!("{other:?}"),
+        }
     }
 }

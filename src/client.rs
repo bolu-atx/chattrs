@@ -70,6 +70,9 @@ pub struct Outgoing {
 pub struct Client {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
+    /// True when the broker's welcome said the address already had a live
+    /// inbox `watch`.
+    watching: bool,
 }
 
 /// How long one TCP connect may take before it counts as failed.
@@ -86,7 +89,10 @@ struct ConnectError {
 
 async fn connect_stream(server: &str) -> Result<TcpStream, ConnectError> {
     match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect(server)).await {
-        Ok(Ok(stream)) => Ok(stream),
+        Ok(Ok(stream)) => {
+            crate::server::set_keepalive(&stream);
+            Ok(stream)
+        }
         Ok(Err(e)) => Err(ConnectError {
             refused: e.kind() == ErrorKind::ConnectionRefused,
             message: format!("connect {server}: {e}"),
@@ -148,7 +154,8 @@ impl Client {
             Err(error) => return Err(ClientError::Io(error.message)),
         };
         let (read_half, write_half) = stream.into_split();
-        let mut client = Client { reader: BufReader::new(read_half), writer: write_half };
+        let mut client =
+            Client { reader: BufReader::new(read_half), writer: write_half, watching: false };
         let frame = client
             .request(&Inbound::Hello {
                 v: model::PROTOCOL_VERSION,
@@ -158,7 +165,10 @@ impl Client {
             })
             .await?;
         match frame {
-            Outbound::Welcome { .. } => Ok(client),
+            Outbound::Welcome { watching, .. } => {
+                client.watching = watching;
+                Ok(client)
+            }
             _ => Err(ClientError::Protocol(
                 "server sent an unexpected frame instead of welcome".to_string(),
             )),
@@ -538,6 +548,13 @@ impl Watcher {
             Client::connect(&self.endpoint).await?
         };
         self.connected_once = true;
+        if client.watching && self.topics.is_empty() {
+            eprintln!(
+                "chattrs: warning: {} already has a live watch (another session, or a \
+                 stale connection that clears within about a minute)",
+                self.endpoint.address
+            );
+        }
         client.send_frame(&Inbound::Watch { topics: self.topics.clone() }).await?;
         self.client = Some(client);
         self.backoff_secs = 1;

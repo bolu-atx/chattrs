@@ -101,6 +101,10 @@ pub struct Message {
 pub struct Agent {
     pub address: String,
     pub last_seen: u64,
+    /// True while the address has a live inbox `watch` connection. The
+    /// broker fills it per request; it is never stored.
+    #[serde(default)]
+    pub online: bool,
     /// Tags from the agent's latest `hello` that carried any; empty when
     /// it never sent tags.
     #[serde(default)]
@@ -183,6 +187,10 @@ pub enum Outbound {
         server: String,
         v: u32,
         address: String,
+        /// True when the address already had a live inbox `watch` at
+        /// `hello` time. Absent when false, and from an older broker.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        watching: bool,
     },
     /// Confirms a stored message with its id. `known` is `false` when the
     /// `to` address never said `hello`. It is absent when the send has no

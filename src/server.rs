@@ -14,9 +14,9 @@
 #[cfg(test)]
 mod tests;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::io::{AsyncWriteExt, BufReader};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -51,6 +51,45 @@ pub struct Broker {
     store: Store,
     pushed: broadcast::Sender<Arc<Message>>,
     token: Option<String>,
+    /// Live inbox `watch` connections per address. In memory only.
+    watchers: Arc<Mutex<HashMap<String, usize>>>,
+}
+
+/// One live inbox watch in the broker's count. Dropping it removes the
+/// watch, so EOF, errors, panics, and shutdown all decrement.
+struct WatchGuard {
+    watchers: Arc<Mutex<HashMap<String, usize>>>,
+    address: String,
+}
+
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        let mut watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = watchers.get_mut(&self.address) {
+            *count -= 1;
+            if *count == 0 {
+                watchers.remove(&self.address);
+            }
+        }
+    }
+}
+
+/// Probe an idle connection after 30 s, every 10 s, so a peer that
+/// vanished without a FIN (sleep, lost Wi-Fi) is noticed and closed.
+pub(crate) fn set_keepalive(stream: &TcpStream) {
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(30))
+        .with_interval(std::time::Duration::from_secs(10));
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd"
+    ))]
+    let keepalive = keepalive.with_retries(3);
+    let _ = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive);
 }
 
 /// State held by one connection: its address after `hello`, what it
@@ -59,6 +98,9 @@ pub struct Broker {
 struct ConnState {
     address: Option<String>,
     watch_topics: Option<Vec<String>>,
+    /// Held while this connection counts in `Broker::watchers`. Its drop
+    /// decrements, on every exit path.
+    watch_guard: Option<WatchGuard>,
     highest: u64,
     waits: HashSet<u64>,
     push_rx: Option<broadcast::Receiver<Arc<Message>>>,
@@ -210,7 +252,7 @@ enum Event {
 impl Broker {
     pub fn new(store: Store, token: Option<String>) -> Broker {
         let (pushed, _) = broadcast::channel(1024);
-        Broker { store, pushed, token }
+        Broker { store, pushed, token, watchers: Arc::default() }
     }
 
     /// Compare a presented token against the expected one without
@@ -275,6 +317,7 @@ impl Broker {
                 break;
             }
         }
+        self.count_watch(&mut conn, false);
         if let Some(address) = conn.address.clone() {
             let _ = self.store.touch_agent(address, Vec::new()).await;
         }
@@ -330,11 +373,13 @@ impl Broker {
             return Err(WireError::new("bad_tags", "too many tags or a tag is too long"));
         }
         self.store.touch_agent(address.clone(), tags).await?;
+        let watching = self.is_watched(&address);
         conn.address = Some(address.clone());
         Ok(vec![Outbound::Welcome {
             server: protocol::SERVER_NAME.to_string(),
             v: model::PROTOCOL_VERSION,
             address,
+            watching,
         }])
     }
 
@@ -436,6 +481,7 @@ impl Broker {
         }
         conn.subscribe(&self.pushed);
         conn.watch_topics = Some(topics.clone());
+        self.count_watch(conn, topics.is_empty());
         let from = conn.address.clone().unwrap_or_default();
         let backlog = if topics.is_empty() {
             self.store.inbox(from).await?
@@ -460,8 +506,34 @@ impl Broker {
         Ok(Vec::new())
     }
 
+    /// Make this connection count as a live inbox watch, or not. Safe to
+    /// call again: the connection counts at most once.
+    fn count_watch(&self, conn: &mut ConnState, inbox_watch: bool) {
+        let Some(address) = conn.address.clone() else {
+            return;
+        };
+        if conn.watch_guard.is_some() == inbox_watch {
+            return;
+        }
+        if inbox_watch {
+            let mut watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
+            *watchers.entry(address.clone()).or_insert(0) += 1;
+            conn.watch_guard = Some(WatchGuard { watchers: Arc::clone(&self.watchers), address });
+        } else {
+            conn.watch_guard = None;
+        }
+    }
+
+    /// True when the address has at least one live inbox watch.
+    fn is_watched(&self, address: &str) -> bool {
+        self.watchers.lock().unwrap_or_else(|e| e.into_inner()).contains_key(address)
+    }
+
     async fn on_agents(&self) -> Result<Vec<Outbound>, WireError> {
-        let agents = self.store.agents().await?;
+        let mut agents = self.store.agents().await?;
+        for agent in &mut agents {
+            agent.online = self.is_watched(&agent.address);
+        }
         Ok(vec![Outbound::Agents { agents }])
     }
 
@@ -542,6 +614,7 @@ pub async fn serve(listen: &str, db: &Path, token: Option<String>) -> Result<(),
 async fn run_listener(listener: TcpListener, broker: Arc<Broker>) -> Result<(), String> {
     loop {
         let (stream, _peer) = listener.accept().await.map_err(|e| e.to_string())?;
+        set_keepalive(&stream);
         let broker = Arc::clone(&broker);
         tokio::spawn(async move {
             broker.handle(stream).await;

@@ -112,7 +112,7 @@ only; it never acks.
 | `inbox` | Print every unread message for `--address`, then ack what was printed. Announcements never appear here. |
 | `watch` | Stream new messages as JSON lines forever, acking what is printed. With `--topic SLUG` (repeatable), stream that room's announcements instead, without acking. |
 | `ask` | Post to `--to ADDR` and block for the reply (`--timeout SECS`, default 600, `0` means no limit). Names the workstream with `--topic SLUG`. Exits 0 on a reply, 2 on a timeout. |
-| `agents` | List known agent addresses and when each was last seen. |
+| `agents` | List known agent addresses, `online` while an agent has a live inbox `watch`, else when it was last seen. |
 | `log` | Show the full message history, oldest first. With `--about ADDR`, keep only messages that ADDR sent or received. |
 | `skill` | Print the bundled agent skill (`skills/chattrs/SKILL.md`) to stdout. Opens no connection, needs no address. |
 
@@ -273,7 +273,7 @@ Broker → client:
 {"type":"message", "id":13,"from":"opus@mac","to":"codex@box1",
  "body":"hi","ts":1763200000001,"reply_to":12,"topic":null}
 {"type":"acked",   "ids":[12, 13]}
-{"type":"agents",  "agents":[{"address":"codex@box1","last_seen":1763200000000,"tags":["os:linux","gpu"]}]}
+{"type":"agents",  "agents":[{"address":"codex@box1","last_seen":1763200000000,"online":true,"tags":["os:linux","gpu"]}]}
 {"type":"log",     "messages":[
   {"id":12,"from":"codex@box1","to":"opus@mac",
    "body":"hi","ts":1763200000000,"reply_to":null,"topic":null,"acked_at":null}]}
@@ -311,7 +311,15 @@ messages and never connected is not listed. `hello` may carry an optional
 always sends `os:<os>` and `arch:<arch>`, plus the comma-separated entries of
 `CHATTRS_TAGS` (for example `CHATTRS_TAGS=gpu:4090,fast`). The broker keeps
 the tags of the latest `hello` that sent any, and `agents` shows them after
-the last-seen time; `agents --json` always has a `tags` array. The `inbox` command prints each message, flushes stdout, then acks,
+the last-seen time; `agents --json` always has a `tags` array. Each agent
+also has `online`: `true` while the address has a live inbox `watch`
+connection (topic watches do not count), else `false`. The broker counts
+this in memory and never stores it; an older broker omits it, which reads as
+`false`. `agents` text shows `online` in place of the last-seen time.
+`welcome` may carry `"watching":true` when the address already has a live
+inbox `watch` at `hello` time; it is omitted otherwise, and from an older
+broker. The `watch` command then warns once per connect on stderr and keeps
+watching; other commands ignore it. The `inbox` command prints each message, flushes stdout, then acks,
 so a crash between print and ack redelivers the message on the next run —
 delivery is at least once, and the id tells duplicates apart.
 
