@@ -102,9 +102,16 @@ pub fn log_text(message: &LoggedMessage) -> String {
     format!("{}\n", render_log_line(message))
 }
 
-/// One agent as a text line: the address and its last-seen timestamp.
+/// One agent as a text line: the address, its last-seen timestamp, and
+/// its comma-joined tags when it has any.
 pub fn agent_text(agent: &Agent) -> String {
-    format!("{}  {}\n", agent.address, format_ts(agent.last_seen))
+    let mut line = format!("{}  {}", agent.address, format_ts(agent.last_seen));
+    if !agent.tags.is_empty() {
+        line.push_str("  ");
+        line.push_str(&agent.tags.join(","));
+    }
+    line.push('\n');
+    line
 }
 
 /// A published id as a text line.

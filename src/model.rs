@@ -27,6 +27,12 @@ pub const MAX_TOPIC_BACKLOG: u64 = 500;
 /// Largest accepted topic slug, in bytes.
 pub const MAX_TOPIC_BYTES: usize = 64;
 
+/// Most tags the broker accepts in one `hello`.
+pub const MAX_TAGS: usize = 32;
+
+/// Largest accepted tag, in bytes.
+pub const MAX_TAG_BYTES: usize = 64;
+
 /// The `log` page size when the frame omits `limit`.
 fn default_log_limit() -> u64 {
     MAX_LOG_LIMIT
@@ -95,6 +101,10 @@ pub struct Message {
 pub struct Agent {
     pub address: String,
     pub last_seen: u64,
+    /// Tags from the agent's latest `hello` that carried any; empty when
+    /// it never sent tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// One message in `log` history: the message plus when it was read, if
@@ -117,6 +127,10 @@ pub enum Inbound {
         address: String,
         #[serde(default)]
         token: Option<String>,
+        /// Hardware and custom tags, like `os:linux` or `gpu`. Absent
+        /// when empty.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tags: Vec<String>,
     },
     /// Store a message for the `to` address. The broker fills in `from`.
     /// With no `to`, the broker answers `reply_to` to its sender instead.

@@ -8,5 +8,6 @@ mod helpers;
 mod log;
 mod mailbox;
 mod retry;
+mod tags;
 mod topics;
 mod watch;

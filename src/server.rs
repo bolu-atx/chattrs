@@ -276,7 +276,7 @@ impl Broker {
             }
         }
         if let Some(address) = conn.address.clone() {
-            let _ = self.store.touch_agent(address).await;
+            let _ = self.store.touch_agent(address, Vec::new()).await;
         }
         let _ = writer.shutdown().await;
     }
@@ -289,8 +289,8 @@ impl Broker {
     ) -> Result<Vec<Outbound>, WireError> {
         if conn.address.is_none() {
             return match frame {
-                Inbound::Hello { v, address, token } => {
-                    self.on_hello(conn, v, address, token).await
+                Inbound::Hello { v, address, token, tags } => {
+                    self.on_hello(conn, v, address, token, tags).await
                 }
                 _ => Err(WireError::new("hello_required", "hello must be the first frame")),
             };
@@ -315,6 +315,7 @@ impl Broker {
         v: u32,
         address: String,
         token: Option<String>,
+        tags: Vec<String>,
     ) -> Result<Vec<Outbound>, WireError> {
         if !self.token_ok(token.as_deref()) {
             return Err(WireError::new("bad_token", "token is missing or incorrect"));
@@ -325,7 +326,10 @@ impl Broker {
         if !model::is_valid_address(&address) {
             return Err(WireError::new("bad_address", "address is invalid"));
         }
-        self.store.touch_agent(address.clone()).await?;
+        if tags.len() > model::MAX_TAGS || tags.iter().any(|tag| tag.len() > model::MAX_TAG_BYTES) {
+            return Err(WireError::new("bad_tags", "too many tags or a tag is too long"));
+        }
+        self.store.touch_agent(address.clone(), tags).await?;
         conn.address = Some(address.clone());
         Ok(vec![Outbound::Welcome {
             server: protocol::SERVER_NAME.to_string(),
