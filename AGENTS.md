@@ -41,6 +41,8 @@ CHATTRS_ADDRESS=claude@h target/debug/chattrs send --server 127.0.0.1:47654 --to
 | `src/client.rs` | One connection per command, returns data and prints nothing; `watch` streams and acks through a `Watcher` on its own connection, `ask` sends, waits, and acks on one connection, `log` pages history |
 | `src/autostart.rs` | On-demand broker: loopback check, detached spawn, pidfile, `stop` |
 | `src/setup.rs` | `chattrs setup`: detect agents, install hooks (via `hook_install`) and the skill, write a missing config |
+| `src/setup_broker.rs` | `chattrs setup --broker`: write the broker `tokens.toml` (0600) and a systemd or launchd unit, print join strings |
+| `src/setup_join.rs` | `chattrs setup --join`: parse join strings, write token files, edit `[tokens]` in `config.toml` |
 | `src/skill.rs` | Embedded agent skill text printed by `chattrs skill` |
 | `skills/chattrs/SKILL.md` | Agent skill: `send`, `ask`, `reply`, no polling |
 

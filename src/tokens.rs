@@ -109,7 +109,7 @@ pub(crate) fn glob_matches(pattern: &str, text: &str) -> bool {
 }
 
 /// A pattern is an address shape with `*` allowed anywhere.
-fn is_valid_pattern(addr: &str) -> bool {
+pub(crate) fn is_valid_pattern(addr: &str) -> bool {
     let allowed =
         |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'@' | b'*');
     !addr.is_empty()

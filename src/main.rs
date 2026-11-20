@@ -23,6 +23,8 @@ mod output;
 mod protocol;
 mod server;
 mod setup;
+mod setup_broker;
+mod setup_join;
 mod skill;
 mod store;
 mod tokens;
@@ -150,7 +152,7 @@ async fn run(args: Args) -> Result<(), RunError> {
         Command::Inbox(c) => cmd_inbox(c).await,
         Command::Skill => cmd_skill(),
         Command::Env(c) => cmd_env(c),
-        Command::Setup => setup::run().map_err(RunError::Message),
+        Command::Setup(c) => setup::run(c).map_err(RunError::Message),
         Command::Log(c) => cmd_log(c).await,
         Command::Agents(c) => cmd_agents(c).await,
         Command::Projects(c) => cmd_projects(c).await,

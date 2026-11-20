@@ -80,6 +80,46 @@ runs `chattrs watch`.
    `eval "$(chattrs env --as w1@box1)" && codex`
    ([Start a worker](#start-a-worker)).
 
+### Several hosts: `setup --broker` and `setup --join` (SETUP-2)
+
+On the broker host, one command writes the token file and the service unit:
+
+```bash
+chattrs setup --broker --hosts mac,bobox [--lead lead@mac] [--projects p1,p2] \
+  [--bind <ip>] [--port 4646] [--enable]
+```
+
+It writes `~/.config/chattrs/tokens.toml` (mode 0600) and a systemd user unit
+(`~/.config/systemd/user/chattrs.service`) or a launchd plist
+(`~/Library/LaunchAgents/com.chattrs.broker.plist`). It never overwrites
+either file. It prints the command that starts the service; `--enable` runs
+it. Without `--bind`, it uses `tailscale ip -4`. It refuses `0.0.0.0` and `::`.
+It issues one agent token per host (`*@<host>`), one lead token, and one
+observer token (`tray@*`, all projects). Then it prints one join string for
+each, `chattrs://<token>@<ip>:<port>?as=<pattern>`. The pattern is
+percent-encoded. A join string is a password. Nothing stores it.
+
+On each other host, give the join strings to `setup --join`. Read them from
+stdin, so they stay out of shell history:
+
+```bash
+chattrs setup --join - <<'EOF'
+chattrs://TOKEN@100.64.0.1:4646?as=%2A%40bobox
+EOF
+chattrs setup --join 'chattrs://TOKEN@100.64.0.1:4646?as=lead%40mac'   # quote it
+```
+
+`--join` is repeatable, and stdin can carry one string per line. A string
+without `?as=` needs `--as <pattern>` (one string only). Each string writes
+`~/.config/chattrs/<name>.token` (mode 0600) and adds one `[tokens]` entry to
+`config.toml`. The name is the pattern with `@` as `-` and `*` as `any`:
+`lead@mac` gives `lead-mac.token`, `*@bobox` gives `any-bobox.token`. The
+command sets `server` when it is missing, and it refuses a different
+`server`. It keeps all other lines. It refuses a pattern that already has an
+entry or a file; `--force` replaces them. Then it runs the plain `setup`. The
+project is not in the join string; it comes from `.chattrs.toml`, else
+`default`.
+
 ## Install
 
 ```bash
@@ -151,7 +191,7 @@ acks them (MSG-5). Announcements never reach an inbox.
 | `projects [--json]` | List every project with its agent and message counts. Read-only. |
 | `status working\|idle\|waiting` | Report the own state. Best effort: it never starts a broker, gives up after about 2 s, and always exits 0. |
 | `env --as ADDR [--project P] [--lead ADDR] [--server S] [--tags T] [--token T] [--with-token]` | Print `export` lines for one session: `eval "$(chattrs env --as a@h)"`. It makes a new `CHATTRS_SESSION` on every run. It omits the token unless `--with-token`. |
-| `setup` | Install the hooks and the skill for each agent found (Claude Code, Codex). Write a starter `config.toml` only if missing. Safe to run again. |
+| `setup` | Install the hooks and the skill for each agent found (Claude Code, Codex). Write a starter `config.toml` only if missing. Safe to run again. `setup --broker --hosts a,b [...]` prepares a broker host; `setup --join STRING\|-` stores join-string tokens. See [Several hosts](#several-hosts-setup---broker-and-setup---join-setup-2). |
 | `hooks install\|remove [--agent claude\|codex\|all] [--project]` | Edit the hook entries in the agent configs. See [Hooks](#hooks-claude-code-and-codex). |
 | `hook EVENT` | Run as a hook. Reads hook JSON on stdin. Not for direct use. |
 | `skill` | Print the bundled agent skill. Needs no connection or address. |
