@@ -1,12 +1,14 @@
 //! chattrs — `setup --broker` (SETUP-2): prepare the broker host.
 //!
 //! It writes the broker tokens file (mode 0600) and a service unit, and
-//! prints one join string per host plus one for the lead and one for the
-//! observer. It never overwrites the tokens file or a unit. The join
-//! strings go to stdout only. They are secrets.
+//! issues one join string per host plus one for the lead and one for the
+//! observer. It never overwrites the tokens file, a unit, or a join file.
+//! The join strings are secrets. With `--join-dir` they go to 0600 files,
+//! and stdout lists only the paths. Without it they go to a terminal, and
+//! a run with stdout not a terminal refuses.
 
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -25,9 +27,11 @@ struct Plan {
     projects: Vec<String>,
 }
 
-/// One join string to print: a label, the pattern, and the token.
+/// One join string to hand out: a label, a file stem, the pattern, and the token.
 struct Issued {
     label: String,
+    /// The join file is `<name>.join`.
+    name: String,
     pattern: String,
     token: String,
 }
@@ -159,17 +163,23 @@ fn generate(
         for scope in &scopes {
             add(&token, *scope, &pattern, "agent");
         }
-        issued.push(Issued { label: format!("agent {host}"), pattern, token });
+        issued.push(Issued { label: format!("agent {host}"), name: host.clone(), pattern, token });
     }
     let token = next_token()?;
     for scope in &scopes {
         add(&token, *scope, &plan.lead, "lead");
     }
-    issued.push(Issued { label: format!("lead {}", plan.lead), pattern: plan.lead.clone(), token });
+    issued.push(Issued {
+        label: format!("lead {}", plan.lead),
+        name: "lead".to_string(),
+        pattern: plan.lead.clone(),
+        token,
+    });
     let token = next_token()?;
     add(&token, None, OBSERVER_ADDR, "observer");
     issued.push(Issued {
         label: format!("observer {OBSERVER_ADDR}"),
+        name: "observer".to_string(),
         pattern: OBSERVER_ADDR.to_string(),
         token,
     });
@@ -298,9 +308,56 @@ fn unit(home: &Path, exe: &Path, args: &[String]) -> Result<Unit, SetupError> {
     }
 }
 
+/// The join file for each issued token, in order. Names keep only
+/// `[A-Za-z0-9._-]`. Two tokens with one file name are an error.
+fn join_files(dir: &Path, issued: &[Issued]) -> Result<Vec<PathBuf>, SetupError> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for item in issued {
+        let stem: String = item
+            .name
+            .chars()
+            .map(
+                |c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' },
+            )
+            .collect();
+        let path = dir.join(format!("{stem}.join"));
+        if files.contains(&path) {
+            return Err(SetupError::Invalid(format!(
+                "two join strings map to {}; rename a host",
+                path.display()
+            )));
+        }
+        files.push(path);
+    }
+    Ok(files)
+}
+
+/// Create `dir` (mode 0700 on unix) and its missing parents.
+fn make_private_dir(dir: &Path) -> Result<(), SetupError> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    builder.create(dir).map_err(|source| SetupError::Fs {
+        verb: "create",
+        path: dir.to_path_buf(),
+        source,
+    })
+}
+
 /// Run `setup --broker`.
 pub fn run(args: &SetupArgs) -> Result<(), SetupError> {
+    run_with(args, std::io::stdout().is_terminal())
+}
+
+/// `run`, with the terminal check as a parameter so tests can set it.
+fn run_with(args: &SetupArgs, stdout_is_terminal: bool) -> Result<(), SetupError> {
     let plan = plan(args)?;
+    if args.join_dir.is_none() && !stdout_is_terminal {
+        return Err(SetupError::Invalid(
+            "stdout is not a terminal; pass --join-dir DIR so join strings go to files".to_string(),
+        ));
+    }
     let ip = resolve_bind(args.bind.as_deref(), tailscale_ipv4)?;
     let listen = SocketAddr::new(ip, args.port.unwrap_or(DEFAULT_PORT));
     let home = hook::install::home()?;
@@ -314,13 +371,33 @@ pub fn run(args: &SetupArgs) -> Result<(), SetupError> {
         return Err(SetupError::Exists(unit.path));
     }
     let (text, issued) = generate(&plan, random_token)?;
+    // Check every join file before the first write, so a refusal leaves nothing behind.
+    let files = match &args.join_dir {
+        Some(dir) => {
+            let files = join_files(dir, &issued)?;
+            if let Some(path) = files.iter().find(|path| path.exists()) {
+                return Err(SetupError::Exists(path.clone()));
+            }
+            make_private_dir(dir)?;
+            files
+        }
+        None => Vec::new(),
+    };
     write_file(&tokens_path, &text, 0o600, false)?;
     write_file(&unit.path, &unit.text, 0o644, false)?;
     eprintln!("chattrs: wrote {}", tokens_path.display());
     eprintln!("chattrs: wrote {}", unit.path.display());
-    println!("Treat these like passwords.");
-    for item in &issued {
-        println!("{}: {}", item.label, join::format(&item.token, listen, &item.pattern));
+    if files.is_empty() {
+        println!("Treat these like passwords.");
+        for item in &issued {
+            println!("{}: {}", item.label, join::format(&item.token, listen, &item.pattern));
+        }
+    } else {
+        for (item, path) in issued.iter().zip(&files) {
+            let line = format!("{}\n", join::format(&item.token, listen, &item.pattern));
+            write_file(path, &line, 0o600, false)?;
+            println!("{}: {}", item.label, path.display());
+        }
     }
     eprintln!("chattrs: to start the broker, run: {}", unit.shown);
     if args.enable {
@@ -434,6 +511,23 @@ mod tests {
         write_file(&path, "x", 0o600, false).unwrap();
         assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
         assert!(write_file(&path, "y", 0o600, false).is_err());
+    }
+
+    #[test]
+    fn join_files_refuse_collisions() {
+        let (_, issued) = generate(&plan(&args(&["lead"])).unwrap(), counter()).unwrap();
+        let err = join_files(Path::new("/d"), &issued).unwrap_err().to_string();
+        assert!(err.contains("/d/lead.join"), "{err}");
+        let (_, issued) = generate(&plan(&args(&["a", "b"])).unwrap(), counter()).unwrap();
+        let files = join_files(Path::new("/d"), &issued).unwrap();
+        assert_eq!(files[0], Path::new("/d/a.join"));
+        assert_eq!(files[3], Path::new("/d/observer.join"));
+    }
+
+    #[test]
+    fn refuses_without_terminal_or_join_dir_before_writing() {
+        let err = run_with(&args(&["a"]), false).unwrap_err().to_string();
+        assert!(err.contains("--join-dir"), "{err}");
     }
 
     #[test]

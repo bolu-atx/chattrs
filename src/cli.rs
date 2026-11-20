@@ -543,6 +543,10 @@ pub struct SetupArgs {
     #[arg(long, requires = "broker")]
     pub enable: bool,
 
+    /// Write each join string to `DIR/<name>.join` (mode 0600) and print only the paths.
+    #[arg(long, value_name = "DIR", requires = "broker")]
+    pub join_dir: Option<PathBuf>,
+
     /// Join string from a broker; repeatable. `-` reads one per line from stdin.
     #[arg(long, value_name = "STRING")]
     pub join: Vec<String>,

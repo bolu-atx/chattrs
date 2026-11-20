@@ -121,7 +121,8 @@ the solo path.
    `--hosts` lists the agent hosts. `--bind` is the tailnet or LAN IP. It
    defaults to the Tailscale IPv4. It never takes `0.0.0.0` or `::`.
    `--enable` starts the service. The command prints one join string for
-   each token.
+   each token. Add `--join-dir DIR` to write them to files instead. It
+   needs this flag when stdout is not a terminal.
 2. Copy each host's join string to that host, over a private channel. A
    join string holds a token. Treat it like a password. The broker never
    stores it.
@@ -162,7 +163,7 @@ Reference for steps 1 to 3 above.
 
 ```bash
 chattrs setup --broker --hosts <a,b> [--lead lead@mac] [--projects p1,p2] \
-  [--bind <ip>] [--port 4646] [--enable]
+  [--bind <ip>] [--port 4646] [--enable] [--join-dir DIR]
 ```
 
 It writes `~/.config/chattrs/tokens.toml` (mode 0600) and a systemd user unit
@@ -173,8 +174,23 @@ it. It issues one agent token per host (`*@<host>`), one lead token, and one
 observer token (`tray@*`). The tokens have no `project` line, so they work in
 every project. With `--projects`, it writes one entry per project instead,
 and each token stays inside those projects (the observer still sees all).
-Then it prints one join string for each, `chattrs://<token>@<ip>:<port>?as=<pattern>`. The pattern is
+Each token gets one join string, `chattrs://<token>@<ip>:<port>?as=<pattern>`. The pattern is
 percent-encoded.
+
+With `--join-dir DIR`, it writes each join string to its own file, `DIR/<host>.join`,
+`DIR/lead.join`, and `DIR/observer.join`. It creates `DIR` with mode 0700 and each file
+with mode 0600. It never overwrites a file, and it checks all of them before it writes
+anything. It prints one `<label>: <path>` line per file. It never prints a join string
+or a token. An agent can run this command and keep every token out of its transcript:
+
+```bash
+ssh H chattrs setup --join - < DIR/H.join
+```
+
+Without `--join-dir`, it prints the join strings on stdout. It does this only when
+stdout is a terminal. When stdout is not a terminal, it exits 1 before it writes
+anything and says `chattrs: stdout is not a terminal; pass --join-dir DIR so join
+strings go to files`.
 
 `setup --join` also takes a string as an argument. Quote it, but it then
 stays in shell history:
